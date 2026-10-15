@@ -53,7 +53,17 @@ After your change is pushed and the pull request is open:
 |---|---|
 | `manual` | Stop at the open PR. Tell the person it is ready, in one line. |
 | `ai-review` | Run the AI review (below) and post its verdict as a PR comment in plain English. Tell the person it is ready to merge. |
-| `auto-merge` / `autopilot` | Run the AI review. If it approves and the change touches no sensitive file (or passed the sensitive rule), turn on GitHub's auto-merge: `gh pr merge <n> --auto --squash` (use the repo's usual merge method). GitHub merges once the required tests pass, even if nobody is around. If auto-merge isn't enabled on the repo, wait for the tests and merge yourself. |
+| `auto-merge` / `autopilot` | Run the AI review. If it approves and the change touches no sensitive file (or passed the sensitive rule), merge it once its tests pass (see below). |
+
+**How to merge once tests pass.** Check whether the default branch has a rule requiring tests to pass
+(`gh api repos/{owner}/{repo}/branches/{branch}/protection --jq .required_status_checks.contexts`, or a ruleset
+with required status checks).
+- If it does, and the repo allows auto-merge, turn on GitHub's auto-merge: `gh pr merge <n> --auto --squash` (use
+  the repo's usual merge method). GitHub merges once those tests pass, even if nobody is around.
+- If it doesn't, never use `--auto`: with nothing required, GitHub merges immediately, before the tests finish.
+  Wait for every check to finish (`gh pr checks <n> --watch`), and merge yourself only if all of them passed. Say
+  in the summary that the repo has no rule requiring tests, so merges depend on a session staying open.
+- If any check failed, don't merge. Fix it or report it.
 
 **The AI review.** Use a different agent from the one that wrote the code, on the strongest model available
 (Opus), with the PR diff and the issue or request. It checks: does the change do what was asked, could it break
