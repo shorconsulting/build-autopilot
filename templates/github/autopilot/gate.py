@@ -917,12 +917,24 @@ def gate_results(gh, repo, sha, app_slug):
     {id, state (pending/success/failure/...), description, pushers}. A check run can only be created or changed by
     the app that owns it, and the required check is pinned to this app, so nobody else's writes count, crowd these
     out (commit statuses had a shared 1000-per-commit cap) or change them."""
-    query = "check_name=%s&filter=all&per_page=100" % urllib.parse.quote(STATUS_CONTEXT)
-    if gh.app_id:
-        query += "&app_id=%s" % gh.app_id
-    data = gh.get("/repos/%s/commits/%s/check-runs?%s" % (repo, sha, query)) or {}
+    if not gh.app_id:
+        # Without the app filter, anyone's same-named runs would be read (and could flood the reader).
+        raise RuntimeError("AUTOPILOT_APP_ID is not set; the gate can't tell its own check runs from others'")
+    query = "check_name=%s&filter=all&per_page=100&app_id=%s" % (urllib.parse.quote(STATUS_CONTEXT), gh.app_id)
+    # Every gate run adds one, so a commit can collect more than a page of them; read them all, so the newest one
+    # (by id) is always the one read and written. Too many to read means the caller fails closed.
+    runs, page = [], 1
+    while True:
+        data = gh.get("/repos/%s/commits/%s/check-runs?%s&page=%d" % (repo, sha, query, page)) or {}
+        batch = data.get("check_runs") or []
+        runs += batch
+        if not batch or len(runs) >= int(data.get("total_count") or 0):
+            break
+        page += 1
+        if page > MAX_CHECK_PAGES:
+            raise GateError("too many `%s` check runs on %s to read" % (STATUS_CONTEXT, sha[:7]))
     out = []
-    for r in data.get("check_runs", []):
+    for r in runs:
         if (r.get("app") or {}).get("slug") != app_slug or r.get("name") != STATUS_CONTEXT:
             continue
         out.append({"id": r["id"], "state": "pending" if r.get("status") != "completed" else (r.get("conclusion") or ""),
@@ -932,6 +944,7 @@ def gate_results(gh, repo, sha, app_slug):
 
 
 PUSHERS_RE = re.compile(r"@([A-Za-z0-9-]+(?:\[bot\])?)")
+MAX_CHECK_PAGES = 50   # 5000 runs of the gate on one commit
 
 
 def write_result(gh, repo, sha, state, description, target_url, summary="", new=False, pushers=()):
@@ -965,11 +978,19 @@ CONVERT_TO_DRAFT = """mutation($id: ID!) {
 
 
 def write_blocking_result(gh, repo, pr, state, description, target_url, summary=""):
-    """Write a non-green result. If GitHub refuses the write, block the merge another way as well (auto-merge off,
-    the pull request back to draft) and fail the job loudly. Belt and braces: the check run is updated in place and
-    only this app can write it, so this should not happen."""
+    """Write a non-green result. If GitHub refuses to update the newest run (for example it won't change a completed
+    run's conclusion), start a new run with this result: the newest run is the one that counts. If that is refused
+    too, block the merge another way as well (auto-merge off, the pull request back to draft) and fail the job
+    loudly."""
     try:
         write_result(gh, repo, pr.head_sha, state, description, target_url, summary)
+        return
+    except GateError as e:
+        first = e
+    try:
+        write_result(gh, repo, pr.head_sha, state, description, target_url, summary, new=True)
+        print("Updating the check run was refused (%s); started a new %s run instead." % (first, state))
+        return
     except GateError as e:
         for step in (lambda: disable_automerge(gh, pr), lambda: gh.graphql(CONVERT_TO_DRAFT, {"id": pr.node_id})):
             try:
@@ -1356,9 +1377,10 @@ def write_summary(lines):
 
 
 def cmd_mark(checkout, event, gh, app_slug, run_url):
-    """First job of every pull request run. Open: mark the head commit 'pending' at once, so an earlier result for
-    the same commit can't be used while (or if) this run's review doesn't finish. Closed without merging: mark it
-    'failure', so a rejected commit can't be reused in a new pull request on its old approval."""
+    """First job of every pull request run, drafts included. Open: mark the head commit 'pending' at once, so an
+    earlier result for the same commit can't be used while (or if) this run's review doesn't finish, and record who
+    pushed. Closed without merging: mark it 'failure', so a rejected commit can't be reused in a new pull request on
+    its old approval."""
     repo = event["repository"]["full_name"]
     p = event["pull_request"]
     if load_policy(checkout, repo) is None or p["base"]["ref"] != event["repository"]["default_branch"]:
@@ -1370,7 +1392,11 @@ def cmd_mark(checkout, event, gh, app_slug, run_url):
     if event.get("action") == "closed":
         if p.get("merged"):
             return "merged"
-        write_result(gh, repo, sha, "failure", "Closed without merging; this commit needs a new review.", run_url)
+        why = "Closed without merging; this commit needs a new review."
+        try:
+            write_result(gh, repo, sha, "failure", why, run_url)
+        except GateError:  # GitHub wouldn't change the newest run: a new failing one counts instead
+            write_result(gh, repo, sha, "failure", why, run_url, new=True)
         return "closed"
     if person_ok:
         return "kept a person's approval"
@@ -1383,7 +1409,16 @@ def cmd_mark(checkout, event, gh, app_slug, run_url):
         except GateError:
             before = []
         pushers |= before[0]["pushers"] if before else set()
-    if event.get("action") in ("opened", "reopened", "synchronize") and (event.get("sender") or {}).get("login"):
+    if event.get("action") == "ready_for_review":
+        # Draft pushes are recorded on their own commits (mark runs for draft pushes too); gather them all here.
+        for c in gh.paged("/repos/%s/pulls/%d/commits" % (repo, p["number"]), cap=250):
+            try:
+                runs = gate_results(gh, repo, c.get("sha", ""), app_slug)
+            except GateError:
+                runs = []
+            pushers |= runs[0]["pushers"] if runs else set()
+    if event.get("action") in ("opened", "reopened", "synchronize", "ready_for_review") and \
+            (event.get("sender") or {}).get("login"):
         pushers.add(event["sender"]["login"])
     try:
         write_result(gh, repo, sha, "pending", "Build Autopilot is reviewing this commit.", run_url, new=True,
@@ -1603,6 +1638,10 @@ def main(argv=None):
             set_output("result", base64.b64encode(json.dumps(result).encode()).decode())
             print("Reviews: %s" % {k: v.get("verdict", v.get("error")) for k, v in result["reviews"].items()})
             return 0
+        if not env("AUTOPILOT_APP_ID") or not env("AUTOPILOT_APP_SLUG"):
+            print("::error::AUTOPILOT_APP_ID and AUTOPILOT_APP_SLUG must be set (see docs/v2-install.md); "
+                  "refusing to run without them.")
+            return 1
         gh = GitHub(env("AUTOPILOT_TOKEN"), env("GITHUB_API_URL", "https://api.github.com"),
                     env("AUTOPILOT_APP_ID"), env("AUTOPILOT_APP_SLUG"))
         if args.command == "mark":

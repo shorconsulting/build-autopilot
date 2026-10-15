@@ -102,8 +102,9 @@ Without this ruleset the gate still reviews and comments, but it will not turn o
 and says what is missing in its comment). With level `manual` or `ai-review`, skip this step.
 
 The ruleset requires a pull request, the gate's check run `autopilot/gate` **from the app** (`integration_id` = the
-App ID; a check run can only be created or updated by the app that owns it, so no other app or workflow can satisfy
-or overwrite it), and the repo's test checks. List every test job a change must pass; those are the names shown on a pull request's checks. For
+App ID), and the repo's test checks. Other apps and workflows *can* create a check run named `autopilot/gate` on any
+commit; it is the ruleset's `integration_id` pin that makes theirs not count. None of them can change the app's own
+run: a check run can only be updated by the app that created it. List every test job a change must pass; those are the names shown on a pull request's checks. For
 Velocity-Org/chasing-shade they are `API · unit + integration + CRM + platform` and `3D-asset-tools · pytest`, from
 GitHub Actions (integration 15368).
 

@@ -104,6 +104,8 @@ class FakeGitHub(gate.GitHub):
         self.events, self.comment_editors = [], [APP_SLUG]
         self.command_comments = {}      # id -> comment, for GET /issues/comments/{id}
         self.check_writes_fail = False  # GitHub refusing check run writes (outage), for the belt-and-braces path
+        self.check_patch_fails = False  # GitHub refusing to change an existing (completed) run
+        self.pr_commits = None          # shas of the pull request's commits (default: just the head)
         self.next_check_id = 1
         self.pull_reads, self.hold_after_reads = 0, None
         self.clock = 0
@@ -162,10 +164,13 @@ class FakeGitHub(gate.GitHub):
             runs = [r for r in self.checks.get(bare.split("/")[5], [])
                     if r["name"] in query.get("check_name", [r["name"]]) and
                     str(r["app"]["id"]) in query.get("app_id", [str(r["app"]["id"])])]
-            return 200, {"total_count": len(runs), "check_runs": copy.deepcopy(runs[:100])}, {}
+            runs.sort(key=lambda r: r["id"])     # oldest first: the newest is on the last page
+            size, page = int(query.get("per_page", ["30"])[0]), int(query.get("page", ["1"])[0])
+            return 200, {"total_count": len(runs),
+                         "check_runs": copy.deepcopy(runs[(page - 1) * size:page * size])}, {}
         if method in ("POST", "PATCH") and bare.startswith("/repos/%s/check-runs" % REPO):
-            if self.check_writes_fail:
-                return 502, {"message": "Server Error"}, {}
+            if self.check_writes_fail or (method == "PATCH" and self.check_patch_fails):
+                return 422, {"message": "Validation Failed"}, {}
             if method == "POST":
                 run = {"id": self.next_check_id, "app": {"id": int(APP_ID), "slug": APP_SLUG}, "output": {}}
                 self.next_check_id += 1
@@ -214,8 +219,9 @@ class FakeGitHub(gate.GitHub):
                 self.pull["auto_merge"] = None
             return 200, {"data": {}}, {}
         if method == "GET" and bare == "/repos/%s/pulls/%d/commits" % (REPO, n):
-            return 200, [{"sha": self.pull["head"]["sha"], "author": {"login": a}, "committer": {"login": a}}
-                         for a in self.commit_authors], {}
+            shas = self.pr_commits or [self.pull["head"]["sha"]] * len(self.commit_authors)
+            return 200, [{"sha": sha, "author": {"login": a}, "committer": {"login": a}}
+                         for sha, a in zip(shas, self.commit_authors * len(shas))], {}
         if method == "DELETE" and bare.startswith("/repos/%s/issues/%d/labels/" % (REPO, n)):
             name = urllib.parse.unquote(bare.rsplit("/", 1)[1])
             self.pull["labels"] = [x for x in self.pull.get("labels", []) if x["name"] != name]

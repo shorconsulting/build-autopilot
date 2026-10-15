@@ -39,10 +39,11 @@ permissions: {}
 jobs:
   mark:
     name: autopilot mark
-    # Runs for closed drafts too: closing unmerged must always mark the commit.
+    # Runs for drafts on close and on push too: closing unmerged must always mark the commit, and every push's sender
+    # is recorded (a later ready_for_review gathers them).
     if: >-
       github.event_name == 'pull_request_target' &&
-      (github.event.action == 'closed' || !github.event.pull_request.draft) &&
+      (contains(fromJSON('["closed", "synchronize"]'), github.event.action) || !github.event.pull_request.draft) &&
       (github.event.action != 'edited' || github.event.changes.base) &&
       (!contains(fromJSON('["labeled", "unlabeled"]'), github.event.action) ||
        github.event.label.name == 'autopilot-hold')

@@ -42,7 +42,7 @@ Three comment commands on a pull request:
 | Pinned Claude SDK | `templates/github/autopilot/requirements.txt` |
 | Duplicate-test skip | `templates/github/autopilot/skip_duplicate_main.py` |
 | Install steps for `/autopilot apply` | `docs/v2-install.md` |
-| Tests (64) | `scripts/test_gate.py` |
+| Tests (71) | `scripts/test_gate.py` |
 | Dry run, one scenario per rule, incl. what each reports under "Decided without you" | `scripts/gate_dryrun.py` (last output: `out/gate-dryrun.txt`) |
 | Draft for chasing-shade's test.yml (not applied) | `drafts/chasing-shade/test.yml`, `test.yml.patch` |
 
@@ -132,7 +132,8 @@ injection in issues, web pages or code they read; anyone with push access; outsi
    also edit the ruleset itself. The self-approval guard is part of the same residual risk: commit author and
    committer fields are whatever the pusher writes, so the guard relies mainly on who opened the PR and who pushed
    (recorded by the app); an agent pushing as a separate identity and asking David to approve is exactly the flow it
-   allows.
+   allows. Pushes made before the pull request was opened (to its branch, while no PR existed) aren't recorded at
+   all; only the sender of the event that opens it is.
 4. **Ruleset bypass list:** recommended empty. Adding admins makes merging around the gate one checkbox away, for
    people and for sessions using their login.
 5. **Pull requests into other branches** (chasing-shade's `portal-default`): today advice only (comment, no status, no
@@ -203,6 +204,16 @@ All round-4 fixes have a test or dry-run scenario.
 | (medium) Status flooding still defeated a hold: with the 1000 status slots full, a stop couldn't post red, the draft conversion could be undone with `gh pr ready` and the frozen green merged; closing and reopening worked the same way | The gate's result is now a **check run** owned by the app: mark creates one per gate run (pending), and decide, stop, approve and close update it in place. Only the app can write it, there is no shared cap, and the ruleset pins it by app ID. The pusher record moved into the same check run (carried across pushes via the previous head). The draft conversion stays as belt and braces for a refused write |
 | (low) The paid-review skip treated a failed permission lookup as "can't lift a hold" | A failed lookup now runs the review; the review job keeps its read-only token |
 | (cosmetic) A `#` line in a quoted summary rendered as a heading; file names in reasons showed escaped twice | Leading `#` neutralised in quotes; escaping skips inline code spans |
+
+**Round 6** (three lows and a wording fix):
+
+| Finding | Fix |
+|---|---|
+| If GitHub won't change a completed run's conclusion, a stop or hold couldn't turn a green run red | A refused update starts a new failing `autopilot/gate` run (the newest run is the one that counts), keeping the pusher record; only if that is refused too does the PR go back to draft. Closing unmerged uses the same fallback |
+| Pushes made while the PR was a draft weren't recorded | The mark job runs for draft pushes too; on `ready_for_review` it gathers the pushers recorded on every commit of the PR, plus the sender. Pushes made before the PR was opened stay unrecorded (decision 3) |
+| The gate read only the first page (100) of its check runs on a commit, so after many label toggles it could read and write an old one | All pages are read and the newest run (highest id) is used; more than 5000 runs on one commit fails closed |
+| v2-install.md said other apps couldn't create a run named `autopilot/gate` | Reworded: they can; the ruleset's `integration_id` pin makes theirs not count, and only the app can update its own run |
+| (Delta check) With `AUTOPILOT_APP_ID` unset, the check-run query dropped its app filter, so anyone's same-named runs could flood it and a hold fell back to an undoable draft | The gate refuses to run (mark, decide and the commands) without the App ID and slug, and the reader refuses an unfiltered query |
 
 To verify live (step 5 of v2-install.md): that a completed check run's conclusion can be changed by PATCH (stop
 turning a green run red relies on it, as GitHub documents) and that the ruleset ignores same-named check runs from

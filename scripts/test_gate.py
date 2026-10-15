@@ -222,6 +222,92 @@ class Round4(unittest.TestCase):
         self.assertFalse(gate.unsafe_name("src/caf\u00e9.ts"))
 
 
+class Round6(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.checkout, self.head = h.make_repo(self._tmp.name, h.POLICY, {"src/app.ts": "x\n"})
+        self.pull = dict(h.make_event(self.head)["pull_request"], state="open", merged=False)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_refused_update_starts_a_new_failing_run(self):
+        gh = h.FakeGitHub(self.pull)
+        gh.set_result(self.head, "success", "AI review approved.", pushers=("alice",))
+        gh.check_patch_fails = True        # GitHub won't change the completed green run
+        pr = gate.live_pull_request(gh, h.REPO, 7, "main")
+        gate.write_blocking_result(gh, h.REPO, pr, "failure", "On hold: a person decides.", h.RUN_URL)
+        newest = gh.results(self.head)[0]
+        self.assertEqual((newest["state"], newest["pushers"]), ("failure", {"alice"}))
+        self.assertFalse(gh.pull.get("draft"))   # the new red run is enough; no draft needed
+
+    def test_stop_turns_red_when_the_green_run_cant_be_changed(self):
+        gh = h.FakeGitHub(self.pull)
+        gh.set_result(self.head, "success", "AI review approved.")
+        gh.check_patch_fails = True
+        ev = {"repository": {"full_name": h.REPO, "default_branch": "main"},
+              "issue": {"number": 7, "pull_request": {"url": "x"}}, "comment": gh.command("/autopilot stop", "builder")}
+        self.assertEqual(gate.cmd_approve(self.checkout, ev, gh, h.APP_SLUG, h.RUN_URL), "held by builder")
+        self.assertEqual(gh.status_for(self.head), "failure")
+
+    def test_missing_app_id_is_refused(self):
+        gh = h.FakeGitHub(self.pull)
+        gh.app_id = ""                             # without the filter, anyone's same-named runs would be read
+        with self.assertRaises(RuntimeError):
+            gate.gate_results(gh, h.REPO, self.head, h.APP_SLUG)
+        import os
+        from unittest import mock
+        with mock.patch.dict(os.environ, {"AUTOPILOT_APP_ID": "", "AUTOPILOT_APP_SLUG": ""}), \
+                mock.patch.object(gate, "load_event", return_value={}), mock.patch.object(sys, "argv", ["gate", "mark"]):
+            self.assertEqual(gate.main(["mark"]), 1)
+
+    def test_newest_run_is_read_and_written_beyond_one_page(self):
+        gh = h.FakeGitHub(self.pull)
+        for k in range(250):                       # label toggles: one run per gate run
+            gh.set_result(self.head, "failure" if k < 249 else "success", "run %d" % k)
+        self.assertEqual(gh.results(self.head)[0]["description"], "run 249")
+        gate.write_result(gh, h.REPO, self.head, "failure", "On hold: a person decides.", h.RUN_URL)
+        self.assertEqual(len(gh.results(self.head)), 250)         # updated in place, no new run
+        self.assertEqual(gh.status_for(self.head), "failure")
+
+    def test_too_many_runs_fails_closed(self):
+        gh = h.FakeGitHub(self.pull)
+        old = gate.MAX_CHECK_PAGES
+        gate.MAX_CHECK_PAGES = 2
+        try:
+            for k in range(250):
+                gh.set_result(self.head, "success", "run %d" % k)
+            with self.assertRaises(gate.GateError):
+                gh.results(self.head)
+        finally:
+            gate.MAX_CHECK_PAGES = old
+
+    def test_draft_pushes_are_recorded_and_gathered_when_ready(self):
+        gh = h.FakeGitHub(self.pull)
+        draft_sha, head = "d" * 40, self.head
+        draft_push = h.make_event(draft_sha)
+        draft_push["pull_request"].update(draft=True)
+        draft_push.update(sender={"login": "carol", "type": "User"})
+        self.assertEqual(gate.cmd_mark(self.checkout, draft_push, gh, h.APP_SLUG, h.RUN_URL), "pending")
+        gh.pr_commits, gh.commit_authors = [draft_sha, head], ["builder"]
+        ready = dict(h.make_event(head), action="ready_for_review", sender={"login": "dave", "type": "User"})
+        gate.cmd_mark(self.checkout, ready, gh, h.APP_SLUG, h.RUN_URL)
+        self.assertEqual(gh.results(head)[0]["pushers"], {"carol", "dave"})
+
+    def test_mark_runs_for_draft_pushes(self):
+        wf = (ROOT / "templates" / "github" / "workflows" / "autopilot.yml").read_text()
+        self.assertIn("""contains(fromJSON('["closed", "synchronize"]'), github.event.action) ||""", wf)
+
+    def test_closed_turns_red_when_the_green_run_cant_be_changed(self):
+        gh = h.FakeGitHub(self.pull)
+        gh.set_result(self.head, "success", "AI review approved.")
+        gh.check_patch_fails = True
+        closed = dict(h.make_event(self.head), action="closed")
+        closed["pull_request"] = dict(closed["pull_request"], merged=False)
+        self.assertEqual(gate.cmd_mark(self.checkout, closed, gh, h.APP_SLUG, h.RUN_URL), "closed")
+        self.assertEqual(gh.status_for(self.head), "failure")
+
+
 class Patterns(unittest.TestCase):
     CASES = [
         ("**/auth/**", "src/auth/session.ts", True),
