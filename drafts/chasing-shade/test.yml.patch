@@ -1,0 +1,57 @@
+--- a/.github/workflows/test.yml
++++ b/.github/workflows/test.yml
+@@ -1,4 +1,9 @@
+ name: test
++# tests.skip_duplicate_main: a pull request run's title records the commit GitHub actually tested (the PR merged
++# into its base); after a merge, the push run on main skips only when that commit has exactly the merged files.
++run-name: >-
++  ${{ github.event_name == 'pull_request' && format('[tested {0}] {1}', github.sha, github.event.pull_request.title)
++  || github.event.head_commit.message || github.workflow }}
+ 
+ permissions:
+   contents: read
+@@ -17,8 +22,35 @@
+   cancel-in-progress: true
+ 
+ jobs:
++  # tests.skip_duplicate_main (Build Autopilot): on a push to main, skip the suites below when the merged pull
++  # request already passed this workflow on identical code. Only on push; pull requests always run everything.
++  # Any doubt or error means the tests run; a skip is always reported (run summary + a comment on the PR).
++  # Needs .github/autopilot/ from the Build Autopilot gate install.
++  dedupe:
++    name: Skip duplicate main run?
++    if: github.event_name == 'push'
++    runs-on: ubuntu-latest
++    timeout-minutes: 5
++    permissions:
++      contents: read
++      pull-requests: write   # to note "Decided without you" on the merged pull request when it skips
++      actions: read
++    outputs:
++      skip: ${{ steps.check.outputs.skip }}
++    steps:
++      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
++        with:
++          persist-credentials: false
++          sparse-checkout: .github
++      - id: check
++        env:
++          GITHUB_TOKEN: ${{ github.token }}
++        run: python3 .github/autopilot/skip_duplicate_main.py test.yml
++
+   api:
+     name: API · unit + integration + CRM + platform
++    needs: dedupe
++    if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' }}
+     runs-on: ubuntu-latest
+     timeout-minutes: 25
+     services:
+@@ -76,6 +108,8 @@
+ 
+   python:
+     name: 3D-asset-tools · pytest
++    needs: dedupe
++    if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' }}
+     runs-on: ubuntu-latest
+     timeout-minutes: 15
+     steps:

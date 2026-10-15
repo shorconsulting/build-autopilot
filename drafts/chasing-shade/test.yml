@@ -1,0 +1,134 @@
+name: test
+# tests.skip_duplicate_main: a pull request run's title records the commit GitHub actually tested (the PR merged
+# into its base); after a merge, the push run on main skips only when that commit has exactly the merged files.
+run-name: >-
+  ${{ github.event_name == 'pull_request' && format('[tested {0}] {1}', github.sha, github.event.pull_request.title)
+  || github.event.head_commit.message || github.workflow }}
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main, portal-default]
+  push:
+    branches: [main, portal-default]
+
+# Cancel an in-progress run if a new commit lands on the same ref —
+# saves CI minutes on rapid pushes.
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # tests.skip_duplicate_main (Build Autopilot): on a push to main, skip the suites below when the merged pull
+  # request already passed this workflow on identical code. Only on push; pull requests always run everything.
+  # Any doubt or error means the tests run; a skip is always reported (run summary + a comment on the PR).
+  # Needs .github/autopilot/ from the Build Autopilot gate install.
+  dedupe:
+    name: Skip duplicate main run?
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write   # to note "Decided without you" on the merged pull request when it skips
+      actions: read
+    outputs:
+      skip: ${{ steps.check.outputs.skip }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          sparse-checkout: .github
+      - id: check
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 .github/autopilot/skip_duplicate_main.py test.yml
+
+  api:
+    name: API · unit + integration + CRM + platform
+    needs: dedupe
+    if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: chasing_shade_dev
+          POSTGRES_PASSWORD: ci_test_password
+          POSTGRES_DB: chasing_shade_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U chasing_shade_dev"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://chasing_shade_dev:ci_test_password@localhost:5432/chasing_shade_test
+      DATABASE_URL_TEST: postgres://chasing_shade_dev:ci_test_password@localhost:5432/chasing_shade_test
+      API_KEYS: ci-test-key
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: src/package-lock.json
+      - name: Install API deps
+        working-directory: src
+        run: npm ci
+      - name: Type-check
+        working-directory: src
+        run: npx tsc -p tsconfig.json --noEmit
+      - name: Migrate test DB
+        working-directory: src
+        run: npm run migrate
+      - name: Unit tests
+        working-directory: src
+        run: npm run test:unit
+      - name: Integration tests
+        working-directory: src
+        run: npm run test:integration
+      # PLAT-OPS-4 (completeness pass 2): the CRM and partner-platform suites run
+      # in CI too. Each test file starts its own in-process PGlite Postgres, so they
+      # need no service; weather, Anthropic, Google and webhook receivers are faked
+      # or local (127.0.0.1), and nothing reaches the network.
+      - name: CRM tests
+        working-directory: src
+        run: npm run test:crm
+      - name: Partner platform tests
+        working-directory: src
+        run: npm run test:platform
+
+  python:
+    name: 3D-asset-tools · pytest
+    needs: dedupe
+    if: ${{ !cancelled() && needs.dedupe.outputs.skip != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12"
+      - name: Install pytest
+        run: pip install "pytest==9.0.*"
+      - name: Run pytest
+        working-directory: scripts/3d-asset-tools
+        run: python -m pytest tests/ -v
+
+  # E2E Playwright is gated separately via Sling's `/qa` comment-trigger
+  # (issue #80). Heavy enough that we don't run it on every push — only
+  # when the engineer explicitly asks Sling to verify a PR.
+  #
+  # HTTP smoke (npm run smoke) needs the live dev URL + a real X-API-Key
+  # secret; runs as a separate workflow keyed off a manual dispatch or
+  # post-deploy event. Not on every PR to keep the dev DB clean.
