@@ -55,7 +55,14 @@ After your change is pushed and the pull request is open:
 | `ai-review` | Run the AI review (below) and post its verdict as a PR comment in plain English. Tell the person it is ready to merge. |
 | `auto-merge` / `autopilot` | Run the AI review. If it approves and the change touches no sensitive file (or passed the sensitive rule), merge it once its tests pass (see below). |
 
-**How to merge once tests pass.** Check whether the default branch has a rule requiring tests to pass
+**When the repo has the GitHub gate** (`.github/workflows/autopilot.yml` on the default branch): don't run your
+own AI review, don't merge, and don't turn on auto-merge. The gate reviews every pull request, posts its verdict
+and turns on auto-merge itself when the settings allow. Open the pull request, wait for the gate's comment, and
+report its verdict. If it says "Changes needed", fix and push; if "Needs a person", tell the person in one line.
+Never post `/autopilot approve`, `/autopilot resume` or remove the `autopilot-hold` label: those are a person's
+decisions, even when your login could do it.
+
+**How to merge once tests pass** (repos without the gate). Check whether the default branch has a rule requiring tests to pass
 (`gh api repos/{owner}/{repo}/branches/{branch}/protection --jq .required_status_checks.contexts`, or a ruleset
 with required status checks).
 - If it does, and the repo allows auto-merge, turn on GitHub's auto-merge: `gh pr merge <n> --auto --squash` (use
