@@ -17,7 +17,7 @@ Rules (docs/policy.md is the spec):
   - Nothing from the pull request is executed. Its code, title, description and file names are data for the reviewer.
 
 Job 1 needs ANTHROPIC_API_KEY and the pinned `anthropic` package. Jobs 2 and 3 use only the standard library and hold
-the Build Autopilot GitHub App token, the one identity that may set the required `autopilot/gate` status.
+the Build Autopilot GitHub App token, the one identity that may write the required `autopilot/gate` check run.
 """
 import argparse
 import base64
@@ -754,7 +754,7 @@ def decide(policy, pr, cls, reviews, setup):
                                                "Needs a person: read the review, then /autopilot approve.")
 
     if not on_default:
-        # Statuses belong to a commit, not a pull request; only results for the default branch are posted, so an
+        # Check runs belong to a commit, not a pull request; only results for the default branch are posted, so an
         # approval for some other base can never satisfy the default branch's rules.
         d.status, d.description = "", ""
         d.notes.append("This pull request targets %s, not %s; the review is advice only and nothing merges "
@@ -776,8 +776,9 @@ def decide(policy, pr, cls, reviews, setup):
 # ---------------------------------------------------------------- GitHub (stdlib HTTP; jobs 2 and 3)
 
 class GitHub:
-    def __init__(self, token, api="https://api.github.com"):
+    def __init__(self, token, api="https://api.github.com", app_id="", app_slug=None):
         self.token, self.api = token, api.rstrip("/")
+        self.app_id, self.app_slug = app_id, app_slug   # the Build Autopilot app this token belongs to
 
     def request(self, method, path, body=None, accept="application/vnd.github+json"):
         url = path if path.startswith("http") else self.api + path
@@ -911,16 +912,51 @@ def check_setup(gh, repo, branch, app_id):
     return Setup(not problems, problems)
 
 
-def our_statuses(gh, repo, sha, app_slug):
-    """Our app's `autopilot/gate` statuses for a commit, newest first. Statuses from anyone else are ignored."""
-    me = "%s[bot]" % app_slug
-    return [s for s in gh.paged("/repos/%s/commits/%s/statuses" % (repo, sha), cap=300)
-            if s.get("context") == STATUS_CONTEXT and (s.get("creator") or {}).get("login") == me]
+def gate_results(gh, repo, sha, app_slug):
+    """The gate's result for a commit: the app's own `autopilot/gate` check runs on it, newest first, each as
+    {id, state (pending/success/failure/...), description, pushers}. A check run can only be created or changed by
+    the app that owns it, and the required check is pinned to this app, so nobody else's writes count, crowd these
+    out (commit statuses had a shared 1000-per-commit cap) or change them."""
+    query = "check_name=%s&filter=all&per_page=100" % urllib.parse.quote(STATUS_CONTEXT)
+    if gh.app_id:
+        query += "&app_id=%s" % gh.app_id
+    data = gh.get("/repos/%s/commits/%s/check-runs?%s" % (repo, sha, query)) or {}
+    out = []
+    for r in data.get("check_runs", []):
+        if (r.get("app") or {}).get("slug") != app_slug or r.get("name") != STATUS_CONTEXT:
+            continue
+        out.append({"id": r["id"], "state": "pending" if r.get("status") != "completed" else (r.get("conclusion") or ""),
+                    "description": (r.get("output") or {}).get("title") or "",
+                    "pushers": set(PUSHERS_RE.findall((r.get("output") or {}).get("text") or ""))})
+    return sorted(out, key=lambda r: r["id"], reverse=True)
 
 
-def post_status(gh, repo, sha, state, description, target_url):
-    gh.send("POST", "/repos/%s/statuses/%s" % (repo, sha), {
-        "state": state, "context": STATUS_CONTEXT, "description": description[:140], "target_url": target_url})
+PUSHERS_RE = re.compile(r"@([A-Za-z0-9-]+(?:\[bot\])?)")
+
+
+def write_result(gh, repo, sha, state, description, target_url, summary="", new=False, pushers=()):
+    """Write the gate's result for a commit: update the app's newest `autopilot/gate` check run in place, or create
+    one (`new`: every gate run starts a fresh 'pending' one). The run also carries who pushed the pull request's
+    commits ("Pushed by: ..."), which only the app can write; that list is kept on every update."""
+    if not gh.app_slug:
+        raise GateError("the app's slug is unknown, so its check run can't be found")
+    mine = gate_results(gh, repo, sha, gh.app_slug)
+    keep = set(pushers) | (mine[0]["pushers"] if mine else set())
+    output = {"title": description[:200], "summary": (summary or description)[:60000]}
+    if keep:
+        output["text"] = "Pushed by: " + ", ".join("@" + p for p in sorted(keep))
+    body = {"name": STATUS_CONTEXT, "output": output}
+    if target_url:
+        body["details_url"] = target_url
+    if state == "pending":
+        body["status"] = "in_progress"
+    else:
+        body.update(status="completed", conclusion=state)
+    if mine and not new:
+        gh.send("PATCH", "/repos/%s/check-runs/%d" % (repo, mine[0]["id"]), body)
+    else:
+        body["head_sha"] = sha
+        gh.send("POST", "/repos/%s/check-runs" % repo, body)
 
 
 CONVERT_TO_DRAFT = """mutation($id: ID!) {
@@ -928,12 +964,12 @@ CONVERT_TO_DRAFT = """mutation($id: ID!) {
 }"""
 
 
-def post_blocking_status(gh, repo, pr, state, description, target_url):
-    """Post a non-green result. GitHub keeps at most 1000 statuses per commit and context, so someone can fill the
-    slots and freeze an earlier green one. If the post fails, block the merge another way (auto-merge off, the pull
-    request back to draft, which can't be merged) and fail the job loudly."""
+def write_blocking_result(gh, repo, pr, state, description, target_url, summary=""):
+    """Write a non-green result. If GitHub refuses the write, block the merge another way as well (auto-merge off,
+    the pull request back to draft) and fail the job loudly. Belt and braces: the check run is updated in place and
+    only this app can write it, so this should not happen."""
     try:
-        post_status(gh, repo, pr.head_sha, state, description, target_url)
+        write_result(gh, repo, pr.head_sha, state, description, target_url, summary)
     except GateError as e:
         for step in (lambda: disable_automerge(gh, pr), lambda: gh.graphql(CONVERT_TO_DRAFT, {"id": pr.node_id})):
             try:
@@ -1004,17 +1040,19 @@ HEADINGS = {
 
 
 def clean(text, limit=MAX_TEXT, multiline=False):
-    """Reviewer text is shown, never trusted: no @-mentions, no HTML comments (so nothing can fake our marker), and
-    by default one line, so it can't add headings or a fake "Decided without you" section. Multi-line text is
-    rendered as a quote, for the same reason."""
-    text = str(text)[:limit]
-    # No HTML (tags, comments, entities), no Markdown links or images, no bare links GitHub would make clickable.
-    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    text = text.replace("[", "\\[").replace("]", "\\]").replace("://", ":\u200b//").replace("www.", "www\u200b.")
-    text = re.sub(r"@(?=[A-Za-z0-9_-])", "@\u200b", text)
-    text = "".join(c if c == "\n" or ord(c) >= 32 else " " for c in text)
+    """Reviewer text is shown, never trusted: no HTML (tags, comments, entities), no Markdown links or images, no
+    bare links, no @-mentions, no headings, and by default one line, so it can't add sections or a fake "Decided
+    without you". Multi-line text is rendered as a quote. Inline `code` spans (our escaped file names) are left as
+    they are: GitHub shows them literally, so escaping inside them would only add backslashes."""
+    text = "".join(c if c == "\n" or ord(c) >= 32 else " " for c in str(text)[:limit])
+    parts = re.split(r"(`[^`\n]*`)", text)
+    for k in range(0, len(parts), 2):   # even parts are outside code spans
+        t = parts[k].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        t = t.replace("[", "\\[").replace("]", "\\]").replace("://", ":\u200b//").replace("www.", "www\u200b.")
+        parts[k] = re.sub(r"@(?=[A-Za-z0-9_-])", "@\u200b", t)
+    text = "".join(parts)
     if multiline:
-        return "\n".join("> " + ln for ln in text.splitlines() or [""])
+        return "\n".join("> " + re.sub(r"^(\s*)#", r"\1\\#", ln) for ln in text.splitlines() or [""])
     return " ".join(text.split())
 
 
@@ -1137,7 +1175,11 @@ def removal_will_be_undone(event, repo, read_gh):
         return False
     if sender.get("type") != "User" or read_gh is None:
         return False
-    return permission_of(read_gh, repo, sender) not in ("admin", "maintain")
+    try:  # the review job's token is read-only; if it can't tell, run the review rather than skip a real lift
+        perm = read_gh.get("/repos/%s/collaborators/%s/permission" % (repo, urllib.parse.quote(sender.get("login", ""))))
+    except GateError:
+        return False
+    return (perm.get("role_name") or perm.get("permission") or "") not in ("admin", "maintain")
 
 
 def read_handover(text, head_sha, digest):
@@ -1228,16 +1270,18 @@ def cmd_decide(checkout, event, gh, handover_text, app_id, app_slug, run_url, mo
 
     human_kept = False
     if d.status:
-        mine = our_statuses(gh, repo, pr.head_sha, app_slug)
+        mine = gate_results(gh, repo, pr.head_sha, app_slug)
         human_kept = bool(mine) and mine[0]["state"] == "success" and not pr.held and \
             (mine[0].get("description") or "").startswith(APPROVED_BY_PERSON)
         if d.status == "success" and pr.base_ref == default_branch and held_now():
             raise Stale("a hold arrived while this run worked; the run it started decides")
         if not human_kept:
+            # The full review goes into the check run's details too: only the app can write there.
+            summary = render_comment(d, policy, pr, reviews, model)
             if d.status == "success":
-                post_status(gh, repo, pr.head_sha, d.status, d.description, run_url)
+                write_result(gh, repo, pr.head_sha, d.status, d.description, run_url, summary)
             else:
-                post_blocking_status(gh, repo, pr, d.status, d.description, run_url)
+                write_blocking_result(gh, repo, pr, d.status, d.description, run_url, summary)
 
     merge_note = ""
     if d.automerge == "enable" and not human_kept:
@@ -1251,7 +1295,7 @@ def cmd_decide(checkout, event, gh, handover_text, app_id, app_slug, run_url, mo
                 % pr.number
             if key == "auto-merge-on" and held_now():
                 disable_automerge(gh, pr)
-                post_blocking_status(gh, repo, pr, "failure", "On hold: a person decides.", run_url)
+                write_blocking_result(gh, repo, pr, "failure", "On hold: a person decides.", run_url)
                 raise Stale("a hold arrived while auto-merge was being turned on; it was turned off again")
             if key == "merged-now":
                 d.add(key, "Merged now (%s merge)" % method.lower(),
@@ -1277,7 +1321,7 @@ def cmd_decide(checkout, event, gh, handover_text, app_id, app_slug, run_url, mo
         write_summary(render_decided(d.decided))
         return d
     body = render_comment(d, policy, pr, reviews, model, merge_note, human_kept)
-    write_summary([body])  # the copy nobody can edit; the status's Details link points here
+    write_summary([body])  # a copy nobody can edit (the check run's Details link points here)
     upsert_comment(gh, repo, pr.number, app_slug, body)
     return d
 
@@ -1320,20 +1364,33 @@ def cmd_mark(checkout, event, gh, app_slug, run_url):
     if load_policy(checkout, repo) is None or p["base"]["ref"] != event["repository"]["default_branch"]:
         return "nothing to mark"
     sha = p["head"]["sha"]
-    mine = our_statuses(gh, repo, sha, app_slug)
+    mine = gate_results(gh, repo, sha, app_slug)
     person_ok = bool(mine) and mine[0]["state"] == "success" and \
         (mine[0].get("description") or "").startswith(APPROVED_BY_PERSON)
     if event.get("action") == "closed":
         if p.get("merged"):
             return "merged"
-        post_status(gh, repo, sha, "failure", "Closed without merging; this commit needs a new review.", run_url)
+        write_result(gh, repo, sha, "failure", "Closed without merging; this commit needs a new review.", run_url)
         return "closed"
     if person_ok:
         return "kept a person's approval"
-    pushed = ""
+    # Who pushed: the sender of this push, plus everyone recorded on this commit and on the previous head (a
+    # synchronize event names it), so the record follows the pull request through new commits and force-pushes.
+    pushers = set(mine[0]["pushers"]) if mine else set()
+    if event.get("action") == "synchronize" and event.get("before"):
+        try:  # after a force-push the old head may be gone
+            before = gate_results(gh, repo, event["before"], app_slug)
+        except GateError:
+            before = []
+        pushers |= before[0]["pushers"] if before else set()
     if event.get("action") in ("opened", "reopened", "synchronize") and (event.get("sender") or {}).get("login"):
-        pushed = " (pushed by @%s)" % event["sender"]["login"]
-    post_status(gh, repo, sha, "pending", "Build Autopilot is reviewing this commit%s." % pushed, run_url)
+        pushers.add(event["sender"]["login"])
+    try:
+        write_result(gh, repo, sha, "pending", "Build Autopilot is reviewing this commit.", run_url, new=True,
+                    pushers=pushers)
+    except GateError as e:  # couldn't start a fresh run: make sure no older green one stands
+        write_result(gh, repo, sha, "failure", "Couldn't start a review of this commit.", run_url)
+        raise GateError("couldn't create the pending check run: %s" % e)
     return "pending"
 
 
@@ -1406,7 +1463,7 @@ def cmd_stop(checkout, event, gh, run_url="", roles=("admin", "maintain", "write
             notes.append("Auto-merge could not be turned off (%s); click Disable auto-merge." % e)
     gh.send("POST", "/repos/%s/issues/%d/labels" % (repo, number), {"labels": [HOLD_LABEL]})
     if pr.base_ref == pr.default_branch:
-        post_blocking_status(gh, repo, pr, "failure", "On hold: a person decides.", run_url)
+        write_blocking_result(gh, repo, pr, "failure", "On hold: a person decides.", run_url)
     command_reply(gh, repo, number, "Put on hold by @%s: it won't merge by itself, and the `autopilot/gate` check "
                   "stays red. A repo admin or maintainer lifts the hold with `/autopilot resume`. %s"
                   % (login, " ".join(notes)), decided)
@@ -1439,9 +1496,6 @@ def cmd_resume(checkout, event, gh, app_slug, roles=("admin", "maintain"), run_a
         if (lb.get("name") or "").lower() == HOLD_LABEL:
             gh.send("DELETE", "/repos/%s/issues/%d/labels/%s" % (repo, number, urllib.parse.quote(lb["name"])), None)
     return "resumed by %s" % login
-
-
-PUSHED_BY_RE = re.compile(r"\(pushed by @([A-Za-z0-9-]+(?:\[bot\])?)\)")
 
 
 def cmd_approve(checkout, event, gh, app_slug, run_url, roles=("admin", "maintain"), allow_self=False,
@@ -1488,10 +1542,10 @@ def cmd_approve(checkout, event, gh, app_slug, run_url, roles=("admin", "maintai
     if held:
         return refuse("the pull request is on hold. A repo admin or maintainer lifts it with `/autopilot resume`; "
                       "approve after the new review.")
-    mine = our_statuses(gh, repo, pr.head_sha, app_slug)
+    mine = gate_results(gh, repo, pr.head_sha, app_slug)
     if not allow_self:
         # Who opened it, who GitHub links the commits to (authors and committers, which the pusher can set), and who
-        # actually pushed (recorded by the app in its own statuses, which nobody else can write).
+        # actually pushed (recorded by the app in its own check run, which nobody else can write).
         involved = {pr.author.lower()}
         commits = gh.paged("/repos/%s/pulls/%d/commits" % (repo, number), cap=250)
         if len(commits) >= 250:
@@ -1499,10 +1553,8 @@ def cmd_approve(checkout, event, gh, app_slug, run_url, roles=("admin", "maintai
         for c in commits:
             for who in ("author", "committer"):
                 involved.add(((c.get(who) or {}).get("login") or "").lower())
-        for st in our_statuses_all(gh, repo, number, app_slug):
-            mm = PUSHED_BY_RE.search(st.get("description") or "")
-            if mm:
-                involved.add(mm.group(1).lower())
+        for who in (mine[0]["pushers"] if mine else ()):
+            involved.add(who.lower())
         if login.lower() in involved:
             return refuse("you opened, pushed to or wrote commits in this pull request, and this repo doesn't allow "
                           "approving your own work.")
@@ -1528,19 +1580,11 @@ def cmd_approve(checkout, event, gh, app_slug, run_url, roles=("admin", "maintai
         decided.append({"key": "auto-merge-off", "what": "Auto-merge turned off",
                         "why": "someone had turned it on, and an approval means a person clicks merge",
                         "undo": "click Enable auto-merge on the pull request"})
-    post_status(gh, repo, pr.head_sha, "success", "%s (@%s) for %s." % (APPROVED_BY_PERSON, login, pr.head_sha[:7]),
+    write_result(gh, repo, pr.head_sha, "success", "%s (@%s) for %s." % (APPROVED_BY_PERSON, login, pr.head_sha[:7]),
                 run_url)
     command_reply(gh, repo, number, "Approved by @%s for commit `%s`. It does not merge by itself; a person merges "
                   "it. A new commit needs a new review." % (login, pr.head_sha), decided)
     return "approved %s by %s" % (pr.head_sha[:7], login)
-
-
-def our_statuses_all(gh, repo, number, app_slug):
-    """The app's statuses on every commit of the pull request (they carry who pushed each one)."""
-    out = []
-    for c in gh.paged("/repos/%s/pulls/%d/commits" % (repo, number), cap=250):
-        out += our_statuses(gh, repo, c.get("sha", ""), app_slug)
-    return out
 
 
 def main(argv=None):
@@ -1559,7 +1603,8 @@ def main(argv=None):
             set_output("result", base64.b64encode(json.dumps(result).encode()).decode())
             print("Reviews: %s" % {k: v.get("verdict", v.get("error")) for k, v in result["reviews"].items()})
             return 0
-        gh = GitHub(env("AUTOPILOT_TOKEN"), env("GITHUB_API_URL", "https://api.github.com"))
+        gh = GitHub(env("AUTOPILOT_TOKEN"), env("GITHUB_API_URL", "https://api.github.com"),
+                    env("AUTOPILOT_APP_ID"), env("AUTOPILOT_APP_SLUG"))
         if args.command == "mark":
             print(cmd_mark(checkout, event, gh, env("AUTOPILOT_APP_SLUG"), run_url))
             return 0

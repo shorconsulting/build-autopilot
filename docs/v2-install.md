@@ -30,8 +30,9 @@ default branch.
 
 1. Organization settings → Developer settings → GitHub Apps → New GitHub App.
    - Name: `Build Autopilot (<org>)`. Homepage: any URL. Webhook: **off**.
-   - Repository permissions: Contents **read and write**, Pull requests **read and write**, Commit statuses **read and
-     write**, Issues **read and write**, Metadata read. Nothing else.
+   - Repository permissions: Contents **read and write**, Pull requests **read and write**, Checks **read and
+     write**, Issues **read and write**, Metadata read. Nothing else. (Checks, not commit statuses: the gate's result
+     is a check run, which only this app can write or change.)
    - Where can it be installed: only this account.
 2. Note the **App ID** (a number) and the **Client ID**. Generate a **private key** (a `.pem` file).
 3. Install the app on the repos that will use the gate (not "all repositories").
@@ -100,8 +101,9 @@ to these files as "needs a person".
 Without this ruleset the gate still reviews and comments, but it will not turn on auto-merge (it checks the rules first
 and says what is missing in its comment). With level `manual` or `ai-review`, skip this step.
 
-The ruleset requires a pull request, the gate's check **from the app** (`integration_id` = the App ID), and the repo's
-test checks. List every test job a change must pass; those are the names shown on a pull request's checks. For
+The ruleset requires a pull request, the gate's check run `autopilot/gate` **from the app** (`integration_id` = the
+App ID; a check run can only be created or updated by the app that owns it, so no other app or workflow can satisfy
+or overwrite it), and the repo's test checks. List every test job a change must pass; those are the names shown on a pull request's checks. For
 Velocity-Org/chasing-shade they are `API · unit + integration + CRM + platform` and `3D-asset-tools · pytest`, from
 GitHub Actions (integration 15368).
 
@@ -155,9 +157,10 @@ around the gate.
    `autopilot-hold` label appears. A builder removing the label doesn't lift the hold (the gate puts it back); an
    admin's `/autopilot resume` does, and the review runs again. Every gate comment ends with a "Decided without you" section
    (or "Decided without you: nothing").
-4. Spoof test: a pull request that adds a workflow posting an `autopilot/gate` success with the built-in token. The
-   pull request must stay blocked (the ruleset only accepts the check from the app), and the gate must answer "Needs a
-   person" because it changes a workflow. Close it unmerged.
+4. Spoof test: a pull request that adds a workflow creating an `autopilot/gate` check run (conclusion success) with
+   the built-in token, and posting an `autopilot/gate` commit status too. The pull request must stay blocked (the
+   ruleset only accepts the check run from the app), and the gate must answer "Needs a person" because it changes a
+   workflow. Close it unmerged.
 
 ### 6. Optional: `tests.skip_duplicate_main`
 

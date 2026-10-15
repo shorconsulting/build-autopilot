@@ -94,16 +94,17 @@ class FakeGitHub(gate.GitHub):
     """In-memory GitHub: one repo, one pull request (#7). Records every write."""
 
     def __init__(self, pull, rules=None, clean=False, perms=None, settings=None):
-        super().__init__("fake-token", "https://api.github.test")
+        super().__init__("fake-token", "https://api.github.test", APP_ID, APP_SLUG)
         self.pull, self.rules, self.clean = pull, rules if rules is not None else GOOD_RULES, clean
         self.perms = perms or {"david": "admin", "builder": "write"}
         self.settings = settings or {"allow_squash_merge": True, "allow_merge_commit": True, "allow_rebase_merge": True}
-        self.statuses, self.comments, self.graphql_calls, self.merges, self.writes = {}, [], [], [], []
+        self.checks, self.comments, self.graphql_calls, self.merges, self.writes = {}, [], [], [], []
         self.extra = {}   # path -> payload, for skip_duplicate_main tests
         self.commit_authors = [pull.get("user", {}).get("login", "builder")]
         self.events, self.comment_editors = [], [APP_SLUG]
         self.command_comments = {}      # id -> comment, for GET /issues/comments/{id}
-        self.status_limit = 1000        # GitHub keeps at most 1000 statuses per commit and context
+        self.check_writes_fail = False  # GitHub refusing check run writes (outage), for the belt-and-braces path
+        self.next_check_id = 1
         self.pull_reads, self.hold_after_reads = 0, None
         self.clock = 0
 
@@ -156,13 +157,26 @@ class FakeGitHub(gate.GitHub):
             if self.rules == "error":
                 return 403, {"message": "Resource not accessible by integration"}, {}
             return 200, copy.deepcopy(self.rules), {}
-        if method == "GET" and bare.startswith("/repos/%s/commits/" % REPO) and bare.endswith("/statuses"):
-            return 200, copy.deepcopy(self.statuses.get(bare.split("/")[5], [])), {}
-        if method == "POST" and bare.startswith("/repos/%s/statuses/" % REPO):
-            sha = bare.rsplit("/", 1)[1]
-            if len(self.statuses.get(sha, [])) >= self.status_limit:
-                return 422, {"message": "This SHA and context has reached the maximum number of statuses."}, {}
-            self.statuses.setdefault(sha, []).insert(0, dict(body, creator={"login": BOT}))
+        if method == "GET" and bare.startswith("/repos/%s/commits/" % REPO) and bare.endswith("/check-runs"):
+            query = urllib.parse.parse_qs(path.split("?", 1)[1] if "?" in path else "")
+            runs = [r for r in self.checks.get(bare.split("/")[5], [])
+                    if r["name"] in query.get("check_name", [r["name"]]) and
+                    str(r["app"]["id"]) in query.get("app_id", [str(r["app"]["id"])])]
+            return 200, {"total_count": len(runs), "check_runs": copy.deepcopy(runs[:100])}, {}
+        if method in ("POST", "PATCH") and bare.startswith("/repos/%s/check-runs" % REPO):
+            if self.check_writes_fail:
+                return 502, {"message": "Server Error"}, {}
+            if method == "POST":
+                run = {"id": self.next_check_id, "app": {"id": int(APP_ID), "slug": APP_SLUG}, "output": {}}
+                self.next_check_id += 1
+                self.checks.setdefault(body["head_sha"], []).insert(0, run)
+            else:
+                rid = int(bare.rsplit("/", 1)[1])
+                run = next(r for runs in self.checks.values() for r in runs if r["id"] == rid)
+            run.update({k: v for k, v in body.items() if k != "output"})
+            run["output"] = dict(body.get("output", {}))
+            if body.get("status") != "completed":
+                run.pop("conclusion", None)
             return 201, {}, {}
         if bare == "/repos/%s/issues/%d/comments" % (REPO, n):
             if method == "GET":
@@ -231,8 +245,24 @@ class FakeGitHub(gate.GitHub):
             return "disabled"
         return "-"
 
+    def set_result(self, sha, state, description, app=None, pushers=()):
+        """Seed a check run, as the app (default) or as another app such as GitHub Actions."""
+        app = app or {"id": int(APP_ID), "slug": APP_SLUG}
+        run = {"id": self.next_check_id, "app": app, "name": gate.STATUS_CONTEXT, "head_sha": sha,
+               "status": "in_progress" if state == "pending" else "completed",
+               "output": {"title": description, "summary": description}}
+        if state != "pending":
+            run["conclusion"] = state
+        if pushers:
+            run["output"]["text"] = "Pushed by: " + ", ".join("@" + p for p in pushers)
+        self.next_check_id += 1
+        self.checks.setdefault(sha, []).insert(0, run)
+
+    def results(self, sha):
+        return gate.gate_results(self, REPO, sha, APP_SLUG)
+
     def status_for(self, sha):
-        s = self.statuses.get(sha)
+        s = self.results(sha)
         return s[0]["state"] if s else "-"
 
 
@@ -522,7 +552,7 @@ SCENARIOS = [
     scenario("Hold added after a person approved", "a hold turns even a person-approved commit red",
              dict(verdict="NEEDS_A_PERSON", status="failure", automerge="-", reviews=["general"]),
              main_policy=POLICY, pr={"src/app.ts": "export const x = 1;\n"}, human_approved=True, held=True),
-    scenario("Fake approval status from a workflow", "statuses from anyone but the app are ignored",
+    scenario("Fake approval check from a workflow", "check runs from any app but this one are ignored",
              dict(verdict="NEEDS_A_PERSON", status="failure", automerge="-", reviews=["general"]),
              main_policy=POLICY, pr={"src/app.ts": "export const x = 1;\n"},
              answers={"general": verdict("NEEDS_A_PERSON")}, spoofed_status=True),
@@ -571,13 +601,15 @@ def run_scenario(sc):
             gh.label_event("labeled", gate.HOLD_LABEL, {"actor": {"login": "david", "type": "User"}})
             gh.person_removes_label(sc["hold_removed_by"])
         if sc.get("human_approved"):
-            gh.statuses[head] = [{"state": "success", "context": gate.STATUS_CONTEXT, "creator": {"login": BOT},
-                                  "description": "%s (@david) for %s." % (gate.APPROVED_BY_PERSON, head[:7])}]
-        if sc.get("spoofed_status"):
-            gh.statuses[head] = [{"state": "success", "context": gate.STATUS_CONTEXT,
-                                  "creator": {"login": "github-actions[bot]"},
-                                  "description": "%s (@david)" % gate.APPROVED_BY_PERSON}]
+            gh.set_result(head, "success", "%s (@david) for %s." % (gate.APPROVED_BY_PERSON, head[:7]))
+        if sc.get("spoofed_status"):   # another app (GitHub Actions) posting a same-named "approved" check run
+            gh.set_result(head, "success", "%s (@david)" % gate.APPROVED_BY_PERSON,
+                          app={"id": 15368, "slug": "github-actions"})
+        if sc.get("before_mark"):
+            sc["before_mark"](gh, head)
         gate.cmd_mark(checkout, dict(event, action="synchronize"), gh, APP_SLUG, RUN_URL)
+        if sc.get("after_mark"):
+            sc["after_mark"](gh)
         try:
             d = gate.cmd_decide(checkout, event, gh, handover, APP_ID, APP_SLUG, RUN_URL)
             v, decided = d.verdict, [e["key"] for e in d.decided]

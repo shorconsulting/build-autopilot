@@ -2,10 +2,11 @@
 #
 # On every pull request in a repo whose default branch has .github/autopilot.json:
 #   review  - Claude (Opus) reviews the change; sensitive files get a second, adversarial security review.
-#   decide  - posts the plain-English verdict and the `autopilot/gate` status, and turns GitHub auto-merge on
+#   decide  - posts the plain-English verdict and the `autopilot/gate` check run (owned by the app; only it can
+#             write it), and turns GitHub auto-merge on
 #             (level auto-merge / autopilot, reviews approve) or off. Never for changes to the settings, the gate or
 #             any workflow.
-#   mark    - first, marks the commit "pending" (or "failure" when the PR is closed unmerged), so no older result
+#   mark    - first, starts a fresh "pending" check run (or "failure" when the PR is closed unmerged), so no older result
 #             for the same commit can be used while this run works.
 #   command - (first attempt only; a re-run replays the old comment, so it is refused)
 #             `/autopilot approve <full commit id>` (admins, maintainers) signs off exactly that commit;
@@ -19,7 +20,7 @@
 #     cannot change the gate or the settings it is judged by.
 #   - Nothing from the pull request is executed. gate.py fetches its commits as data and diffs them.
 #   - Secrets live in two environments that only the default branch may use, so a workflow added by a pull request
-#     (which runs on refs/pull/N/merge) can't read them, and can't post the required status as the app.
+#     (which runs on refs/pull/N/merge) can't read them, and can't write the required check run as the app.
 # Do not add steps that check out, build, install or run the pull request's code to this file.
 
 name: autopilot
@@ -62,10 +63,11 @@ jobs:
         with:
           client-id: ${{ vars.AUTOPILOT_APP_CLIENT_ID }}
           private-key: ${{ secrets.AUTOPILOT_APP_PRIVATE_KEY }}
-          permission-statuses: write
+          permission-checks: write
       - name: Mark the commit
         env:
           AUTOPILOT_TOKEN: ${{ steps.app.outputs.token }}
+          AUTOPILOT_APP_ID: ${{ vars.AUTOPILOT_APP_ID }}
           AUTOPILOT_APP_SLUG: ${{ steps.app.outputs.app-slug }}
         run: python3 .github/autopilot/gate.py mark
 
@@ -148,7 +150,7 @@ jobs:
           private-key: ${{ secrets.AUTOPILOT_APP_PRIVATE_KEY }}
           permission-contents: write
           permission-pull-requests: write
-          permission-statuses: write
+          permission-checks: write
           permission-issues: write
       - name: Decide
         env:
@@ -186,11 +188,12 @@ jobs:
           # contents + pull-requests write: turning auto-merge off (stop, approve) needs both.
           permission-contents: write
           permission-pull-requests: write
-          permission-statuses: write
+          permission-checks: write
           permission-issues: write
       - name: Run the command
         env:
           AUTOPILOT_TOKEN: ${{ steps.app.outputs.token }}
+          AUTOPILOT_APP_ID: ${{ vars.AUTOPILOT_APP_ID }}
           AUTOPILOT_APP_SLUG: ${{ steps.app.outputs.app-slug }}
           AUTOPILOT_APPROVER_ROLES: admin,maintain
           # "false": nobody approves a pull request they opened or wrote commits in (see docs/v2-report.md).

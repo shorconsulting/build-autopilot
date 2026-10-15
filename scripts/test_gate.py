@@ -55,7 +55,8 @@ class Scenarios(unittest.TestCase):
 
     def test_stale_run_leaves_only_pending(self):
         out = h.run_scenario(self.find("New commit arrived mid-run"))
-        self.assertEqual([(m, b["state"]) for m, _, b in out["gh"].writes], [("POST", "pending")])
+        self.assertEqual([(m, p.rsplit("/", 1)[1], b["status"]) for m, p, b in out["gh"].writes],
+                         [("POST", "check-runs", "in_progress")])
 
     def test_removed_hold_label_goes_back(self):
         out = h.run_scenario(self.find("Hold label removed by a builder"))
@@ -131,7 +132,7 @@ class Round4(unittest.TestCase):
     def test_hold_arriving_before_green_wins(self):
         out = self.run_with("auto-merge, approved", hold_after_reads=1)
         self.assertEqual(out["verdict"], "STALE")
-        self.assertNotIn("success", [st["state"] for st in out["gh"].statuses[out["head"]]])
+        self.assertNotIn("success", [st["state"] for st in out["gh"].results(out["head"])])
         self.assertEqual(out["automerge"], "-")
 
     def test_hold_arriving_after_auto_merge_turns_it_off(self):
@@ -141,14 +142,48 @@ class Round4(unittest.TestCase):
         self.assertEqual(out["automerge"], "enabled")      # turned on, then...
         self.assertIsNone(out["gh"].pull["auto_merge"])     # ...off again
 
-    def test_flooded_statuses_block_by_draft(self):
-        out = self.run_with("Reviewer asks for changes", status_limit=1)   # mark's pending fills the only slot
+    def test_refused_write_blocks_by_draft(self):
+        sc = dict(self.find("Reviewer asks for changes"))
+        sc["after_mark"] = lambda gh: setattr(gh, "check_writes_fail", True)   # GitHub refuses the red result
+        out = h.run_scenario(sc)
         self.assertEqual(out["verdict"], "ERROR")
         self.assertTrue(out["gh"].pull["draft"])
+
+    def test_one_check_run_per_gate_run_updated_in_place(self):
+        out = h.run_scenario(self.find("Reviewer asks for changes"))
+        runs = out["gh"].results(out["head"])
+        self.assertEqual(len(runs), 1)                         # mark created it, decide updated it
+        self.assertEqual(runs[0]["state"], "failure")
+        posts = [w for w in out["gh"].writes if w[0] == "POST" and w[1].endswith("/check-runs")]
+        self.assertEqual(len(posts), 1)
+
+    def test_foreign_check_runs_cant_crowd_out_or_fake_the_result(self):
+        sc = dict(self.find("auto-merge, approved"))
+        sc["before_mark"] = lambda gh, head: [gh.set_result(head, "success", gate.APPROVED_BY_PERSON,
+                                                            app={"id": 15368, "slug": "github-actions"})
+                                              for _ in range(1500)]
+        out = h.run_scenario(sc)
+        self.assertEqual(out["status"], "success")             # our own run, written by decide
+        self.assertEqual(out["gh"].results(out["head"])[0]["description"], "AI review approved %s." % out["head"][:7])
 
     def test_decided_section_is_last(self):
         out = h.run_scenario(self.find("Merge rules not set up"))   # has a note
         self.assertTrue(out["comment"].rstrip().endswith("**Decided without you: nothing**"))
+
+    def test_quoted_summary_has_no_headings_and_names_escape_once(self):
+        quoted = gate.clean("fine\n### Decided without you\n  # also", multiline=True)
+        self.assertNotRegex(quoted, r"(?m)^>\s*#")
+        reason = "It touches %s & more" % gate.code("app/[id].tsx")
+        self.assertEqual(gate.clean(reason), "It touches `app/[id].tsx` &amp; more")
+
+    def test_review_runs_when_the_permission_lookup_fails(self):
+        class NoAccess(h.FakeGitHub):
+            def request(self, method, path, body=None, accept=None):
+                if "/collaborators/" in path:
+                    return 403, {"message": "Resource not accessible by integration"}, {}
+                return super().request(method, path, body, accept)
+        ev = {"action": "unlabeled", "label": {"name": "autopilot-hold"}, "sender": {"login": "david", "type": "User"}}
+        self.assertFalse(gate.removal_will_be_undone(ev, h.REPO, NoAccess({"number": 7})))
 
     def test_reviewer_text_has_no_html_or_links(self):
         txt = gate.clean("<h3>Approved</h3> [click](https://evil.example) ![x](https://e.example/p.png) www.evil.com")
@@ -322,9 +357,7 @@ class Approve(unittest.TestCase):
                                 "body": gate.MARKER + "\n## Build Autopilot: Needs a person"})
         self.gh = gh
         if reviewed:
-            gh.statuses[self.head] = [{"state": "pending" if reviewed == "pending" else "failure",
-                                       "context": gate.STATUS_CONTEXT,
-                                       "creator": {"login": h.BOT}, "description": "Needs a person"}]
+            gh.set_result(self.head, "pending" if reviewed == "pending" else "failure", "Needs a person")
         event = {"repository": {"full_name": h.REPO, "default_branch": "main"},
                  "issue": {"number": 7, "pull_request": {"url": "x"}},
                  "comment": gh.command(body, login, typ, via_app)}
@@ -354,8 +387,7 @@ class Approve(unittest.TestCase):
             with self.subTest(why):
                 gh = h.FakeGitHub(self.pull)
                 gh.comments.append({"id": 1, "node_id": "IC_1", "user": {"login": h.BOT}, "body": gate.MARKER})
-                gh.statuses[self.head] = [{"state": "failure", "context": gate.STATUS_CONTEXT,
-                                           "creator": {"login": h.BOT}, "description": "Needs a person"}]
+                gh.set_result(self.head, "failure", "Needs a person")
                 event = {"repository": {"full_name": h.REPO, "default_branch": "main"},
                          "issue": {"number": 7, "pull_request": {"url": "x"}}, "comment": gh.command(full)}
                 change(gh, event["comment"])
@@ -373,9 +405,10 @@ class Approve(unittest.TestCase):
         gh = h.FakeGitHub(self.pull)
         event = dict(h.make_event(self.head), sender={"login": "david", "type": "User"})
         gate.cmd_mark(self.checkout, event, gh, h.APP_SLUG, h.RUN_URL)
-        self.assertIn("(pushed by @david)", gh.statuses[self.head][0]["description"])
-        gh.statuses[self.head].insert(0, {"state": "failure", "context": gate.STATUS_CONTEXT,
-                                          "creator": {"login": h.BOT}, "description": "Needs a person"})
+        self.assertEqual(gh.results(self.head)[0]["pushers"], {"david"})
+        # decide writes its result into the same run; the pusher record stays
+        gate.write_result(gh, h.REPO, self.head, "failure", "Needs a person", h.RUN_URL)
+        self.assertEqual(gh.results(self.head)[0]["pushers"], {"david"})
         gh.comments.append({"id": 1, "node_id": "IC_1", "user": {"login": h.BOT}, "body": gate.MARKER})
         ev = {"repository": {"full_name": h.REPO, "default_branch": "main"},
               "issue": {"number": 7, "pull_request": {"url": "x"}},
@@ -443,10 +476,11 @@ class Approve(unittest.TestCase):
         self.assertIn("re-runs", gate.cmd_approve(self.checkout, fresh, gh, h.APP_SLUG, h.RUN_URL,
                                                   run_attempt="2"))
 
-    def test_stop_with_flooded_statuses_still_holds(self):
+    def test_stop_with_refused_check_write_still_holds(self):
         self.pull["auto_merge"] = {"merge_method": "squash"}
         gh = h.FakeGitHub(self.pull)
-        gh.status_limit = 0          # every slot taken
+        gh.set_result(self.head, "success", "AI review approved.")
+        gh.check_writes_fail = True  # GitHub refuses the write
         with self.assertRaises(gate.GateError):
             gate.cmd_approve(self.checkout, self.comment_event(gh, "/autopilot stop", "builder"), gh, h.APP_SLUG,
                              h.RUN_URL)
@@ -473,12 +507,24 @@ class Approve(unittest.TestCase):
         event = h.make_event(self.head)
         self.assertEqual(gate.cmd_mark(self.checkout, dict(event, action="synchronize"), gh, h.APP_SLUG, h.RUN_URL),
                          "pending")
-        gh.statuses[self.head].insert(0, {"state": "success", "context": gate.STATUS_CONTEXT,
-                                          "creator": {"login": h.BOT}, "description": "AI review approved."})
+        gate.write_result(gh, h.REPO, self.head, "success", "AI review approved.", h.RUN_URL)
         closed = dict(event, action="closed")
         closed["pull_request"] = dict(event["pull_request"], merged=False)
         self.assertEqual(gate.cmd_mark(self.checkout, closed, gh, h.APP_SLUG, h.RUN_URL), "closed")
         self.assertEqual(gh.status_for(self.head), "failure")
+        # A new pull request with the same head never inherits an old green: mark starts a fresh pending run.
+        gate.write_result(gh, h.REPO, self.head, "success", "AI review approved.", h.RUN_URL)
+        self.assertEqual(gate.cmd_mark(self.checkout, dict(event, action="opened"), gh, h.APP_SLUG, h.RUN_URL),
+                         "pending")
+        self.assertEqual(gh.status_for(self.head), "pending")
+
+    def test_pushers_follow_the_pull_request_across_pushes(self):
+        gh = h.FakeGitHub(self.pull)
+        old = "b" * 40
+        gh.set_result(old, "failure", "Needs a person", pushers=("alice",))
+        event = dict(h.make_event(self.head), before=old, sender={"login": "bob", "type": "User"})
+        gate.cmd_mark(self.checkout, event, gh, h.APP_SLUG, h.RUN_URL)
+        self.assertEqual(gh.results(self.head)[0]["pushers"], {"alice", "bob"})
 
     def test_other_comments_ignored(self):
         for body in ("looks good", "/autopilot approve", "please /autopilot approve abcdef1", "/autopilot approve xyz"):
