@@ -1,0 +1,16 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    env:
+      ANTHROPIC_API_KEY: fake-key-for-tests
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm test

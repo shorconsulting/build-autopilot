@@ -1,0 +1,2 @@
+{"type": "assistant", "timestamp": "2026-10-02T10:00:00.000Z", "sessionId": "s2", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "w1", "name": "AskUserQuestion", "input": {"questions": [{"question": "What password or secret should the login use?"}]}}]}}
+{"type": "user", "timestamp": "2026-10-03T10:00:00.000Z", "sessionId": "s2", "message": {"role": "user", "content": "approve"}, "origin": {"kind": "human"}}

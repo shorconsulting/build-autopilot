@@ -1,0 +1,7 @@
+{
+ "full_name": "acme/widgets",
+ "default_branch": "main",
+ "allow_auto_merge": false,
+ "delete_branch_on_merge": true,
+ "archived": false
+}

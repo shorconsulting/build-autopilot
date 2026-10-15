@@ -1,0 +1,128 @@
+[
+ {
+  "number": 1,
+  "title": "Add widget list",
+  "createdAt": "2026-10-01T17:00:00Z",
+  "mergedAt": "2026-10-01T17:30:00Z",
+  "headRefOid": "shaA",
+  "headRefName": "feat/widgets",
+  "mergeCommit": {
+   "oid": "M1"
+  },
+  "author": {
+   "login": "alice"
+  },
+  "reviews": [],
+  "comments": [],
+  "statusCheckRollup": [
+   {
+    "__typename": "CheckRun",
+    "name": "unit",
+    "workflowName": "test",
+    "status": "COMPLETED",
+    "conclusion": "SUCCESS",
+    "startedAt": "2026-10-01T17:05:00Z",
+    "completedAt": "2026-10-01T17:20:00Z"
+   },
+   {
+    "__typename": "CheckRun",
+    "name": "lint",
+    "workflowName": "test",
+    "status": "COMPLETED",
+    "conclusion": "SUCCESS",
+    "startedAt": "2026-10-01T17:05:00Z",
+    "completedAt": "2026-10-01T17:08:00Z"
+   }
+  ]
+ },
+ {
+  "number": 2,
+  "title": "Fix flaky clock test",
+  "createdAt": "2026-10-02T01:00:00Z",
+  "mergedAt": "2026-10-02T15:00:00Z",
+  "headRefOid": "shaB2",
+  "headRefName": "fix/clock",
+  "mergeCommit": {
+   "oid": "M2"
+  },
+  "author": {
+   "login": "alice"
+  },
+  "reviews": [],
+  "comments": [],
+  "statusCheckRollup": [
+   {
+    "__typename": "CheckRun",
+    "name": "unit",
+    "workflowName": "test",
+    "status": "COMPLETED",
+    "conclusion": "SUCCESS",
+    "startedAt": "2026-10-02T01:10:00Z",
+    "completedAt": "2026-10-02T02:00:00Z"
+   }
+  ]
+ },
+ {
+  "number": 3,
+  "title": "Review the widget colors",
+  "createdAt": "2026-10-03T17:00:00Z",
+  "mergedAt": "2026-10-03T20:30:00Z",
+  "headRefOid": "shaC",
+  "headRefName": "feat/review",
+  "mergeCommit": {
+   "oid": "M3"
+  },
+  "author": {
+   "login": "alice"
+  },
+  "reviews": [
+   {
+    "author": {
+     "login": "bob"
+    },
+    "state": "APPROVED",
+    "submittedAt": "2026-10-03T20:00:00Z"
+   }
+  ],
+  "comments": [
+   {
+    "author": {
+     "login": "coderabbitai[bot]"
+    }
+   },
+   {
+    "author": {
+     "login": "alice"
+    }
+   }
+  ],
+  "statusCheckRollup": [
+   {
+    "__typename": "CheckRun",
+    "name": "unit",
+    "workflowName": "test",
+    "status": "COMPLETED",
+    "conclusion": "SUCCESS",
+    "startedAt": "2026-10-03T17:05:00Z",
+    "completedAt": "2026-10-03T17:30:00Z"
+   }
+  ]
+ },
+ {
+  "number": 4,
+  "title": "Docs",
+  "createdAt": "2026-10-04T17:00:00Z",
+  "mergedAt": "2026-10-04T17:10:00Z",
+  "headRefOid": "shaD",
+  "headRefName": "docs/readme",
+  "mergeCommit": {
+   "oid": "M4"
+  },
+  "author": {
+   "login": "alice"
+  },
+  "reviews": [],
+  "comments": [],
+  "statusCheckRollup": []
+ }
+]

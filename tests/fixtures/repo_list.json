@@ -1,0 +1,22 @@
+[
+ {
+  "nameWithOwner": "acme/widgets",
+  "pushedAt": "2026-10-10T00:00:00Z",
+  "isArchived": false
+ },
+ {
+  "nameWithOwner": "acme/old",
+  "pushedAt": "2025-01-01T00:00:00Z",
+  "isArchived": false
+ },
+ {
+  "nameWithOwner": "acme/archived",
+  "pushedAt": "2026-10-10T00:00:00Z",
+  "isArchived": true
+ },
+ {
+  "nameWithOwner": "acme/gadgets",
+  "pushedAt": "2026-10-12T00:00:00Z",
+  "isArchived": false
+ }
+]

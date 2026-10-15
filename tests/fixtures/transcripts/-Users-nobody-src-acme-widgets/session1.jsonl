@@ -1,0 +1,15 @@
+{"type": "user", "timestamp": "2026-10-01T16:00:00.000Z", "sessionId": "s1", "message": {"role": "user", "content": "Please build the SECRETPHRASE widgets page with tests"}, "origin": {"kind": "human"}}
+{"type": "assistant", "timestamp": "2026-10-01T16:01:00.000Z", "sessionId": "s1", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "AskUserQuestion", "input": {"questions": [{"question": "Should I merge and deploy now? SECRETPHRASE"}, {"question": "Which option do you prefer for the layout?"}]}}]}}
+{"type": "assistant", "timestamp": "2026-10-01T16:01:00.000Z", "sessionId": "s1", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "AskUserQuestion", "input": {"questions": [{"question": "duplicate line of the same tool use"}]}}]}}
+{"type": "user", "timestamp": "2026-10-01T16:02:00.000Z", "sessionId": "s1", "message": {"role": "user", "content": "yes"}, "origin": {"kind": "human"}}
+{"type": "assistant", "timestamp": "2026-10-01T16:10:00.000Z", "sessionId": "s1", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "t2", "name": "mcp__ccd_turn__wrap_up", "input": {"recap": "done", "ask": "Can I push the branch? SECRETPHRASE"}}]}}
+{"type": "assistant", "timestamp": "2026-10-01T16:11:00.000Z", "sessionId": "s1", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "t3", "name": "mcp__ccd_turn__wrap_up", "input": {"recap": "all done"}}]}}
+{"type": "user", "timestamp": "2026-10-01T16:12:00.000Z", "sessionId": "s1", "message": {"role": "user", "content": "go ahead and merge it"}, "origin": {"kind": "human"}}
+{"type": "user", "timestamp": "2026-10-01T16:13:00.000Z", "sessionId": "s1", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t9", "is_error": true, "content": "Permission for this action was denied by the Claude Code auto mode classifier. SECRETPHRASE"}]}}
+{"type": "user", "timestamp": "2026-10-01T16:14:00.000Z", "sessionId": "s1", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t10", "is_error": true, "content": "Exit code 128\nwarning: unable to access '.git/config': Permission denied"}]}}
+{"type": "user", "timestamp": "2026-10-02T09:00:00.000Z", "sessionId": "s1", "message": {"role": "user", "content": "Continue."}, "origin": {"kind": "human"}}
+{"type": "user", "timestamp": "2026-10-02T09:01:00.000Z", "sessionId": "s1", "message": {"role": "user", "content": "ok this one is far too long to count as short approval"}, "origin": {"kind": "human"}}
+{"type": "user", "timestamp": "2026-10-02T09:02:00.000Z", "sessionId": "s1", "message": {"role": "user", "content": "<command-name>/clear</command-name>"}}
+{"type": "user", "timestamp": "2026-10-02T09:03:00.000Z", "sessionId": "s1", "message": {"role": "user", "content": "yes"}, "origin": {"kind": "human"}, "isSidechain": true}
+{"type": "user", "timestamp": "2026-09-01T09:00:00.000Z", "sessionId": "s1", "message": {"role": "user", "content": "yes"}, "origin": {"kind": "human"}}
+this line is not json

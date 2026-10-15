@@ -1,0 +1,678 @@
+<title>Build Autopilot</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Source+Sans+3:wght@400;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: an instrument panel. One repo at a time: time-split gauge, recommendations, then the mode selector. */
+:root {
+  --bg: #F1F4F8; --panel: #FFFFFF; --ink: #162033; --muted: #5A6579; --line: #D8DEE8; --soft: #E8EDF4;
+  --accent: #2F5BD3; --accent-ink: #FFFFFF;
+  --wait: #B26A00; --wait-soft: #F8EAD3;
+  --auto: #1C7F52; --auto-soft: #DCF1E6;
+  --risk: #B2372E; --risk-soft: #F7DEDB;
+  --f-display: "Barlow Condensed", "Arial Narrow", "Helvetica Neue", sans-serif;
+  --f-body: "Source Sans 3", "Segoe UI", system-ui, sans-serif;
+  --f-mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #0E131B; --panel: #161D29; --ink: #E5EAF2; --muted: #98A2B6; --line: #2A3445; --soft: #1D2635;
+  --accent: #7D9BFF; --accent-ink: #0E131B;
+  --wait: #E7A33E; --wait-soft: #3A2C16; --auto: #4CC38A; --auto-soft: #16342A; --risk: #F07468; --risk-soft: #3D1E1C;
+  color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #0E131B; --panel: #161D29; --ink: #E5EAF2; --muted: #98A2B6; --line: #2A3445; --soft: #1D2635;
+  --accent: #7D9BFF; --accent-ink: #0E131B;
+  --wait: #E7A33E; --wait-soft: #3A2C16; --auto: #4CC38A; --auto-soft: #16342A; --risk: #F07468; --risk-soft: #3D1E1C;
+  color-scheme: dark }
+
+* { box-sizing: border-box }
+body { background: var(--bg); color: var(--ink); font: 16px/1.5 var(--f-body); }
+.wrap { max-width: 880px; margin: 0 auto; padding-block: 28px 64px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  display: grid; gap: 28px }
+h1, h2, h3 { font-family: var(--f-display); font-weight: 600; letter-spacing: .01em; margin: 0; text-wrap: balance }
+h1 { font-size: 2.6rem; line-height: 1 }
+h2 { font-size: 1.6rem; line-height: 1.1 }
+h3 { font-size: 1.2rem; line-height: 1.15 }
+p { margin: 0 }
+.eyebrow { font: 600 .75rem/1 var(--f-body); letter-spacing: .12em; text-transform: uppercase; color: var(--muted) }
+.muted { color: var(--muted) }
+.num { font-family: var(--f-mono); font-variant-numeric: tabular-nums }
+button, select, input { font: inherit; color: inherit }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px }
+
+header.top { display: grid; gap: 10px }
+header.top p { max-width: 64ch; color: var(--muted) }
+
+.strip { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; background: var(--line);
+  border: 1px solid var(--line); border-radius: 10px; overflow: hidden }
+.strip > div { background: var(--panel); padding: 16px 18px; display: grid; gap: 4px; min-width: 0 }
+.strip .big { font: 600 2.2rem/1 var(--f-display) }
+.strip .big.wait { color: var(--wait) }
+@media (max-width: 760px) { .strip { grid-template-columns: repeat(2, minmax(0, 1fr)) } }
+@media (max-width: 400px) { .strip { grid-template-columns: 1fr } }
+
+.picker { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; position: sticky; top: env(safe-area-inset-top, 0px); z-index: 3;
+  background: var(--bg); padding-block: 10px; border-bottom: 1px solid var(--line) }
+.picker .spacer { flex: 1 1 0 }
+.pick { display: flex; align-items: center; gap: 10px; min-width: 0; flex: 0 1 auto }
+.selwrap { position: relative; min-width: 0 }
+.selwrap select { appearance: none; -webkit-appearance: none; border: 1px solid var(--line); background: var(--panel); border-radius: 8px;
+  padding: 9px 38px 9px 12px; font: 600 1.15rem/1.2 var(--f-display); letter-spacing: .01em; max-width: 100%; cursor: pointer; min-width: 16rem }
+.selwrap::after { content: ""; position: absolute; right: 14px; top: 50%; width: 8px; height: 8px; margin-top: -6px; border: solid var(--muted);
+  border-width: 0 2px 2px 0; transform: rotate(45deg); pointer-events: none }
+@media (max-width: 520px) { .selwrap select { min-width: 0; width: 100% } .pick { flex: 1 1 100% } .selwrap { flex: 1 1 auto } }
+.orgs { display: grid; gap: 14px }
+.org { display: grid; gap: 4px }
+.org-head { display: flex; align-items: center; gap: 10px; font-weight: 700 }
+.org-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 15rem), 1fr)); gap: 2px 12px; padding-left: 4px }
+.org-list .opt { padding: 6px 8px }
+.lvl { font-size: .82rem; color: var(--muted) }
+
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 22px; display: grid; gap: 18px; min-width: 0 }
+.panel-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px 16px }
+
+.gauge { display: grid; gap: 10px }
+.bar { display: flex; height: 34px; border-radius: 6px; overflow: hidden; background: var(--soft) }
+.bar > span { display: flex; align-items: center; padding: 0 10px; font: 500 .8rem var(--f-mono); white-space: nowrap; overflow: hidden; min-width: 0 }
+.bar .m { background: var(--auto-soft); color: var(--auto) }
+.bar .w { background: var(--wait); color: var(--panel) }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: .9rem; color: var(--muted) }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px }
+
+.facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px }
+.facts > div { display: grid; gap: 2px; border-top: 1px solid var(--line); padding-top: 10px; min-width: 0 }
+.facts b { font: 600 1.5rem/1.1 var(--f-display) }
+.facts span { font-size: .88rem; color: var(--muted) }
+@media (max-width: 760px) { .facts { grid-template-columns: repeat(2, minmax(0, 1fr)) } }
+
+.recs { display: grid; gap: 12px }
+.rec { border: 1px solid var(--line); border-radius: 10px; padding: 16px; display: grid; gap: 10px; grid-template-columns: minmax(0, 1fr) auto; align-items: start }
+.rec.on { border-color: var(--auto); background: color-mix(in srgb, var(--auto-soft) 45%, var(--panel)) }
+.rec .body { display: grid; gap: 8px; min-width: 0 }
+.rec .meta { display: flex; flex-wrap: wrap; gap: 8px; align-items: center }
+.pill { font: 600 .72rem/1 var(--f-body); letter-spacing: .06em; text-transform: uppercase; padding: 5px 8px; border-radius: 4px }
+.pill.low { background: var(--auto-soft); color: var(--auto) }
+.pill.medium { background: var(--wait-soft); color: var(--wait) }
+.pill.high { background: var(--risk-soft); color: var(--risk) }
+.saves { font: 500 .85rem var(--f-mono); color: var(--auto) }
+.pc { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; font-size: .92rem }
+.pc ul { margin: 4px 0 0; padding-left: 18px; display: grid; gap: 2px }
+.pc .h { font-weight: 700; font-size: .78rem; letter-spacing: .08em; text-transform: uppercase }
+.pc .pro .h { color: var(--auto) } .pc .con .h { color: var(--risk) }
+@media (max-width: 640px) { .pc { grid-template-columns: 1fr } .rec { grid-template-columns: 1fr } }
+.actions { display: flex; flex-direction: column; gap: 6px; align-items: stretch; min-width: 128px }
+.btn { border: 1px solid var(--line); background: var(--panel); border-radius: 6px; padding: 8px 14px; cursor: pointer; font-weight: 600 }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink) }
+.btn:disabled { opacity: .55; cursor: default }
+.btn.link { border: 0; background: none; color: var(--muted); font-weight: 400; padding: 4px; text-decoration: underline }
+.state-on { color: var(--auto); font-weight: 700; font-size: .9rem; display: flex; align-items: center; gap: 6px }
+
+/* Mode selector: four detents on one track */
+.modes { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0; border: 1px solid var(--line); border-radius: 10px; overflow: hidden }
+.mode { background: var(--panel); border: 0; border-right: 1px solid var(--line); padding: 14px 12px 12px; cursor: pointer; text-align: left; display: grid; gap: 6px; align-content: start; min-width: 0 }
+.mode:last-child { border-right: 0 }
+.mode .step { font: 500 .75rem var(--f-mono); color: var(--muted) }
+.mode .name { font: 600 1.1rem/1.1 var(--f-display) }
+.mode .track { height: 4px; border-radius: 2px; background: var(--soft) }
+.mode[aria-checked="true"] { background: var(--soft) }
+.mode[aria-checked="true"] .track { background: var(--accent) }
+.mode.past .track { background: color-mix(in srgb, var(--accent) 40%, var(--soft)) }
+@media (max-width: 640px) { .modes { grid-template-columns: 1fr 1fr } .mode:nth-child(2) { border-right: 0 } .mode:nth-child(-n+2) { border-bottom: 1px solid var(--line) } }
+.who { display: grid; grid-template-columns: 1fr 1fr; gap: 16px }
+.who > div { display: grid; gap: 6px; align-content: start; min-width: 0 }
+.who ul { margin: 0; padding-left: 18px; display: grid; gap: 3px }
+.who .h { font-weight: 700; font-size: .78rem; letter-spacing: .08em; text-transform: uppercase }
+.who .own .h { color: var(--auto) } .who .you .h { color: var(--wait) }
+@media (max-width: 640px) { .who { grid-template-columns: 1fr } }
+
+.field { display: grid; gap: 8px; border-top: 1px solid var(--line); padding-top: 16px }
+.field > .lbl { font-weight: 700 }
+.opts { display: grid; gap: 6px }
+.opt { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px; align-items: start; padding: 8px 10px; border-radius: 8px; cursor: pointer }
+.opt:hover { background: var(--soft) }
+.opt input { margin-top: 4px; accent-color: var(--accent) }
+.opt small { display: block; color: var(--muted); font-size: .88rem }
+textarea { width: 100%; min-height: 110px; font: .85rem/1.45 var(--f-mono); color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 8px }
+details > summary { cursor: pointer; color: var(--muted) }
+
+.sync { display: flex; gap: 10px; align-items: flex-start; padding: 12px 14px; border-radius: 8px; font-size: .92rem }
+.sync.pending { background: var(--wait-soft); color: var(--ink) }
+.sync.done { background: var(--auto-soft) }
+.sync code { font-family: var(--f-mono); font-size: .85em; background: var(--panel); padding: 1px 5px; border-radius: 3px }
+.note { font-size: .9rem; color: var(--muted) }
+.lock { font-size: .9rem; padding: 10px 12px; border-radius: 8px; background: var(--soft) }
+
+.grid2 { display: grid; grid-template-columns: minmax(0, 1fr); gap: 28px; align-items: start }
+.inrow { display: flex; flex-wrap: wrap; gap: 10px; align-items: center }
+.inrow input[type=text], .inrow input[type=time], .inrow select { border: 1px solid var(--line); background: var(--bg); border-radius: 6px; padding: 6px 8px; min-width: 0 }
+.log { list-style: none; margin: 0; padding: 0; display: grid; gap: 0 }
+.log li { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 12px; padding: 9px 0; border-bottom: 1px solid var(--line); font-size: .92rem }
+.log time { font: .8rem var(--f-mono); color: var(--muted); white-space: nowrap; padding-top: 2px }
+.empty { border: 1px dashed var(--line); border-radius: 12px; padding: 28px; display: grid; gap: 10px; justify-items: start }
+.empty code { font-family: var(--f-mono); background: var(--soft); padding: 2px 6px; border-radius: 4px }
+.toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(18px + env(safe-area-inset-bottom, 0px)); background: var(--ink); color: var(--bg); padding: 10px 16px; border-radius: 8px; font-weight: 600; z-index: 5 }
+@media (prefers-reduced-motion: no-preference) { .bar > span { transition: flex-basis .4s ease } }
+</style>
+
+<div class="wrap">
+  <header class="top">
+    <div class="eyebrow">Build Autopilot</div>
+    <h1>Where your builds wait on a person</h1>
+    <p>Each repo's last audit shows how long changes sit after their tests pass, and how often Claude stops to ask. Choose, per repo, how far a change may go on its own. <code>/autopilot apply</code> then writes your choices into the repo.</p>
+  </header>
+
+  <section class="strip" id="strip" aria-label="Across all repos">
+    <div><span class="eyebrow">Waiting on a person</span><span class="big wait num" id="s-wait">–</span><span class="muted" id="s-wait-sub">hours a week, after tests passed</span></div>
+    <div><span class="eyebrow">Claude stopped to ask</span><span class="big num" id="s-int">–</span><span class="muted" id="s-int-sub">times per active day</span></div>
+    <div><span class="eyebrow">Merged after tests passed</span><span class="big num" id="s-tst">–</span><span class="muted" id="s-tst-sub">of merged changes</span></div>
+    <div><span class="eyebrow">Merged with no review</span><span class="big num" id="s-rev">–</span><span class="muted" id="s-rev-sub">of merged changes</span></div>
+  </section>
+
+  <nav class="picker" aria-label="Choose a repo">
+    <label class="pick" for="repoSelect"><span class="eyebrow">Repo</span>
+      <span class="selwrap"><select id="repoSelect"></select></span></label>
+    <span class="note num" id="repoCount"></span>
+    <span class="spacer"></span>
+    <button class="btn" id="copyBtn" type="button" hidden>Copy these settings to other repos</button>
+    <button class="btn link" id="hideBtn" type="button" hidden>Hide this repo</button>
+  </nav>
+
+  <section class="panel copy" id="copyPanel" hidden aria-labelledby="copy-h">
+    <div class="panel-head"><h2 id="copy-h">Copy settings</h2><span class="note" id="copyFrom"></span></div>
+    <p class="note">Copies the level, the sensitive-areas rule and file list, questions, always-ask list and tests. Each repo's audit and set-aside recommendations stay as they are. Each repo still needs <code>/autopilot apply</code> before the copy takes effect there.</p>
+    <div class="orgs" id="copyTargets"></div>
+    <div class="inrow"><button class="btn primary" id="copyGo" type="button" disabled>Copy</button><button class="btn link" id="copyCancel" type="button">Cancel</button></div>
+  </section>
+
+  <div id="empty" class="empty" hidden>
+    <h2>No repos yet</h2>
+    <p class="muted">Run <code>/autopilot setup</code> to choose which repos to track, or <code>/autopilot audit owner/repo</code> to add one. Their numbers appear here.</p>
+  </div>
+
+  <section id="repo" hidden>
+    <div class="grid2">
+      <div style="display:grid;gap:28px;min-width:0">
+        <div class="panel" id="timePanel">
+          <div class="panel-head"><h2 id="r-name">Repo</h2><span class="note" id="r-when"></span></div>
+          <div class="gauge">
+            <div class="eyebrow">A typical week of merged changes</div>
+            <div class="bar" id="bar" role="img"><span class="m" id="bar-m"></span><span class="w" id="bar-w"></span></div>
+            <div class="legend"><span><i style="background:var(--auto-soft);border:1px solid var(--auto)"></i>Tests running</span><span><i style="background:var(--wait)"></i>Tests passed, waiting on a person</span></div>
+          </div>
+          <div class="facts" id="facts"></div>
+          <p class="note" id="deployNote"></p>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h2>What would speed this up</h2><span class="note">Biggest saving first</span></div>
+          <div class="recs" id="recs"></div>
+        </div>
+      </div>
+      <div class="panel" id="settingsPanel"></div>
+    </div>
+  </section>
+
+  <section id="defaults" hidden>
+    <div class="panel" id="defaultsPanel"></div>
+  </section>
+
+  <div class="grid2">
+    <section class="panel" aria-labelledby="me-h">
+      <h2 id="me-h">How you want to be interrupted</h2>
+      <p class="note">Your own preference, for every repo. It can only make Claude ask you less than a repo allows, never skip the always-ask list. Run <code class="num">/autopilot apply --me</code> once on each computer you build from.</p>
+      <div id="meBody" class="opts"></div>
+    </section>
+    <section class="panel" aria-labelledby="log-h">
+      <h2 id="log-h">Recent changes</h2>
+      <ul class="log" id="log"><li><time>–</time><span class="muted">Setting changes show here, with who made them.</span></li></ul>
+    </section>
+  </div>
+</div>
+<div class="toast" id="toast" hidden></div>
+
+<script>
+const LEVELS = [
+  { id: "manual", name: "I approve everything",
+    own: ["Builds the change and opens it", "Runs the tests"],
+    you: ["Merge each change", "Release to the live site"] },
+  { id: "ai-review", name: "AI checks, I merge",
+    own: ["Builds the change and opens it", "Runs the tests", "An AI reviewer checks every change and explains it in plain English"],
+    you: ["Click merge after reading the verdict", "Release to the live site"] },
+  { id: "auto-merge", name: "AI merges, I release",
+    own: ["Builds, tests and reviews every change", "Merges by itself when the tests pass and the AI approves"],
+    you: ["Release to the live site (one click from the daily summary)"] },
+  { id: "autopilot", name: "Full autopilot",
+    own: ["Builds, tests, reviews and merges", "Releases, checks the live site, and undoes a bad release"],
+    you: ["Nothing routine. Read the daily summary."] },
+];
+const SENSITIVE = [
+  { id: "two-ai", name: "Two independent AI reviews", sub: "A second, adversarial security review on the strongest model. Both must approve. Recommended." },
+  { id: "human", name: "Wait for me", sub: "Changes to these areas always stop at the pull request, whatever the level above." },
+  { id: "same", name: "No extra step", sub: "Treat them like any other change. Not recommended." },
+];
+const QUESTIONS = [
+  { id: "ask-now", name: "Ask me right away", sub: "Claude stops whenever it's unsure. Today's behaviour." },
+  { id: "batch", name: "Keep going, ask me at the end", sub: "Claude picks the option that's easiest to undo, keeps working, and ends with one list of those choices for you to confirm or change." },
+  { id: "decide-reversible", name: "Decide anything that can be undone", sub: "Claude decides and keeps going. Every decision it made without you is listed in the pull request and the end-of-run summary, with how to undo it." },
+];
+const TESTS = [
+  { id: "full", name: "Every test before merging", sub: "Safest. A change waits for the whole suite." },
+  { id: "fast-lane", name: "Quick tests first, full suite right after", sub: "Merges in minutes. If the full suite then fails, the change is undone automatically." },
+];
+const ALWAYS = [
+  { id: "delete-data", name: "Deleting or overwriting real customer data" },
+  { id: "spend-money", name: "Anything that adds a bill" },
+  { id: "message-people", name: "Messages to customers, partners or anyone outside the team" },
+  { id: "credentials", name: "Passwords, keys, or someone's access" },
+  { id: "legal-pricing", name: "Legal terms, prices, or claims customers see" },
+  { id: "ai-flags-it", name: "Anything the AI reviewer says needs a person" },
+];
+const DEFAULTS = {
+  level: "manual",
+  sensitive: { rule: "two-ai", paths: ["**/auth/**", "**/*login*", "**/payments/**", "**/billing/**", "**/phi/**", "**/migrations/**", ".github/**", "**/.env*", "**/secrets*"] },
+  questions: "ask-now",
+  tests: { lane: "full", skip_duplicate_main: false },
+  always_ask: ALWAYS.map(a => a.id),
+  dismissed: [],
+};
+const LEVEL_INDEX = Object.fromEntries(LEVELS.map((l, i) => [l.id, i]));
+
+const state = { audits: {}, settings: {}, requests: {}, hidden: [], changes: [], me: null, builder: null, selected: null, canEdit: false, db: null, user: null, writeBusy: false };
+const $ = id => document.getElementById(id);
+const slugOf = repo => repo.replace("/", "__");
+const repoOf = slug => slug.replace("__", "/");
+const clone = o => JSON.parse(JSON.stringify(o));
+const g = (o, path, d = null) => { let v = o; for (const k of path.split(".")) { if (v == null) return d; v = v[k]; } return v == null ? d : v; };
+const fmtH = h => h == null ? "–" : h >= 10 ? Math.round(h).toString() : (Math.round(h * 10) / 10).toString();
+const fmtMin = m => m == null ? "–" : m >= 120 ? fmtH(m / 60) + " h" : Math.round(m) + " min";
+function el(tag, attrs = {}, ...kids) {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "class") n.className = v; else if (k === "text") n.textContent = v;
+    else if (k.startsWith("on")) n.addEventListener(k.slice(2), v); else if (v !== false && v != null) n.setAttribute(k, v === true ? "" : v);
+  }
+  for (const k of kids.flat()) if (k != null) n.append(k.nodeType ? k : document.createTextNode(k));
+  return n;
+}
+function toast(msg) { const t = $("toast"); t.textContent = msg; t.hidden = false; clearTimeout(toast._t); toast._t = setTimeout(() => t.hidden = true, 2600); }
+function weeks(a) { return Math.max(1, (a.window_days || 30) / 7); }
+function settingsFor(slug) { return Object.assign(clone(DEFAULTS), clone(state.settings._defaults || {}), clone(state.settings[slug] || {})); }
+
+function machineHoursPerWeek(a) {
+  const merged = g(a, "prs.merged", 0), ci = g(a, "prs.ci_min.median", null);
+  return ci == null ? null : merged * ci / 60 / weeks(a);
+}
+function waitHoursPerWeek(a) { const t = g(a, "prs.wait_after_green_min.total_hours", null); return t == null ? null : t / weeks(a); }
+
+function renderStrip() {
+  const list = Object.entries(state.audits).filter(([s, a]) => !a.error && !state.hidden.includes(s)).map(([, a]) => a);
+  if (!list.length) return;
+  let wait = 0, ints = 0, noRev = 0, merged = 0, tested = 0, testedOf = 0;
+  for (const a of list) {
+    wait += waitHoursPerWeek(a) || 0; ints += g(a, "interruptions.per_active_day", 0) || 0;
+    noRev += g(a, "prs.merged_without_review", 0); merged += g(a, "prs.merged", 0);
+    const t = g(a, "prs.merged_after_tests_passed");
+    if (t != null) { tested += t; testedOf += g(a, "prs.merged", 0); }
+  }
+  $("s-tst").textContent = testedOf ? `${Math.round(100 * tested / testedOf)}%` : "–";
+  $("s-tst-sub").textContent = testedOf ? `${tested} of ${testedOf} merged changes` : "re-run the audit to see this";
+  $("s-wait").textContent = fmtH(wait);
+  $("s-wait-sub").textContent = `hours a week across ${list.length} repo${list.length > 1 ? "s" : ""}, after tests passed`;
+  $("s-int").textContent = fmtH(ints);
+  $("s-rev").textContent = merged ? `${Math.round(100 * noRev / merged)}%` : "–";
+  $("s-rev-sub").textContent = merged ? `${noRev} of ${merged} merged changes` : "of merged changes";
+}
+
+const COPY_FIELDS = ["level", "sensitive", "questions", "tests", "always_ask"];
+const nameOf = slug => slug === "_defaults" ? "Defaults for new repos" : repoOf(slug).split("/")[1];
+const levelName = slug => LEVELS[LEVEL_INDEX[settingsFor(slug).level] ?? 0].name;
+function trackedSlugs() {
+  return [...new Set([...Object.keys(state.audits), ...Object.keys(state.settings).filter(s => s !== "_defaults")])]
+    .sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+}
+function byOrg(slugs) { const m = {}; for (const s of slugs) { const o = repoOf(s).split("/")[0]; (m[o] = m[o] || []).push(s); } return m; }
+
+function renderPicker() {
+  const sel = $("repoSelect"), all = trackedSlugs(), hidden = new Set(state.hidden);
+  const shown = all.filter(s => !hidden.has(s)), hid = all.filter(s => hidden.has(s));
+  $("empty").hidden = all.length > 0;
+  if (!(state.selected === "_defaults" || all.includes(state.selected)))
+    state.selected = shown.length ? shown.slice().sort((a, b) => (waitHoursPerWeek(state.audits[b] || {}) || 0) - (waitHoursPerWeek(state.audits[a] || {}) || 0))[0] : all.length ? "_defaults" : null;
+  sel.textContent = "";
+  for (const [org, list] of Object.entries(byOrg(shown)))
+    sel.append(el("optgroup", { label: org }, list.map(s => el("option", { value: s, text: `${nameOf(s)}  ·  ${levelName(s)}` }))));
+  sel.append(el("optgroup", { label: "Defaults" }, el("option", { value: "_defaults", text: `Defaults for new repos  ·  ${levelName("_defaults")}` })));
+  if (hid.length) sel.append(el("optgroup", { label: `Hidden (${hid.length})` }, hid.map(s => el("option", { value: s, text: `${repoOf(s)}  ·  hidden` }))));
+  if (state.selected) sel.value = state.selected;
+  sel.disabled = !state.selected;
+  $("repoCount").textContent = `${shown.length} repo${shown.length === 1 ? "" : "s"}${hid.length ? `, ${hid.length} hidden` : ""}`;
+  const isRepo = !!state.selected && state.selected !== "_defaults";
+  $("copyBtn").hidden = !state.canEdit || !state.selected || shown.filter(s => s !== state.selected).length === 0;
+  $("hideBtn").hidden = !state.canEdit || !isRepo;
+  $("hideBtn").textContent = hidden.has(state.selected) ? "Show this repo again" : "Hide this repo";
+}
+
+function select(slug) {
+  state.selected = slug;
+  try { localStorage.setItem("autopilot.selected", slug); } catch (e) {}
+  closeCopy();
+  renderPicker();
+  renderSelected();
+}
+
+function openCopy() {
+  const src = state.selected; if (!src) return;
+  $("copyFrom").textContent = `From ${nameOf(src)}: ${levelName(src)}`;
+  const box = $("copyTargets"); box.textContent = "";
+  const targets = trackedSlugs().filter(s => s !== src && !state.hidden.includes(s));
+  for (const [org, list] of Object.entries(byOrg(targets))) {
+    const all = el("input", { type: "checkbox", id: `copy-org-${org}`, "aria-label": `All repos in ${org}` });
+    const boxes = list.map(s => el("input", { type: "checkbox", id: `copy-${s}`, "data-slug": s, onchange: () => { syncOrg(); updateCopyGo(); } }));
+    const syncOrg = () => { const n = boxes.filter(b => b.checked).length; all.checked = n === boxes.length; all.indeterminate = n > 0 && n < boxes.length; };
+    all.addEventListener("change", () => { boxes.forEach(b => b.checked = all.checked); all.indeterminate = false; updateCopyGo(); });
+    box.append(el("div", { class: "org" },
+      el("label", { class: "org-head", for: all.id }, all, el("span", { text: org }), el("span", { class: "lvl", text: `${list.length} repo${list.length === 1 ? "" : "s"}` })),
+      el("div", { class: "org-list" }, list.map((s, i) => el("label", { class: "opt", for: boxes[i].id }, boxes[i],
+        el("span", {}, nameOf(s), el("small", { class: "lvl", text: levelName(s) })))))));
+  }
+  updateCopyGo();
+  $("copyPanel").hidden = false;
+  $("copyPanel").scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "nearest" });
+}
+function closeCopy() { $("copyPanel").hidden = true; }
+function copyChecked() { return [...document.querySelectorAll("#copyTargets input[data-slug]:checked")].map(i => i.dataset.slug); }
+function updateCopyGo() {
+  const n = copyChecked().length;
+  $("copyGo").disabled = n === 0 || state.writeBusy;
+  $("copyGo").textContent = n ? `Copy to ${n} repo${n === 1 ? "" : "s"}` : "Copy";
+}
+
+async function doCopy() {
+  const src = state.selected, targets = copyChecked();
+  if (!targets.length || !state.db || !state.canEdit || state.writeBusy) return;
+  state.writeBusy = true; updateCopyGo();
+  const from = settingsFor(src), now = new Date().toISOString();
+  let done = 0;
+  try {
+    for (const t of targets) {
+      const st = settingsFor(t);
+      for (const k of COPY_FIELDS) st[k] = clone(from[k]);
+      await state.db.doc(`settings/${t}`).set(settingsBody(t, st, now));
+      done++;
+    }
+    toast(`Copied to ${done} repo${done === 1 ? "" : "s"}`);
+    try { await state.db.collection("changes").add({ at: now, by: state.me || null, repo: src, what: `Copied settings to ${targets.map(nameOf).join(", ")}` }); } catch (e) {}
+    closeCopy();
+  } catch (e) {
+    toast(done ? `Copied to ${done}, then stopped. Copy again for the rest.` : "Couldn't copy. Try again in a moment.");
+  } finally { state.writeBusy = false; updateCopyGo(); }
+}
+
+async function toggleHidden() {
+  const s = state.selected; if (!state.db || !state.canEdit || !s || s === "_defaults") return;
+  const hidden = new Set(state.hidden); const hiding = !hidden.has(s);
+  hiding ? hidden.add(s) : hidden.delete(s);
+  try {
+    await state.db.doc("config/page").set({ hidden: [...hidden].sort(), updated_at: new Date().toISOString() });
+    toast(hiding ? `Hid ${nameOf(s)}. It's under Hidden in the list.` : `${nameOf(s)} is back in the list`);
+  } catch (e) { toast("Couldn't change that. Try again in a moment."); }
+}
+
+function renderSelected() {
+  const s = state.selected;
+  $("repo").hidden = !s || s === "_defaults";
+  $("defaults").hidden = s !== "_defaults";
+  if (!s) return;
+  if (s === "_defaults") { renderSettings($("defaultsPanel"), "_defaults"); return; }
+  renderTime(s); renderRecs(s); renderSettings($("settingsPanel"), s);
+}
+
+function renderTime(slug) {
+  const a = state.audits[slug];
+  $("r-name").textContent = repoOf(slug);
+  if (!a) {
+    $("r-when").textContent = "Not audited yet";
+    $("bar-m").style.flex = "1 1 0"; $("bar-m").textContent = "Run /autopilot audit in this repo"; $("bar-w").style.flex = "0 0 0"; $("bar-w").textContent = "";
+    $("facts").textContent = ""; $("deployNote").textContent = ""; return;
+  }
+  if (a.error) { $("r-when").textContent = "Audit failed: " + a.error; return; }
+  $("r-when").textContent = `Last ${a.window_days || 30} days · audited ${a.generated_at ? new Date(a.generated_at).toLocaleDateString(undefined, { month: "short", day: "numeric" }) : ""}`;
+  const m = machineHoursPerWeek(a) || 0, w = waitHoursPerWeek(a) || 0, tot = m + w || 1;
+  $("bar-m").style.flex = `${m / tot} 1 0`; $("bar-m").textContent = `${fmtH(m)} h tests`;
+  $("bar-w").style.flex = `${w / tot} 1 0`; $("bar-w").textContent = `${fmtH(w)} h waiting`;
+  $("bar").setAttribute("aria-label", `${fmtH(m)} hours a week of tests running, ${fmtH(w)} hours a week waiting on a person`);
+  const f = $("facts"); f.textContent = "";
+  const fact = (big, small) => f.append(el("div", {}, el("b", { class: "num", text: big }), el("span", { text: small })));
+  fact(fmtMin(g(a, "prs.ci_min.median")), "tests take, for a typical change");
+  fact(fmtMin(g(a, "prs.wait_after_green_min.p90")), "the slowest tenth then wait for someone");
+  fact(`${g(a, "prs.waited_over_2h", 0)} of ${g(a, "prs.merged", 0)}`, "changes waited over 2 hours after passing");
+  fact(fmtH(g(a, "interruptions.per_active_day")), "times a day Claude stopped to ask");
+  const merged = g(a, "prs.merged", 0), pct = n => merged && n != null ? `${Math.round(100 * n / merged)}%` : "–";
+  fact(pct(g(a, "prs.merged_after_tests_passed")), "of changes merged after their tests passed");
+  fact(pct(g(a, "prs.merged_without_review")), "of changes merged with no review");
+  $("deployNote").textContent = g(a, "deploy.note", "") || "";
+}
+
+function recIsOn(rec, st) {
+  const k = g(rec, "setting.key"), v = g(rec, "setting.value");
+  if (!k) return false;
+  if (k === "merge") return LEVEL_INDEX[st.level] >= 2;
+  if (k === "review") return LEVEL_INDEX[st.level] >= 1;
+  if (k === "deploy") return LEVEL_INDEX[st.level] >= 3;
+  if (k === "tests" && v === "no-duplicate") return !!st.tests.skip_duplicate_main;
+  if (k === "tests" && v === "fast-lane") return st.tests.lane === "fast-lane";
+  if (k === "questions") return st.questions === v || (v === "batch" && st.questions === "decide-reversible");
+  return false;
+}
+function applyRec(st, rec) {
+  const k = g(rec, "setting.key"), v = g(rec, "setting.value");
+  const atLeast = id => { if (LEVEL_INDEX[st.level] < LEVEL_INDEX[id]) st.level = id; };
+  if (k === "merge") atLeast("auto-merge");
+  else if (k === "review") atLeast("ai-review");
+  else if (k === "deploy") atLeast("autopilot");
+  else if (k === "tests" && v === "no-duplicate") st.tests.skip_duplicate_main = true;
+  else if (k === "tests" && v === "fast-lane") st.tests.lane = "fast-lane";
+  else if (k === "questions") st.questions = v;
+  return st;
+}
+
+function renderRecs(slug) {
+  const box = $("recs"); box.textContent = "";
+  const a = state.audits[slug]; const st = settingsFor(slug);
+  const recs = (g(a || {}, "recommendations", []) || []).slice().sort((x, y) => (y.saves_hours_per_week || 0) - (x.saves_hours_per_week || 0));
+  if (!recs.length) { box.append(el("p", { class: "muted", text: a ? "Nothing stands out in this repo's last audit." : "Recommendations appear after the first audit." })); return; }
+  const dismissed = new Set(st.dismissed || []);
+  const shown = recs.filter(r => !dismissed.has(r.id));
+  for (const r of shown) {
+    const key = g(r, "setting.key"), oneOff = !key || key === "none";
+    const req = oneOff ? state.requests[`${slug}__${r.id}`] : null;
+    const on = recIsOn(r, st) || !!req;
+    const actions = el("div", { class: "actions" });
+    if (req) {
+      actions.append(el("span", { class: "state-on" }, req.status === "filed" ? "✓ Filed" : "✓ Queued"));
+      actions.append(req.issue_url
+        ? el("a", { class: "note", href: req.issue_url, target: "_blank", rel: "noopener", text: `Issue #${req.issue_number || ""}` })
+        : el("span", { class: "note", text: "Claude files it as an issue on the next /autopilot run" }));
+    } else if (on) actions.append(el("span", { class: "state-on" }, "✓ On"));
+    else if (oneOff) {
+      actions.append(el("button", { class: "btn primary", disabled: !state.canEdit, onclick: () => queueFix(slug, r), text: "Queue the fix" }));
+      actions.append(el("span", { class: "note", text: "A one-time fix, not a setting" }));
+    } else actions.append(el("button", { class: "btn primary", disabled: !state.canEdit, onclick: () => saveSettings(slug, applyRec(settingsFor(slug), r), `Turned on: ${r.title}`), text: "Turn on" }));
+    if (!on) actions.append(el("button", { class: "btn link", disabled: !state.canEdit, onclick: () => { const s2 = settingsFor(slug); s2.dismissed = [...new Set([...(s2.dismissed || []), r.id])]; saveSettings(slug, s2, `Set aside: ${r.title}`); }, text: "Not now" }));
+    box.append(el("article", { class: "rec" + (on ? " on" : "") },
+      el("div", { class: "body" },
+        el("div", { class: "meta" }, el("span", { class: `pill ${r.risk || "medium"}`, text: `${r.risk || "medium"} risk` }),
+          r.saves_hours_per_week ? el("span", { class: "saves", text: `saves ~${fmtH(r.saves_hours_per_week)} h/week` }) : null),
+        el("h3", { text: r.title }),
+        el("p", { class: "muted", text: r.why || "" }),
+        el("div", { class: "pc" },
+          el("div", { class: "pro" }, el("div", { class: "h", text: "For" }), el("ul", {}, (r.pros || []).map(p => el("li", { text: p })))),
+          el("div", { class: "con" }, el("div", { class: "h", text: "Against" }), el("ul", {}, (r.cons || []).map(p => el("li", { text: p })))))),
+      actions));
+  }
+  if (dismissed.size) box.append(el("button", { class: "btn link", disabled: !state.canEdit, onclick: () => { const s2 = settingsFor(slug); s2.dismissed = []; saveSettings(slug, s2, "Brought back set-aside recommendations"); }, text: `Show ${dismissed.size} set aside` }));
+}
+
+function radioGroup(name, items, value, onPick) {
+  return el("div", { class: "opts", role: "radiogroup" }, items.map(it => {
+    const id = `${name}-${it.id}`;
+    return el("label", { class: "opt", for: id },
+      el("input", { type: "radio", name, id, value: it.id, checked: value === it.id, disabled: !state.canEdit, onchange: () => onPick(it.id) }),
+      el("span", {}, it.name, el("small", { text: it.sub || "" })));
+  }));
+}
+
+function renderSettings(panel, slug) {
+  panel.textContent = "";
+  const st = settingsFor(slug), isDef = slug === "_defaults", saved = state.settings[slug];
+  const save = (mut, label) => { const s2 = settingsFor(slug); mut(s2); saveSettings(slug, s2, label); };
+  panel.append(el("div", { class: "panel-head" }, el("h2", { text: isDef ? "Defaults for new repos" : "Settings for this repo" }),
+    el("span", { class: "note", text: isDef ? "Used by any repo without its own settings" : saved ? "Own settings" : "Using the defaults" })));
+  if (!state.canEdit) panel.append(el("p", { class: "lock", text: "Only editors of this page can change repo settings. Ask the page's owner to make you an Editor." }));
+
+  // Level
+  const li = LEVEL_INDEX[st.level] ?? 0;
+  panel.append(el("div", { class: "field", style: "border-top:0;padding-top:0" },
+    el("div", { class: "lbl", text: "How far a change goes without you" }),
+    el("div", { class: "modes", role: "radiogroup", "aria-label": "Automation level" }, LEVELS.map((L, i) =>
+      el("button", { class: "mode" + (i < li ? " past" : ""), role: "radio", "aria-checked": String(i === li), disabled: !state.canEdit,
+        onclick: () => i !== li && save(s => s.level = L.id, `Level: ${L.name}`) },
+        el("span", { class: "track" }), el("span", { class: "step", text: `${i + 1} of 4` }), el("span", { class: "name", text: L.name })))),
+    el("div", { class: "who" },
+      el("div", { class: "own" }, el("div", { class: "h", text: "Runs on its own" }), el("ul", {}, LEVELS[li].own.map(t => el("li", { text: t })))),
+      el("div", { class: "you" }, el("div", { class: "h", text: "Still needs you" }), el("ul", {},
+        LEVELS[li].you.map(t => el("li", { text: t })),
+        st.sensitive.rule === "human" ? el("li", { text: "Every change to sign-in, payments, health data or the automation rules" }) : null,
+        el("li", { text: "Anything on the always-ask list below" }))))));
+
+  panel.append(el("div", { class: "field" }, el("div", { class: "lbl", text: "Sign-in, payments, health data and the automation rules" }),
+    radioGroup(`sens-${slug}`, SENSITIVE, st.sensitive.rule, v => save(s => s.sensitive.rule = v, `Sensitive areas: ${SENSITIVE.find(x => x.id === v).name}`)),
+    el("details", {}, el("summary", { text: "Which files count as sensitive" }),
+      (() => { const ta = el("textarea", { id: `paths-${slug}`, disabled: !state.canEdit, "aria-label": "Sensitive file patterns, one per line" }); ta.value = st.sensitive.paths.join("\n");
+        ta.addEventListener("change", () => save(s => s.sensitive.paths = ta.value.split("\n").map(x => x.trim()).filter(Boolean), "Sensitive file list edited")); return ta; })())));
+
+  panel.append(el("div", { class: "field" }, el("div", { class: "lbl", text: "When Claude is unsure" }),
+    radioGroup(`q-${slug}`, QUESTIONS, st.questions, v => save(s => s.questions = v, `Questions: ${QUESTIONS.find(x => x.id === v).name}`))));
+
+  panel.append(el("div", { class: "field" }, el("div", { class: "lbl", text: "Always ask me before" }),
+    el("div", { class: "opts" }, ALWAYS.map(a => { const id = `aa-${slug}-${a.id}`;
+      return el("label", { class: "opt", for: id }, el("input", { type: "checkbox", id, checked: st.always_ask.includes(a.id), disabled: !state.canEdit,
+        onchange: e => save(s => { const set = new Set(s.always_ask); e.target.checked ? set.add(a.id) : set.delete(a.id); s.always_ask = ALWAYS.map(x => x.id).filter(x => set.has(x)); }, `${e.target.checked ? "Always ask" : "Stopped always asking"}: ${a.name}`) }),
+        el("span", { text: a.name })); }))));
+
+  panel.append(el("div", { class: "field" }, el("div", { class: "lbl", text: "Tests" }),
+    radioGroup(`t-${slug}`, TESTS, st.tests.lane, v => save(s => s.tests.lane = v, `Tests: ${TESTS.find(x => x.id === v).name}`)),
+    el("label", { class: "opt", for: `dup-${slug}` }, el("input", { type: "checkbox", id: `dup-${slug}`, checked: !!st.tests.skip_duplicate_main, disabled: !state.canEdit,
+      onchange: e => save(s => s.tests.skip_duplicate_main = e.target.checked, e.target.checked ? "Skip the repeat test run after merging" : "Run tests again after merging") }),
+      el("span", {}, "Skip the repeat test run after merging", el("small", { text: "When the change already passed the same tests on the same code." })))));
+
+  if (!isDef) {
+    const upd = saved && saved.updated_at, app = saved && saved.applied_at;
+    const pending = upd && (!app || upd > app);
+    panel.append(pending
+      ? el("div", { class: "sync pending" }, el("span", {}, "Saved here, not in the repo yet. In this repo, run ", el("code", { text: "/autopilot apply" }), ". Claude opens one pull request for you to merge."))
+      : app ? el("div", { class: "sync done", text: `In the repo since ${new Date(app).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}.` })
+      : el("p", { class: "note", text: "Nothing changes in the repo until you pick a setting here and run /autopilot apply." }));
+  }
+}
+
+function settingsBody(slug, st, now) {
+  const prev = state.settings[slug] || null;
+  return { repo: slug === "_defaults" ? null : repoOf(slug), level: st.level, sensitive: st.sensitive, questions: st.questions, tests: st.tests,
+    always_ask: st.always_ask, dismissed: st.dismissed || [], updated_at: now, updated_by: state.me || null, applied_at: prev ? prev.applied_at || null : null };
+}
+
+async function saveSettings(slug, st, label) {
+  if (!state.db || !state.canEdit || state.writeBusy) return;
+  state.writeBusy = true;
+  const now = new Date().toISOString();
+  const body = settingsBody(slug, st, now);
+  try {
+    await state.db.doc(`settings/${slug}`).set(body);
+    toast("Saved");
+    try { await state.db.collection("changes").add({ at: now, by: state.me || null, repo: slug, what: label }); } catch (e) {}
+  } catch (e) {
+    toast(e && e.code === "invalid_argument" ? "You can't change settings on this page" : "Couldn't save. Try again in a moment.");
+    if (e && e.code === "invalid_argument") { state.canEdit = false; renderSelected(); }
+  } finally { state.writeBusy = false; }
+}
+
+async function queueFix(slug, r) {
+  if (!state.db || !state.canEdit || state.writeBusy) return;
+  state.writeBusy = true;
+  const now = new Date().toISOString();
+  try {
+    await state.db.doc(`requests/${slug}__${r.id}`).set({ repo: repoOf(slug), rec_id: r.id, title: r.title, why: r.why || "",
+      status: "queued", requested_at: now, requested_by: state.me || null, issue_number: null, issue_url: null });
+    toast("Queued");
+    try { await state.db.collection("changes").add({ at: now, by: state.me || null, repo: slug, what: `Queued fix: ${r.title}` }); } catch (e) {}
+  } catch (e) {
+    toast(e && e.code === "invalid_argument" ? "You can't queue fixes on this page" : "Couldn't queue it. Try again in a moment.");
+  } finally { state.writeBusy = false; }
+}
+
+async function renderLog() {
+  const ul = $("log"); if (!state.changes.length) return;
+  ul.textContent = "";
+  const ids = [...new Set(state.changes.map(c => c.by).filter(Boolean))];
+  let ps = {}; try { if (state.user && ids.length) ps = await state.user.profiles(ids); } catch (e) {}
+  for (const c of state.changes) {
+    const who = (c.by && ps[c.by] && ps[c.by].name) || "Someone";
+    const where = c.repo === "_defaults" ? "defaults" : repoOf(c.repo || "").split("/")[1] || "";
+    ul.append(el("li", {}, el("time", { datetime: c.at, text: new Date(c.at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) }),
+      el("span", {}, el("b", { text: who }), ` · ${where} · `, c.what || "")));
+  }
+}
+
+function renderMe() {
+  const box = $("meBody"); box.textContent = "";
+  if (!state.db || !state.me) { box.append(el("p", { class: "note", text: "Sign in to claude.ai to save your own preferences." })); return; }
+  const b = state.builder || { github: "", questions: "repo", quiet_hours: { from: "", to: "" } };
+  const gh = el("input", { type: "text", id: "me-gh", placeholder: "your GitHub username", value: b.github || "", autocomplete: "off" });
+  const q = el("select", { id: "me-q" }, [{ id: "repo", name: "Follow each repo's setting" }, ...QUESTIONS].map(x => el("option", { value: x.id, selected: (b.questions || "repo") === x.id, text: x.name })));
+  const from = el("input", { type: "time", id: "me-from", value: g(b, "quiet_hours.from", "") || "" });
+  const to = el("input", { type: "time", id: "me-to", value: g(b, "quiet_hours.to", "") || "" });
+  box.append(
+    el("label", { class: "inrow", for: "me-gh" }, el("span", { style: "min-width:9em", text: "GitHub username" }), gh),
+    el("label", { class: "inrow", for: "me-q" }, el("span", { style: "min-width:9em", text: "Questions" }), q),
+    el("div", { class: "inrow" }, el("span", { style: "min-width:9em", text: "Quiet hours" }), from, el("span", { class: "muted", text: "to" }), to),
+    el("p", { class: "note", text: "During quiet hours Claude keeps working on anything that can be undone and saves its questions for after." }),
+    el("div", {}, el("button", { class: "btn primary", text: "Save my preferences", onclick: async () => {
+      try { await state.db.doc(`builders/${state.me}`).set({ github: gh.value.trim(), questions: q.value, quiet_hours: { from: from.value, to: to.value }, updated_at: new Date().toISOString() }); toast("Saved your preferences"); }
+      catch (e) { toast("Couldn't save. Contributors and up can save their own preferences."); }
+    } })));
+}
+
+async function boot() {
+  $("repoSelect").addEventListener("change", e => select(e.target.value));
+  $("copyBtn").addEventListener("click", () => $("copyPanel").hidden ? openCopy() : closeCopy());
+  $("copyCancel").addEventListener("click", closeCopy);
+  $("copyGo").addEventListener("click", doCopy);
+  $("hideBtn").addEventListener("click", toggleHidden);
+  try { state.selected = localStorage.getItem("autopilot.selected"); } catch (e) {}
+  const db = await claude.use("db"); const user = await claude.use("user");
+  state.db = db; state.user = user;
+  if (user) { state.me = await user.id(); state.canEdit = await user.canEdit(); }
+  if (!db) { $("empty").hidden = false; $("empty").querySelector("p").textContent = "This page needs to be opened on claude.ai, signed in, to show its data."; renderMe(); return; }
+  db.collection("audits").onSnapshot(snap => {
+    state.audits = {}; snap.docs.forEach(d => state.audits[d.id] = d.data());
+    renderStrip(); renderPicker(); renderSelected();
+  }, () => {});
+  db.collection("settings").onSnapshot(snap => {
+    state.settings = {}; snap.docs.forEach(d => state.settings[d.id] = d.data());
+    renderPicker(); renderSelected();
+  }, () => {});
+  db.doc("config/page").onSnapshot(d => {
+    state.hidden = (d.exists && d.data().hidden) || [];
+    renderStrip(); renderPicker(); renderSelected();
+  }, () => {});
+  db.collection("requests").onSnapshot(snap => {
+    state.requests = {}; snap.docs.forEach(d => state.requests[d.id] = d.data());
+    renderSelected();
+  }, () => {});
+  db.collection("changes").orderBy("at", "desc").limit(12).onSnapshot(snap => { state.changes = snap.docs.map(d => d.data()); renderLog(); }, () => {});
+  if (state.me) db.doc(`builders/${state.me}`).onSnapshot(d => { const first = state.builder === null; state.builder = d.exists ? d.data() : undefined; if (first || !document.activeElement || !document.activeElement.id.startsWith("me-")) renderMe(); }, () => {});
+  renderMe();
+}
+if (window.claude && window.claude.use) boot(); else { $("empty").hidden = false; renderMe(); }
+</script>

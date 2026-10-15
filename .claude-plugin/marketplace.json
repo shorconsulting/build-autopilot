@@ -1,0 +1,16 @@
+{
+  "name": "build-autopilot",
+  "description": "Build Autopilot: where a project's build time goes, and which waits a repo can opt out of.",
+  "owner": {
+    "name": "David Shor",
+    "url": "https://github.com/shorconsulting"
+  },
+  "plugins": [
+    {
+      "name": "build-autopilot",
+      "source": "./",
+      "description": "Read-only audit of pull-request waits, CI, deploys, repo settings and Claude interruptions, with suggested automation per repo.",
+      "version": "0.1.0"
+    }
+  ]
+}

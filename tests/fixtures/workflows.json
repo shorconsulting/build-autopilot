@@ -1,0 +1,17 @@
+{
+ "total_count": 2,
+ "workflows": [
+  {
+   "id": 11,
+   "name": "test",
+   "path": ".github/workflows/test.yml",
+   "state": "active"
+  },
+  {
+   "id": 22,
+   "name": "Deploy to production",
+   "path": ".github/workflows/deploy.yml",
+   "state": "active"
+  }
+ ]
+}
