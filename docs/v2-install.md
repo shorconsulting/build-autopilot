@@ -44,6 +44,13 @@ pull request included):
 scripts/setup-github-gate.sh Velocity-Org/chasing-shade --ruleset
 ```
 
+Several repos at once (asks for the Anthropic key once, groups repos by org so each org's app is created and
+installed in one visit, and keeps going if one repo fails):
+
+```bash
+scripts/setup-github-gate-many.sh Velocity-Org/ranch-rides Velocity-Org/tidyhaus homeporthealth/app Shor-Consulting-Inc/wyset
+```
+
 The app's key stays on the computer that created it (`~/.build-autopilot/keys/<org>.pem`, readable only by you); the
 next repo in the same org reuses it. After the ruleset, do the checks in step 5. The manual steps follow, for reference.
 

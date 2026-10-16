@@ -28,7 +28,9 @@
 #   --key-file PATH        use this .pem for the app (for an app created earlier, or a regenerated key)
 #   --rotate-anthropic-key ask for the Anthropic key again even if the secret is already set
 #
-# Needs: gh (logged in as an org owner or GitHub App manager, and an admin of the repo), jq, python3.
+# Several repos at once: scripts/setup-github-gate-many.sh (asks for the Anthropic key once).
+#
+# Needs: gh (logged in as an org owner or GitHub App manager, and an admin of the repo), jq, python3, openssl, curl.
 
 set -euo pipefail
 
@@ -50,13 +52,15 @@ step() { printf '\n== %s\n' "$*"; }
 warn() { printf 'WARNING: %s\n' "$*" >&2; }
 die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
-usage() { sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 # Whatever happens (an error, Ctrl-C), remove the temp folder that may hold the app key and turn echo back on.
 CLEANUP_DIR=""
+GATE_TMP=""
 cleanup() {
   stty echo 2>/dev/null </dev/tty || true
   if [ -n "$CLEANUP_DIR" ]; then rm -rf "$CLEANUP_DIR"; fi
+  if [ -n "$GATE_TMP" ]; then rm -rf "$GATE_TMP"; fi
 }
 trap cleanup EXIT
 trap 'exit 130' INT TERM
@@ -87,6 +91,10 @@ while [ $# -gt 0 ]; do
   shift
 done
 [ -n "$REPO" ] || usage 1
+# A key handed over by setup-github-gate-many.sh: keep it in an unexported variable, so no program this script
+# starts (jq, curl, a browser) inherits it. It is only ever piped into gh secret set.
+GATE_ANTHROPIC_KEY="${ANTHROPIC_API_KEY_FOR_GATE:-}"
+unset ANTHROPIC_API_KEY_FOR_GATE
 case "$REPO" in */*) ;; *) die "give the repo as OWNER/REPO" ;; esac
 OWNER=${REPO%%/*}
 
@@ -108,7 +116,6 @@ OWNER=${REPO%%/*}
 say "Logged in as $ME. Repo: $REPO.$( [ "$DRY_RUN" -eq 1 ] && printf ' DRY RUN: nothing will change.' )"
 DEFAULT_BRANCH=$(printf '%s' "$REPO_JSON" | jq -r .default_branch)
 IS_ADMIN=$(printf '%s' "$REPO_JSON" | jq -r '.permissions.admin // false')
-REPO_ID=$(printf '%s' "$REPO_JSON" | jq -r .id)
 [ "$IS_ADMIN" = "true" ] || die "$ME is not an admin of $REPO; an admin has to run this"
 OWNER_TYPE=$(gh api "users/$OWNER" --jq .type)
 say "Default branch: $DEFAULT_BRANCH. Owner type: $OWNER_TYPE."
@@ -257,35 +264,67 @@ fi
 
 # ---------------------------------------------------------------- 2. install on the repo
 step "2. Install the app on $REPO"
-INSTALL_ID=""
-if [ "$APP_SLUG" != "<app slug>" ]; then
-  INSTALL_ID=$(gh api --paginate user/installations \
-      --jq ".installations[] | select(.app_slug == \"$APP_SLUG\" and (.account.login | ascii_downcase) == (\"$OWNER\" | ascii_downcase)) | .id" | head -1)
-fi
-installed_on_repo() {
-  [ -n "$INSTALL_ID" ] || return 1
-  gh api --paginate "user/installations/$INSTALL_ID/repositories" --jq '.repositories[].full_name' \
-    | grep -Fqix "$REPO"
+
+# Whether the app is installed on a repo is something only the app itself can be asked (a person's gh login gets
+# "403: must authenticate with a GitHub App"). So the script signs a short-lived app token (a JWT, valid 9 minutes)
+# with the app's key, writes it to a private temp file and hands it to curl from there, never on a command line.
+b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+app_get() {  # app_get PATH -> prints the HTTP status; the body is left in $GATE_TMP/body.json
+  local now h p sig
+  now=$(date +%s)
+  h=$(printf '%s' '{"alg":"RS256","typ":"JWT"}' | b64url)
+  p=$(printf '{"iat":%d,"exp":%d,"iss":"%s"}' "$((now - 60))" "$((now + 540))" "$APP_ID" | b64url)
+  sig=$(printf '%s.%s' "$h" "$p" | openssl dgst -sha256 -sign "$APP_KEY" -binary | b64url)
+  ( umask 077; printf 'Authorization: Bearer %s.%s.%s\n' "$h" "$p" "$sig" > "$GATE_TMP/auth" )
+  curl -sS -o "$GATE_TMP/body.json" -w '%{http_code}' -H @"$GATE_TMP/auth" \
+       -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' \
+       "https://api.github.com/$1" 2>/dev/null || printf '000'
+  rm -f "$GATE_TMP/auth"
 }
-if installed_on_repo; then
-  say "Already installed on $REPO."
-elif [ -n "$INSTALL_ID" ]; then
-  if confirm "Add $REPO to the app's existing installation?"; then
-    gh api -X PUT "user/installations/$INSTALL_ID/repositories/$REPO_ID" >/dev/null
-    say "Added."
-  fi
+open_page() {
+  ( command -v open >/dev/null 2>&1 && open "$1" ) || ( command -v xdg-open >/dev/null 2>&1 && xdg-open "$1" ) || true
+  say "  $1"
+}
+
+if [ "$APP_SLUG" = "<app slug>" ]; then
+  say "  (dry run) would check the app is installed on $REPO, and open the install page if it isn't"
 else
-  say "The app isn't installed in $OWNER yet. Your browser will open the install page:"
-  say "  choose 'Only select repositories', pick $REPO, and click Install."
-  if confirm "Open the install page?"; then
-    open_url="https://github.com/apps/$APP_SLUG/installations/new"
-    ( command -v open >/dev/null 2>&1 && open "$open_url" ) || ( command -v xdg-open >/dev/null 2>&1 && xdg-open "$open_url" ) || true
-    say "  $open_url"
-    printf 'Press Enter once it is installed... '; read -r _ </dev/tty || true
-    INSTALL_ID=$(gh api --paginate user/installations \
-        --jq ".installations[] | select(.app_slug == \"$APP_SLUG\" and (.account.login | ascii_downcase) == (\"$OWNER\" | ascii_downcase)) | .id" | head -1)
-    installed_on_repo || die "the app still isn't installed on $REPO; re-run when it is"
-    say "Installed."
+  command -v openssl >/dev/null 2>&1 || die "openssl is needed to check the app's installation"
+  command -v curl >/dev/null 2>&1 || die "curl is needed to check the app's installation"
+  GATE_TMP=$(mktemp -d "${TMPDIR:-/tmp}/build-autopilot.XXXXXX"); chmod 700 "$GATE_TMP"
+  ST=$(app_get "repos/$REPO/installation")
+  if [ "$ST" = "200" ]; then
+    jq -e '.suspended_at == null' "$GATE_TMP/body.json" >/dev/null \
+      || die "the app's installation in $OWNER is suspended; unsuspend it in $OWNER's settings > GitHub Apps, then re-run"
+    say "Already installed on $REPO."
+  else
+    [ "$ST" = "404" ] || die "couldn't ask GitHub whether the app is installed on $REPO (HTTP $ST). Is $APP_KEY the app's current key?"
+    ALSO=""
+    [ -n "${GATE_INSTALL_ALSO:-}" ] && ALSO=" (and, while you're there, also: $GATE_INSTALL_ALSO)"
+    if [ "$OWNER_TYPE" = "Organization" ]; then ST=$(app_get "orgs/$OWNER/installation"); else ST=$(app_get "users/$OWNER/installation"); fi
+    if [ "$ST" = "200" ]; then
+      IID=$(jq -r .id "$GATE_TMP/body.json")
+      if [ "$OWNER_TYPE" = "Organization" ]; then
+        URL="https://github.com/organizations/$OWNER/settings/installations/$IID"
+      else
+        URL="https://github.com/settings/installations/$IID"
+      fi
+      say "The app is installed in $OWNER but not on $REPO. On the page that opens, under 'Repository access',"
+      say "  add $REPO$ALSO, then click Save."
+    else
+      URL="https://github.com/apps/$APP_SLUG/installations/new"
+      say "The app isn't installed in $OWNER yet. On the page that opens, choose 'Only select repositories',"
+      say "  pick $REPO$ALSO, then click Install."
+    fi
+    if confirm "Open that page?"; then
+      open_page "$URL"
+      printf 'Press Enter once that is saved... '; read -r _ </dev/tty || true
+      [ "$(app_get "repos/$REPO/installation")" = "200" ] || die "the app still isn't installed on $REPO; re-run when it is"
+      jq -e '.suspended_at == null' "$GATE_TMP/body.json" >/dev/null || die "the app's installation in $OWNER is suspended"
+      say "Installed."
+    elif [ "$DRY_RUN" -eq 0 ]; then
+      die "the app has to be installed on $REPO before the rest"
+    fi
   fi
 fi
 
@@ -350,6 +389,13 @@ fi
 HAS_ANTHROPIC=$(gh secret list --env autopilot-review --repo "$REPO" --json name --jq '[.[] | select(.name == "ANTHROPIC_API_KEY")] | length' 2>/dev/null || echo 0)
 if [ "$HAS_ANTHROPIC" != "0" ] && [ "$ROTATE_ANTHROPIC" -eq 0 ]; then
   say "  ANTHROPIC_API_KEY is already set for autopilot-review (use --rotate-anthropic-key to replace it)."
+elif [ -n "$GATE_ANTHROPIC_KEY" ]; then
+  # Given once by setup-github-gate-many.sh, through the environment (never on a command line).
+  if confirm "Store the Anthropic API key you entered at the start for the review job?"; then
+    require_locked autopilot-review
+    printf '%s' "$GATE_ANTHROPIC_KEY" | gh secret set ANTHROPIC_API_KEY --env autopilot-review --repo "$REPO"
+    say "  Stored."
+  fi
 elif confirm "Set the Anthropic API key for the review job (you type it; it isn't shown)?"; then
   require_locked autopilot-review
   say "  Tip: make a separate key in its own Anthropic workspace with a monthly spend limit."
