@@ -41,7 +41,7 @@ Three comment commands on a pull request:
 | Gate logic | `templates/github/autopilot/gate.py` |
 | Pinned Claude SDK | `templates/github/autopilot/requirements.txt` |
 | Duplicate-test skip | `templates/github/autopilot/skip_duplicate_main.py` |
-| Install steps for `/build-autopilot:autopilot apply` | `docs/v2-install.md` |
+| Install steps for `/build-autopilot:apply` | `docs/v2-install.md` |
 | Tests (71) | `scripts/test_gate.py` |
 | Dry run, one scenario per rule, incl. what each reports under "Decided without you" | `scripts/gate_dryrun.py` (last output: `out/gate-dryrun.txt`) |
 | Draft for chasing-shade's test.yml (not applied) | `drafts/chasing-shade/test.yml`, `test.yml.patch` |
@@ -125,7 +125,7 @@ injection in issues, web pages or code they read; anyone with push access; outsi
    the second review on sensitive changes: about $40-150/month. Not measured; no live call was made.
 3. **Who may `/autopilot approve`, and which login agents use.** Default now: admins and maintainers, but never on a
    pull request they opened or wrote commits in (`AUTOPILOT_ALLOW_SELF_APPROVE: "false"`, the reviewer's
-   recommendation). Cost: a PR that David's own Claude session opened (for example an `/build-autopilot:autopilot apply` update) needs
+   recommendation). Cost: a PR that David's own Claude session opened (for example an `/build-autopilot:apply` update) needs
    another admin's approval, or David temporarily switching the ruleset off in GitHub's settings. The real fix is
    for agents not to run with an admin's login: give Claude sessions and Sling a separate identity with write access
    only. Until then, no comment-based check can tell David from a script using David's token, and an admin token can

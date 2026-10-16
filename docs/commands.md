@@ -1,15 +1,11 @@
----
-description: Measure where builds wait on people, and apply each repo's automation settings from the Build Autopilot page
-argument-hint: "setup | install [owner/repo] | audit [owner/repo ... | --org ORG] [--since 30d] | apply [owner/repo ...] | apply --me | settings"
----
+# Build Autopilot commands: the shared guide
 
-# /autopilot
-
-Arguments: `$ARGUMENTS`
+Each `/build-autopilot:<name>` command reads this file: the opening part (the page, its store, and "Every run: file
+queued fixes first"), then its own section below.
 
 The plugin folder is `${CLAUDE_PLUGIN_ROOT}`. Each person (or team) has their own Build Autopilot page. Its link is
 `artifact` in `~/.build-autopilot/config.json` on this computer. If that file is missing or has no `artifact`, run
-`setup` first, then carry on with the subcommand that was asked for.
+`setup` first, then carry on with the command that was asked for.
 
 The page keeps its data in its own store, which you read and write with the `ArtifactData` tool (load it with
 ToolSearch if it is deferred):
@@ -26,7 +22,7 @@ ToolSearch if it is deferred):
 
 ## Every run: file queued fixes first
 
-Before the subcommand, `ArtifactData` `query` on `requests` for `status == queued`. For each one:
+Before the command's own steps, `ArtifactData` `query` on `requests` for `status == queued`. For each one:
 
 1. If an open issue in that repo already has the same title, link it instead of filing a new one.
 2. Otherwise file a GitHub issue in the repo (`gh issue create --body-file`), titled with the request's `title`,
@@ -41,7 +37,7 @@ Before the subcommand, `ArtifactData` `query` on `requests` for `status == queue
 
 Mention the filed issues in one line each in your reply.
 
-Choose the subcommand from the first word of the arguments. With no arguments, run `audit` for the current repo.
+Commands that take a repo default to the current checkout's `owner/repo` when none is given.
 
 ## setup
 
@@ -68,7 +64,7 @@ Connects this computer to a Build Autopilot page and chooses which repos it trac
    per repo with its last push date), and say which are already on the page (`audits` documents). Ask which to
    track: numbers, owner names ("all of homeporthealth"), or "all". Don't guess; this is their choice.
 3. Run `audit` for the chosen repos (one run with several `--repo`). Repos can be added later with
-   `/build-autopilot:autopilot audit owner/repo`, and hidden on the page without deleting anything.
+   `/build-autopilot:audit owner/repo`, and hidden on the page without deleting anything.
 4. Set `plugin_path` on `config/page` to `${CLAUDE_PLUGIN_ROOT}` (`ArtifactData` `update`, or `set` keeping `hidden` if the
    document doesn't exist yet), so the page's "Next step" panel shows full script paths.
 5. Reply with the page link and one line on what to do there: pick a repo from the list, choose its settings, and

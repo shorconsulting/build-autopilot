@@ -14,10 +14,11 @@
 #      autopilot/gate check required, plus the repo's test checks). Only needed for level auto-merge
 #      or autopilot. Note: after this, nobody can push straight to the default branch.
 #
-# It does not add the gate's files to the repo: run /build-autopilot:autopilot apply for that (one pull request a person merges).
+# It does not add the gate's files to the repo: run /build-autopilot:apply for that (one pull request a person merges).
 #
 # Usage:
 #   scripts/setup-github-gate.sh OWNER/REPO [--ruleset] [--test-check "NAME"]... [--dry-run] [--yes]
+#   scripts/setup-github-gate.sh OWNER/REPO --pause-rules | --resume-rules
 #                                           [--key-file PATH] [--rotate-anthropic-key]
 #
 #   --ruleset              also create/update the branch ruleset (asks which test checks to require)
@@ -27,6 +28,11 @@
 #   --yes                  don't ask before each change
 #   --key-file PATH        use this .pem for the app (for an app created earlier, or a regenerated key)
 #   --rotate-anthropic-key ask for the Anthropic key again even if the secret is already set
+#   --allow-partial-checks require the chosen checks even if some recent pull requests didn't run them
+#   --allow-dropping       let the ruleset leave out checks that skip some pull requests (they then aren't required
+#                          anywhere, so a failure in them wouldn't stop a merge); without it the script stops
+#   --pause-rules          break glass: switch the "build-autopilot" ruleset off, so a person can merge past it
+#   --resume-rules         switch it back on
 #
 # Several repos at once: scripts/setup-github-gate-many.sh (asks for the Anthropic key once).
 #
@@ -45,6 +51,9 @@ DRY_RUN=0
 ASSUME_YES=0
 KEY_FILE=""
 ROTATE_ANTHROPIC=0
+ALLOW_PARTIAL=0
+ALLOW_DROPPING=0
+RULES_ACTION=""
 TEST_CHECKS=()
 
 say()  { printf '%s\n' "$*"; }
@@ -52,7 +61,7 @@ step() { printf '\n== %s\n' "$*"; }
 warn() { printf 'WARNING: %s\n' "$*" >&2; }
 die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
-usage() { sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,39p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 # Whatever happens (an error, Ctrl-C), remove the temp folder that may hold the app key and turn echo back on.
 CLEANUP_DIR=""
@@ -84,6 +93,10 @@ while [ $# -gt 0 ]; do
     --yes) ASSUME_YES=1 ;;
     --key-file) [ $# -ge 2 ] || die "--key-file needs a path"; KEY_FILE="$2"; shift ;;
     --rotate-anthropic-key) ROTATE_ANTHROPIC=1 ;;
+    --allow-partial-checks) ALLOW_PARTIAL=1 ;;
+    --allow-dropping) ALLOW_DROPPING=1 ;;
+    --pause-rules) RULES_ACTION=pause ;;
+    --resume-rules) RULES_ACTION=resume ;;
     -h|--help) usage 0 ;;
     -*) die "unknown option: $1 (see $PROG --help)" ;;
     *) [ -z "$REPO" ] || die "only one OWNER/REPO at a time"; REPO="$1" ;;
@@ -120,7 +133,7 @@ IS_ADMIN=$(printf '%s' "$REPO_JSON" | jq -r '.permissions.admin // false')
 OWNER_TYPE=$(gh api "users/$OWNER" --jq .type)
 say "Default branch: $DEFAULT_BRANCH. Owner type: $OWNER_TYPE."
 
-# The repo's settings (if /build-autopilot:autopilot apply has written them): a repo that keeps its own pipeline, or where a person
+# The repo's settings (if /build-autopilot:apply has written them): a repo that keeps its own pipeline, or where a person
 # merges everything, doesn't get the gate at all.
 POLICY_RAW=$(gh api "repos/$REPO/contents/.github/autopilot.json?ref=$DEFAULT_BRANCH" --jq .content 2>/dev/null \
                | base64 -d 2>/dev/null || true)
@@ -149,7 +162,7 @@ leave_gate() {
     fi
   fi
   if gh api "repos/$REPO/contents/.github/workflows/autopilot.yml?ref=$DEFAULT_BRANCH" >/dev/null 2>&1; then
-    say "The gate's files are still in the repo (it does nothing now). /build-autopilot:autopilot apply opens a pull request that removes them."
+    say "The gate's files are still in the repo (it does nothing now). /build-autopilot:apply opens a pull request that removes them."
   fi
   exit 0
 }
@@ -166,6 +179,48 @@ mkdir -p "$STATE_DIR/apps" "$STATE_DIR/keys"
 chmod 700 "$STATE_DIR" "$STATE_DIR/keys"
 APP_META="$STATE_DIR/apps/$OWNER.json"
 APP_KEY="$STATE_DIR/keys/$OWNER.pem"
+
+# ---------------------------------------------------------------- break glass: pause or resume the ruleset
+if [ -n "$RULES_ACTION" ]; then
+  step "Branch rules: $RULES_ACTION"
+  RID=$(gh api --paginate "repos/$REPO/rulesets?includes_parents=false" --jq ".[] | select(.name == \"$RULESET_NAME\") | .id" | head -1)
+  [ -n "$RID" ] || die "$REPO has no \"$RULESET_NAME\" ruleset"
+  set_enforcement() {  # set_enforcement active|disabled: send the ruleset back whole, changing only enforcement
+    gh api "repos/$REPO/rulesets/$RID" \
+      | jq --arg e "$1" '{name, target, enforcement: $e, conditions, rules, bypass_actors: (.bypass_actors // [])}' \
+      | gh api -X PUT "repos/$REPO/rulesets/$RID" --input - >/dev/null
+    [ "$(gh api "repos/$REPO/rulesets/$RID" --jq .enforcement)" = "$1" ] || die "GitHub didn't change the ruleset; check it in $REPO's Settings > Rules"
+  }
+  LOG_TITLE="Build Autopilot: branch rules paused"
+  if [ "$RULES_ACTION" = "pause" ]; then
+    say "While paused, anyone with write access (and any Claude session using such a login) can merge into"
+    say "$DEFAULT_BRANCH without the gate or the tests, and the protection against force-pushes and deleting"
+    say "$DEFAULT_BRANCH is off too. Use it to get one stuck pull request through, then resume straight away."
+    say "(Narrower: untick the stuck check on the settings page and re-run with --ruleset.)"
+    [ "$DRY_RUN" -eq 1 ] && { say "  (dry run) would ask, then pause"; exit 0; }
+    printf 'Type "pause" to switch the rules off: '            # asked even with --yes: this is never automatic
+    read -r ans </dev/tty || ans=""
+    [ "$ans" = "pause" ] || die "not paused"
+    set_enforcement disabled
+    printf '%s\n' "Paused by @$ME on $(date -u +%Y-%m-%dT%H:%MZ) with setup-github-gate.sh --pause-rules." \
+      "While this issue is open, the build-autopilot ruleset is off: merges skip the gate and the tests." \
+      "Resume with: scripts/setup-github-gate.sh $REPO --resume-rules (that closes this issue)." \
+      | gh issue create -R "$REPO" --title "$LOG_TITLE" --body-file - >/dev/null 2>&1 \
+      || warn "couldn't open the log issue; note the pause somewhere"
+    say "  Paused, and logged as an open issue in $REPO."
+    say "  Resume with: $0 $REPO --resume-rules"
+  else
+    if confirm "Switch the \"$RULESET_NAME\" ruleset in $REPO back on?"; then
+      set_enforcement active
+      for n in $(gh issue list -R "$REPO" --state open --search "\"$LOG_TITLE\" in:title" --json number,title \
+                   --jq ".[] | select(.title == \"$LOG_TITLE\") | .number"); do
+        gh issue close "$n" -R "$REPO" --comment "Resumed by @$ME on $(date -u +%Y-%m-%dT%H:%MZ)." >/dev/null 2>&1 || true
+      done
+      say "  Back on."
+    fi
+  fi
+  exit 0
+fi
 
 # ---------------------------------------------------------------- 1. the app
 step "1. The Build Autopilot GitHub App for $OWNER"
@@ -469,7 +524,7 @@ if [ "$DO_RULESET" -eq 1 ]; then
   # The ruleset requires the gate's check; until the gate's workflow is on the default branch nothing could ever
   # pass it, including the pull request that installs the gate.
   if ! gh api "repos/$REPO/contents/.github/workflows/autopilot.yml?ref=$DEFAULT_BRANCH" >/dev/null 2>&1; then
-    die "the gate isn't on $DEFAULT_BRANCH yet, so a ruleset requiring it would block every merge. Run /build-autopilot:autopilot apply, merge that pull request, then re-run this with --ruleset"
+    die "the gate isn't on $DEFAULT_BRANCH yet, so a ruleset requiring it would block every merge. Run /build-autopilot:apply, merge that pull request, then re-run this with --ruleset"
   fi
   if [ "${#TEST_CHECKS[@]}" -eq 0 ] && [ -n "$POLICY_RAW" ]; then
     while IFS= read -r line; do [ -n "$line" ] && TEST_CHECKS+=("$line"); done <<EOF
@@ -477,12 +532,38 @@ $(printf '%s' "$POLICY_RAW" | jq -r '(.required_checks // [])[] | strings')
 EOF
     [ "${#TEST_CHECKS[@]}" -eq 0 ] || say "Using the checks chosen on the settings page (required_checks)."
   fi
+  # A required check that doesn't run on every pull request (a `paths:` filter, a branch filter) never reports on
+  # the others, and GitHub then blocks them for good, admins included. So look at what ran on recent pull requests.
+  [ -n "$GATE_TMP" ] || { GATE_TMP=$(mktemp -d "${TMPDIR:-/tmp}/build-autopilot.XXXXXX"); chmod 700 "$GATE_TMP"; }
+  RECENT=$(gh pr list -R "$REPO" --state all --base "$DEFAULT_BRANCH" --limit 40 --json headRefOid,isDraft \
+             --jq '[.[] | select(.isDraft | not)][:20][].headRefOid')
+  NPR=$(printf '%s\n' "$RECENT" | grep -c . || true)
+  : > "$GATE_TMP/pr_checks"
+  while IFS= read -r sha; do
+    [ -n "$sha" ] || continue
+    gh api --paginate "repos/$REPO/commits/$sha/check-runs?app_id=$ACTIONS_APP_ID&per_page=100" \
+      --jq '.check_runs[].name' 2>/dev/null | sort -u \
+      | grep -vxE 'autopilot mark|AI review|autopilot gate|autopilot command|autopilot/gate' >> "$GATE_TMP/pr_checks" || true
+  done <<EOF
+$RECENT
+EOF
+  NEED=$(( (NPR * 9 + 9) / 10 ))     # at least 90% of the recent pull requests, rounded up
+  ran_on() { grep -Fxc -- "$1" "$GATE_TMP/pr_checks" || true; }
   if [ "${#TEST_CHECKS[@]}" -eq 0 ]; then
-    HEAD_SHA=$(gh api "repos/$REPO/commits/$DEFAULT_BRANCH" --jq .sha)
-    FOUND=$(gh api --paginate "repos/$REPO/commits/$HEAD_SHA/check-runs?app_id=$ACTIONS_APP_ID&per_page=100" \
-              --jq '.check_runs[].name' | sort -u)
-    [ -n "$FOUND" ] || die "no GitHub Actions checks on $DEFAULT_BRANCH's latest commit; pass them with --test-check NAME"
-    say "Test checks GitHub Actions reported on $DEFAULT_BRANCH's latest commit:"
+    [ "$NPR" -gt 0 ] || die "no pull requests into $DEFAULT_BRANCH to learn the checks from; pass them with --test-check NAME"
+    FOUND=$(sort "$GATE_TMP/pr_checks" | uniq -c | awk -v need="$NEED" '$1 >= need {sub(/^ *[0-9]+ /, ""); print}')
+    PARTIAL=$(sort "$GATE_TMP/pr_checks" | uniq -c | awk -v need="$NEED" '$1 < need {n=$1; sub(/^ *[0-9]+ /, ""); print "  - " $0 " (ran on " n ")"}')
+    if [ -n "$PARTIAL" ]; then
+      say "These checks didn't run on every recent pull request (probably a paths: filter). Out of the last $NPR:"
+      printf '%s\n' "$PARTIAL"
+      say "Requiring them would block the pull requests that skip them; leaving them out means a failure in them"
+      say "wouldn't stop a merge. Best: make each one always report (drop the filter, or add a small job that always"
+      say "runs and reports the suite's result), then re-run this."
+      [ "$ALLOW_DROPPING" -eq 1 ] || die "stopped so nothing is dropped quietly. To leave them out on purpose, re-run with --allow-dropping"
+      warn "leaving those out on purpose (--allow-dropping): a failure in them won't stop a merge"
+    fi
+    [ -n "$FOUND" ] || die "no test check ran on every recent pull request. Make one always report (for example drop its paths: filter, or add a small job that always runs and reports the outcome), then re-run"
+    say "Test checks that ran on every one of the last $NPR pull requests:"
     printf '%s\n' "$FOUND" | sed 's/^/  - /'
     if [ "$DRY_RUN" -eq 1 ] || confirm "Require all of these before a merge?"; then
       while IFS= read -r line; do [ -n "$line" ] && TEST_CHECKS+=("$line"); done <<EOF
@@ -490,6 +571,22 @@ $FOUND
 EOF
     else
       die "pass the checks to require with --test-check NAME (repeat it)"
+    fi
+  else
+    if [ "$NPR" -lt 5 ]; then
+      warn "only $NPR merged pull requests to compare against; make sure each required check runs on every pull request"
+    else
+      BAD=""
+      for c in "${TEST_CHECKS[@]}"; do
+        n=$(ran_on "$c")
+        [ "$n" -ge "$NEED" ] || BAD="$BAD
+  - $c (ran on $n of the last $NPR pull requests)"
+      done
+      if [ -n "$BAD" ] && [ "$ALLOW_PARTIAL" -eq 0 ]; then
+        die "these checks didn't run on every recent pull request, so requiring them would block the ones that skip them:$BAD
+Make them always report, untick them on the settings page, or re-run with --allow-partial-checks if you're sure"
+      fi
+      [ -z "$BAD" ] || warn "requiring checks that some pull requests skip:$BAD"
     fi
   fi
   CHECKS_JSON=$(printf '%s\n' "${TEST_CHECKS[@]}" | jq -R . | jq -s --argjson actions "$ACTIONS_APP_ID" \
@@ -511,7 +608,8 @@ EOF
   printf '%s\n' "${TEST_CHECKS[@]}" | sed 's/^/  - /'
   say "Nobody (you included) can push straight to $DEFAULT_BRANCH after this, and there is no bypass list."
   EXISTING=$(gh api --paginate "repos/$REPO/rulesets?includes_parents=false" --jq ".[] | select(.name == \"$RULESET_NAME\") | .id" | head -1)
-  if confirm "${EXISTING:+Update}${EXISTING:-Create} the ruleset now?"; then
+  if [ -n "$EXISTING" ]; then VERB="Update"; else VERB="Create"; fi
+  if confirm "$VERB the ruleset now?"; then
     if [ -n "$EXISTING" ]; then
       printf '%s' "$RULESET" | gh api -X PUT "repos/$REPO/rulesets/$EXISTING" --input - >/dev/null
     else
@@ -525,6 +623,8 @@ fi
 
 # ---------------------------------------------------------------- done
 step "Done"
-say "Next: in $REPO, run /build-autopilot:autopilot apply. It opens one pull request adding the gate's files; a person merges it."
+if [ "$DO_RULESET" -eq 0 ]; then
+  say "Next: in $REPO, run /build-autopilot:apply. It opens one pull request adding the gate's files; a person merges it."
+fi
 say "Then do the checks in step 5 of docs/v2-install.md (README-only PR, a workflow PR, /autopilot stop, the spoof test)."
 say "The app key stays at $APP_KEY on this computer; keep it out of every repo and chat."

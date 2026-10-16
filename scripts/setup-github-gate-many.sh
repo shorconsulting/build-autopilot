@@ -11,7 +11,7 @@
 #
 #   --dry-run   show what would change in every repo; change nothing
 #   --ruleset   also add each repo's branch ruleset (only works once the gate is on that repo's default branch,
-#               i.e. after /build-autopilot:autopilot apply's pull request is merged; repos without it are skipped with a note)
+#               i.e. after /build-autopilot:apply's pull request is merged; repos without it are skipped with a note)
 #
 # Output is also saved to ~/.build-autopilot/logs/ (no keys are ever printed).
 
@@ -116,7 +116,7 @@ say "################ Summary"
 printf '%s' "$RESULTS" | tee -a "$LOG"
 say ""
 if [ -z "$RULESET" ]; then
-  say "Next, for each repo: run /build-autopilot:autopilot apply in a Claude session there and merge the pull request it opens."
+  say "Next, for each repo: run /build-autopilot:apply in a Claude session there and merge the pull request it opens."
   say "Then add the branch rules for all of them at once:"
   say "  $0 --ruleset $(printf '%s' "$SORTED" | tr '\n' ' ')"
 fi

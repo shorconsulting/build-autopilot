@@ -1,7 +1,7 @@
 # Installing the v2 gate in a repo
 
-This is the procedure `/build-autopilot:autopilot apply` follows to put the GitHub side of a repo's autopilot settings in place. Steps
-marked **(admin)** change repo or org settings and need a person with admin rights; `/build-autopilot:autopilot apply` prints the exact
+This is the procedure `/build-autopilot:apply` follows to put the GitHub side of a repo's autopilot settings in place. Steps
+marked **(admin)** change repo or org settings and need a person with admin rights; `/build-autopilot:apply` prints the exact
 command for those and does not run them itself. Everything else arrives in the repo through one pull request that a
 person merges.
 
@@ -36,7 +36,7 @@ scripts/setup-github-gate.sh Velocity-Org/chasing-shade --dry-run
 scripts/setup-github-gate.sh Velocity-Org/chasing-shade
 ```
 
-Then `/build-autopilot:autopilot apply` and merge its pull request. Only after the gate is on the default branch, add the ruleset
+Then `/build-autopilot:apply` and merge its pull request. Only after the gate is on the default branch, add the ruleset
 (the script refuses earlier, because a ruleset requiring the gate's check would block every merge, the install
 pull request included):
 
@@ -179,6 +179,29 @@ Replace `1234567` with the App ID and the test names with the repo's own. Keep `
 decides otherwise (see the report): anyone on that list, including a Claude session using their login, can merge
 around the gate.
 
+**Every required check must run on every pull request.** A check behind a `paths:` (or branch) filter never reports
+on the pull requests it skips, and GitHub then blocks those for good, admins included, because the ruleset has no
+bypass list. The setup script looks at the last 20 pull requests (any state, drafts left out). If a check ran on fewer
+than 90% of them it stops and says so, rather than quietly leaving it out: a check that isn't required doesn't stop a
+merge when it fails. `--allow-dropping` leaves such checks out on purpose; `--allow-partial-checks` requires them
+anyway. To require a filtered suite, make it always report first
+(drop the filter, or add a small job that always runs and passes or fails on the suite's result).
+
+**Break glass.** If a rule is stuck anyway, an admin can switch the ruleset off and back on:
+
+```bash
+scripts/setup-github-gate.sh OWNER/REPO --pause-rules
+```
+
+```bash
+scripts/setup-github-gate.sh OWNER/REPO --resume-rules
+```
+
+While it's off, anyone with write access can merge without the gate or the tests, and force-pushing or deleting the
+default branch is allowed too, so resume as soon as the stuck pull request is through. Pausing always asks you to type
+"pause" (even with `--yes`) and opens an issue in the repo as a record; resuming closes it. Claude sessions are told
+never to do either. Narrower than a pause: untick the stuck check on the settings page and re-run with `--ruleset`.
+
 ### 5. Check it works
 
 1. A pull request that only edits a README: within a few minutes, a "Build Autopilot: Approved" comment, a green
@@ -206,7 +229,7 @@ as a comment on the merged pull request, with how to run the tests anyway.
 
 ## Updating the gate
 
-Re-run `/build-autopilot:autopilot apply`: it opens one pull request with the new template files, which a person merges (the gate
+Re-run `/build-autopilot:apply`: it opens one pull request with the new template files, which a person merges (the gate
 marks it "needs a person", as it does for any change to itself).
 
 To move to a newer Claude SDK, regenerate the hash-pinned requirements on any machine with Python 3.12:

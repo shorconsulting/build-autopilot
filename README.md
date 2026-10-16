@@ -18,31 +18,38 @@ Nothing about any particular person's repos is built in.
 |---|---|
 | `scripts/audit.py` | Read-only. For each repo: how long changes wait after tests pass, how long tests take, repeat test runs, how releases happen, which automation GitHub has turned on, and how often Claude sessions stopped to ask (counts only; no transcript text leaves your computer). Ends with recommendations, each with pros, cons, risk and hours saved. |
 | The Build Autopilot page | Shows each repo's audit, lets you turn recommendations on, and holds each repo's settings, plus each builder's own interruption preferences. One page per person or team; its link is kept in `~/.build-autopilot/config.json`. Pick a repo from the list; copy its settings to other repos in one step. |
-| `/build-autopilot:autopilot` | `setup` makes or connects your page and picks your repos; `audit` fills the page; `apply` writes a repo's settings into `.github/autopilot.json` with one pull request; `apply --me` saves your own preferences on this computer. |
+| `/build-autopilot:setup`, `:install`, `:audit`, `:apply`, `:settings` | `setup` makes or connects your page and picks your repos; `install` takes a repo through every remaining step; `audit` fills the page; `apply` writes a repo's settings into `.github/autopilot.json` with one pull request; `apply --me` saves your own preferences on this computer. |
 | `autopilot-policy` skill | Makes every Claude session in a repo follow that repo's settings. |
 | `docs/policy.md` | The settings, field by field, and what enforces each one today. |
-| `templates/github/` (v2) | The GitHub gate: a workflow that reviews every pull request with Claude, adds a second security review for sensitive files, and turns on auto-merge when the settings allow. Installed by `/build-autopilot:autopilot apply` following `docs/v2-install.md`; design and threat model in `docs/v2-report.md`. |
+| `templates/github/` (v2) | The GitHub gate: a workflow that reviews every pull request with Claude, adds a second security review for sensitive files, and turns on auto-merge when the settings allow. Installed by `/build-autopilot:apply` following `docs/v2-install.md`; design and threat model in `docs/v2-report.md`. |
 
-## Install (each account)
+## Install (once per Mac login)
 
+```bash
+claude plugin marketplace add shorconsulting/build-autopilot
 ```
-/plugin install build-autopilot --marketplace shorconsulting/build-autopilot
+
+```bash
+claude plugin install build-autopilot@build-autopilot
 ```
 
-Needs `python3` (3.9+), `git`, and `gh` logged in with read access to the repos you audit. Then run `/build-autopilot:autopilot setup`:
+Updates: `claude plugin marketplace update build-autopilot`, then restart Claude.
+
+Needs `python3` (3.9+), `git`, and `gh` logged in with read access to the repos you audit. Then run `/build-autopilot:setup`:
 it asks whether you already have a page (for example one a teammate shared with you as an Editor) or makes you a new
 one, then lists the repos you've pushed to lately and asks which to track.
 
 ## Use
 
 ```
-/build-autopilot:autopilot setup                         # first run: your page and which repos it tracks
-/build-autopilot:autopilot audit                         # the current repo, last 30 days
-/build-autopilot:autopilot audit owner/repo              # add or refresh one repo
-/build-autopilot:autopilot audit --org my-org            # every repo in an org pushed to in the window
-/build-autopilot:autopilot settings                      # open the page
-/build-autopilot:autopilot apply                         # put the page's choices into the current repo
-/build-autopilot:autopilot apply --me                    # your own preferences, on this computer
+/build-autopilot:setup                         # first run: your page and which repos it tracks
+/build-autopilot:install                       # take the current repo through every remaining step
+/build-autopilot:audit                         # the current repo, last 30 days
+/build-autopilot:audit owner/repo              # add or refresh one repo
+/build-autopilot:audit --org my-org            # every repo in an org pushed to in the window
+/build-autopilot:settings                      # open the page
+/build-autopilot:apply                         # put the page's choices into the current repo
+/build-autopilot:apply --me                    # your own preferences, on this computer
 ```
 
 ### Without Claude

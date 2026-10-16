@@ -72,6 +72,13 @@ report its verdict. If it says "Changes needed", fix and push; if "Needs a perso
 Never post `/autopilot approve`, `/autopilot resume` or remove the `autopilot-hold` label: those are a person's
 decisions, even when your login could do it.
 
+**Never go around the branch rules.** Don't merge with `--admin`, don't pause, edit or delete the `build-autopilot`
+ruleset, and don't run `setup-github-gate.sh --pause-rules`, even when your login could: those are a person's
+decisions. If a pull request is stuck because a required check never ran on it (a workflow `paths:` filter skipped it),
+say so in one line, and propose the fix: make that check always report (drop the filter, or add a small job that
+always runs and reports). The person can also untick that check on the settings page and re-run
+`setup-github-gate.sh OWNER/REPO --ruleset`, or pause the rules themselves.
+
 **How to merge once tests pass** (repos without the gate). Check whether the default branch has a rule requiring tests to pass
 (`gh api repos/{owner}/{repo}/branches/{branch}/protection --jq .required_status_checks.contexts`, or a ruleset
 with required status checks).

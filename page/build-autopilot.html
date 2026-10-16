@@ -173,7 +173,7 @@ details > summary { cursor: pointer; color: var(--muted) }
   <header class="top">
     <div class="eyebrow">Build Autopilot</div>
     <h1>Where your builds wait on a person</h1>
-    <p>Each repo's last audit shows how long changes sit after their tests pass, and how often Claude stops to ask. Choose, per repo, how far a change may go on its own. <code>/build-autopilot:autopilot apply</code> then writes your choices into the repo.</p>
+    <p>Each repo's last audit shows how long changes sit after their tests pass, and how often Claude stops to ask. Choose, per repo, how far a change may go on its own. <code>/build-autopilot:apply</code> then writes your choices into the repo.</p>
   </header>
 
   <section class="strip" id="strip" aria-label="Across all repos">
@@ -194,14 +194,14 @@ details > summary { cursor: pointer; color: var(--muted) }
 
   <section class="panel copy" id="copyPanel" hidden aria-labelledby="copy-h">
     <div class="panel-head"><h2 id="copy-h">Copy settings</h2><span class="note" id="copyFrom"></span></div>
-    <p class="note">Copies the level, the sensitive-areas rule and file list, questions, always-ask list and tests. Each repo's audit and set-aside recommendations stay as they are. Each repo still needs <code>/build-autopilot:autopilot apply</code> before the copy takes effect there.</p>
+    <p class="note">Copies the level, the sensitive-areas rule and file list, questions, always-ask list and tests. Each repo's audit and set-aside recommendations stay as they are. Each repo still needs <code>/build-autopilot:apply</code> before the copy takes effect there.</p>
     <div class="orgs" id="copyTargets"></div>
     <div class="inrow"><button class="btn primary" id="copyGo" type="button" disabled>Copy</button><button class="btn link" id="copyCancel" type="button">Cancel</button></div>
   </section>
 
   <div id="empty" class="empty" hidden>
     <h2>No repos yet</h2>
-    <p class="muted">Run <code>/build-autopilot:autopilot setup</code> to choose which repos to track, or <code>/build-autopilot:autopilot audit owner/repo</code> to add one. Their numbers appear here.</p>
+    <p class="muted">Run <code>/build-autopilot:setup</code> to choose which repos to track, or <code>/build-autopilot:audit owner/repo</code> to add one. Their numbers appear here.</p>
   </div>
 
   <section id="repo" hidden>
@@ -234,7 +234,7 @@ details > summary { cursor: pointer; color: var(--muted) }
   <div class="grid2">
     <section class="panel" aria-labelledby="me-h">
       <h2 id="me-h">How you want to be interrupted</h2>
-      <p class="note">Your own preference, for every repo. It can only make Claude ask you less than a repo allows, never skip the always-ask list. Run <code class="num">/build-autopilot:autopilot apply --me</code> once on each computer you build from.</p>
+      <p class="note">Your own preference, for every repo. It can only make Claude ask you less than a repo allows, never skip the always-ask list. Run <code class="num">/build-autopilot:apply --me</code> once on each computer you build from.</p>
       <div id="meBody" class="opts"></div>
     </section>
     <section class="panel" aria-labelledby="log-h">
@@ -460,7 +460,7 @@ function renderTime(slug) {
   $("r-name").textContent = repoOf(slug);
   if (!a) {
     $("r-when").textContent = "Not audited yet";
-    $("bar-m").style.flex = "1 1 0"; $("bar-m").textContent = "Run /build-autopilot:autopilot audit in this repo"; $("bar-w").style.flex = "0 0 0"; $("bar-w").textContent = "";
+    $("bar-m").style.flex = "1 1 0"; $("bar-m").textContent = "Run /build-autopilot:audit in this repo"; $("bar-w").style.flex = "0 0 0"; $("bar-w").textContent = "";
     $("facts").textContent = ""; $("deployNote").textContent = ""; return;
   }
   if (a.error) { $("r-when").textContent = "Audit failed: " + a.error; return; }
@@ -522,7 +522,7 @@ function renderRecs(slug) {
       actions.append(el("span", { class: "state-on" }, req.status === "filed" ? "✓ Filed" : "✓ Queued"));
       actions.append(req.issue_url
         ? el("a", { class: "note", href: req.issue_url, target: "_blank", rel: "noopener", text: `Issue #${req.issue_number || ""}` })
-        : el("span", { class: "note", text: "Claude files it as an issue on the next /build-autopilot:autopilot run" }));
+        : el("span", { class: "note", text: "Claude files it as an issue on the next /build-autopilot:audit" }));
     } else if (on) actions.append(el("span", { class: "state-on" }, "✓ On"));
     else if (oneOff) {
       actions.append(el("button", { class: "btn primary", disabled: !state.canEdit, onclick: () => queueFix(slug, r), text: "Queue the fix" }));
@@ -618,9 +618,9 @@ function renderSettings(panel, slug) {
     const upd = saved && saved.updated_at, app = saved && saved.applied_at;
     const pending = upd && (!app || upd > app);
     panel.append(pending
-      ? el("div", { class: "sync pending" }, el("span", {}, "Saved here, not in the repo yet. In this repo, run ", el("code", { text: "/build-autopilot:autopilot apply" }), ". Claude opens one pull request for you to merge."))
+      ? el("div", { class: "sync pending" }, el("span", {}, "Saved here, not in the repo yet. In this repo, run ", el("code", { text: "/build-autopilot:apply" }), ". Claude opens one pull request for you to merge."))
       : app ? el("div", { class: "sync done", text: `In the repo since ${new Date(app).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}.` })
-      : el("p", { class: "note", text: "Nothing changes in the repo until you pick a setting here and run /build-autopilot:autopilot apply." }));
+      : el("p", { class: "note", text: "Nothing changes in the repo until you pick a setting here and run /build-autopilot:apply." }));
   }
 }
 
@@ -632,18 +632,20 @@ function renderChecks(slug, st, pipe, save) {
     ((pickedNames ? pickedNames.has(y.name) : y.required) ? 1 : 0) - ((pickedNames ? pickedNames.has(x.name) : x.required) ? 1 : 0)) : raw;
   const box = el("div", { class: "field" }, el("div", { class: "lbl", text: "Checks that must pass before a merge" }));
   if (!Array.isArray(checks) || !checks.length) {
-    box.append(el("p", { class: "note", text: "The repo's checks appear here after its next audit (/build-autopilot:autopilot audit in the repo)." }));
+    box.append(el("p", { class: "note", text: "The repo's checks appear here after its next audit (/build-autopilot:audit in the repo)." }));
     return box;
   }
   const editable = pipe === "gate" && state.canEdit;
   const chosen = Array.isArray(st.required_checks) ? new Set(st.required_checks)
-    : new Set(checks.filter(c => c.required || (c.on_main && c.app === "github-actions")).map(c => c.name));
+    : new Set(checks.filter(c => c.required || (c.on_main && c.app === "github-actions" && c.on_prs
+        && c.on_prs >= 0.9 * (g(state.audits[slug] || {}, "prs.merged", 0) || 0))).map(c => c.name));
   box.append(el("p", { class: "note", text: pipe === "gate"
     ? (Array.isArray(st.required_checks) ? "Your choice. The branch rules use exactly these." : "Suggested: what GitHub requires today, plus the tests that run on main. Change any to make it your choice.")
     : "For reference: this repo's own rules decide what must pass. Ticks show what GitHub requires today." }));
   const rows = checks.map((c, i) => {
     const id = `chk-${slug}-${i}`, on = pipe === "gate" ? chosen.has(c.name) : !!c.required;
-    const neverOnPrs = !c.on_prs;
+    const merged = g(state.audits[slug] || {}, "prs.merged", 0) || 0;
+    const neverOnPrs = !c.on_prs || (merged >= 5 && c.on_prs < 0.9 * merged);   // skipped on some PRs: requiring it blocks those
     const meta = [c.required ? "required on GitHub now" : "", c.on_prs ? `ran on ${c.on_prs} pull requests` : "doesn't run on pull requests",
       c.pass_rate != null ? `passes ${Math.round(100 * c.pass_rate)}%` : "", c.app && c.app !== "github-actions" ? `from ${c.app}` : ""].filter(Boolean).join(" · ");
     return el("label", { class: "opt", for: id },
@@ -653,7 +655,8 @@ function renderChecks(slug, st, pipe, save) {
           e.target.checked ? set.add(c.name) : set.delete(c.name);
           s.required_checks = checks.map(x => x.name).filter(n => set.has(n));
         }, `${e.target.checked ? "Must pass" : "No longer required"}: ${c.name}`) }),
-      el("span", {}, c.name, el("small", { text: meta + (neverOnPrs ? ". Requiring it would block every merge." : "") })));
+      el("span", {}, c.name, el("small", { text: meta + (!c.on_prs ? ". Requiring it would block every merge."
+        : neverOnPrs ? `. It skipped ${merged - c.on_prs} of ${merged} recent pull requests (probably a paths: filter); requiring it would block those, admins included. Make it always run first.` : "") })));
   });
   // Long lists: the ticked ones and the first few stay in view; the rest fold away.
   const show = Math.max(6, rows.filter((r, i) => (pipe === "gate" ? chosen.has(checks[i].name) : checks[i].required)).length);
@@ -707,8 +710,8 @@ function nextSteps(slug) {
       note: "Your browser opens once per org, for the app. For several repos at once, use setup-github-gate-many.sh.",
       link: `https://github.com/${repo}/settings/environments`, linkText: "See the repo's environments on GitHub" });
     steps.push({ what: "Add the gate's files and these settings to the repo", where: "Claude session in this repo",
-      cmd: "/build-autopilot:autopilot install", done: known && (!!pr || (!!ins.gate_on_main && policyIn)),
-      note: "Opens one pull request, and opens it in your browser. /build-autopilot:autopilot install also does the branch rules in step 5 once that's merged." });
+      cmd: "/build-autopilot:install", done: known && (!!pr || (!!ins.gate_on_main && policyIn)),
+      note: "Opens one pull request, and opens it in your browser. /build-autopilot:install also does the branch rules in step 5 once that's merged." });
     steps.push({ what: pr ? `Merge pull request #${pr.number}` : "Merge the pull request it opens", where: "GitHub",
       link: pr ? pr.url : `https://github.com/${repo}/pulls?q=is%3Aopen+head%3Aautopilot%2Fpolicy-`,
       linkText: pr ? "Open the pull request" : "Find it on GitHub", done: known && !!ins.gate_on_main && policyIn });
@@ -718,7 +721,7 @@ function nextSteps(slug) {
     steps.push({ what: "Try it: the four live checks in docs/v2-install.md, step 5", where: "GitHub", done: false, optional: true });
   } else {
     steps.push({ what: pipe === "own" ? "Record in the repo that it keeps its own pipeline" : "Record in the repo that a person merges",
-      where: "Claude session in this repo", cmd: "/build-autopilot:autopilot apply", done: known && (!!pr || policyIn), note: "Opens one small pull request." });
+      where: "Claude session in this repo", cmd: "/build-autopilot:apply", done: known && (!!pr || policyIn), note: "Opens one small pull request." });
     steps.push({ what: pr ? `Merge pull request #${pr.number}` : "Merge the pull request it opens", where: "GitHub",
       link: pr ? pr.url : `https://github.com/${repo}/pulls?q=is%3Aopen+head%3Aautopilot%2Fpolicy-`,
       linkText: pr ? "Open the pull request" : "Find it on GitHub", done: known && policyIn });
@@ -745,7 +748,7 @@ function renderSteps(slug) {
     ol.append(el("li", { class: cls }, el("span", { class: "mark", text: s.done ? "✓" : String(i + 1) }), body));
   });
   panel.append(ol);
-  const refresh = `/build-autopilot:autopilot audit ${repoOf(slug)}`;
+  const refresh = `/build-autopilot:audit ${repoOf(slug)}`;
   panel.append(el("div", { class: "cmd" }, el("code", { text: refresh }),
     el("button", { class: "btn", type: "button", onclick: () => copyText(refresh), text: "Copy" })),
     el("small", { class: "note", text: "After a step, refresh this list by running that in a Claude session." }));
