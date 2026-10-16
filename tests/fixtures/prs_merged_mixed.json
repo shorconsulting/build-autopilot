@@ -1,0 +1,182 @@
+[
+ {
+  "number": 11,
+  "title": "Change 11",
+  "createdAt": "2026-10-02T09:00:00Z",
+  "mergedAt": "2026-10-02T10:30:00Z",
+  "headRefOid": "shaX11",
+  "headRefName": "feat/x11",
+  "mergeCommit": {
+   "oid": "MX11"
+  },
+  "author": {
+   "login": "alice"
+  },
+  "reviews": [],
+  "comments": [],
+  "statusCheckRollup": [
+   {
+    "__typename": "CheckRun",
+    "name": "unit",
+    "workflowName": "test",
+    "status": "COMPLETED",
+    "conclusion": "SUCCESS",
+    "startedAt": "2026-10-02T10:00:00Z",
+    "completedAt": "2026-10-02T10:10:00Z"
+   },
+   {
+    "__typename": "CheckRun",
+    "name": "lint",
+    "workflowName": "test",
+    "status": "COMPLETED",
+    "conclusion": "SKIPPED",
+    "startedAt": "2026-10-02T10:00:00Z",
+    "completedAt": "2026-10-02T10:10:00Z"
+   },
+   {
+    "__typename": "CheckRun",
+    "name": "autopilot/gate",
+    "workflowName": "test",
+    "status": "COMPLETED",
+    "conclusion": "SUCCESS",
+    "startedAt": "2026-10-02T10:00:00Z",
+    "completedAt": "2026-10-02T10:10:00Z"
+   }
+  ]
+ },
+ {
+  "number": 12,
+  "title": "Change 12",
+  "createdAt": "2026-10-02T09:00:00Z",
+  "mergedAt": "2026-10-02T10:30:00Z",
+  "headRefOid": "shaX12",
+  "headRefName": "feat/x12",
+  "mergeCommit": {
+   "oid": "MX12"
+  },
+  "author": {
+   "login": "alice"
+  },
+  "reviews": [],
+  "comments": [],
+  "statusCheckRollup": [
+   {
+    "__typename": "CheckRun",
+    "name": "unit",
+    "workflowName": "test",
+    "status": "COMPLETED",
+    "conclusion": "SUCCESS",
+    "startedAt": "2026-10-02T10:00:00Z",
+    "completedAt": "2026-10-02T10:10:00Z"
+   },
+   {
+    "__typename": "CheckRun",
+    "name": "lint",
+    "workflowName": "test",
+    "status": "COMPLETED",
+    "conclusion": "NEUTRAL",
+    "startedAt": "2026-10-02T10:00:00Z",
+    "completedAt": "2026-10-02T10:10:00Z"
+   },
+   {
+    "__typename": "CheckRun",
+    "name": "e2e",
+    "workflowName": "test",
+    "status": "COMPLETED",
+    "conclusion": "SUCCESS",
+    "startedAt": "2026-10-02T10:00:00Z",
+    "completedAt": "2026-10-02T10:10:00Z"
+   },
+   {
+    "__typename": "CheckRun",
+    "name": "autopilot/gate",
+    "workflowName": "test",
+    "status": "COMPLETED",
+    "conclusion": "SUCCESS",
+    "startedAt": "2026-10-02T10:00:00Z",
+    "completedAt": "2026-10-02T10:10:00Z"
+   }
+  ]
+ },
+ {
+  "number": 13,
+  "title": "Change 13",
+  "createdAt": "2026-10-02T09:00:00Z",
+  "mergedAt": "2026-10-02T10:30:00Z",
+  "headRefOid": "shaX13",
+  "headRefName": "feat/x13",
+  "mergeCommit": {
+   "oid": "MX13"
+  },
+  "author": {
+   "login": "alice"
+  },
+  "reviews": [],
+  "comments": [],
+  "statusCheckRollup": [
+   {
+    "__typename": "CheckRun",
+    "name": "unit",
+    "workflowName": "test",
+    "status": "COMPLETED",
+    "conclusion": "FAILURE",
+    "startedAt": "2026-10-02T10:00:00Z",
+    "completedAt": "2026-10-02T10:10:00Z"
+   },
+   {
+    "__typename": "CheckRun",
+    "name": "lint",
+    "workflowName": "test",
+    "status": "COMPLETED",
+    "conclusion": "SKIPPED",
+    "startedAt": "2026-10-02T10:00:00Z",
+    "completedAt": "2026-10-02T10:10:00Z"
+   },
+   {
+    "__typename": "CheckRun",
+    "name": "autopilot/gate",
+    "workflowName": "test",
+    "status": "COMPLETED",
+    "conclusion": "SUCCESS",
+    "startedAt": "2026-10-02T10:00:00Z",
+    "completedAt": "2026-10-02T10:10:00Z"
+   }
+  ]
+ },
+ {
+  "number": 14,
+  "title": "Change 14",
+  "createdAt": "2026-10-02T09:00:00Z",
+  "mergedAt": "2026-10-02T10:30:00Z",
+  "headRefOid": "shaX14",
+  "headRefName": "feat/x14",
+  "mergeCommit": {
+   "oid": "MX14"
+  },
+  "author": {
+   "login": "alice"
+  },
+  "reviews": [],
+  "comments": [],
+  "statusCheckRollup": [
+   {
+    "__typename": "CheckRun",
+    "name": "unit",
+    "workflowName": "test",
+    "status": "COMPLETED",
+    "conclusion": "SKIPPED",
+    "startedAt": "2026-10-02T10:00:00Z",
+    "completedAt": "2026-10-02T10:10:00Z"
+   },
+   {
+    "__typename": "CheckRun",
+    "name": "autopilot/gate",
+    "workflowName": "test",
+    "status": "COMPLETED",
+    "conclusion": "SUCCESS",
+    "startedAt": "2026-10-02T10:00:00Z",
+    "completedAt": "2026-10-02T10:10:00Z"
+   }
+  ]
+ }
+]

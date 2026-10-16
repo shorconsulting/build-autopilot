@@ -140,6 +140,20 @@ details > summary { cursor: pointer; color: var(--muted) }
 .sync.pending { background: var(--wait-soft); color: var(--ink) }
 .sync.done { background: var(--auto-soft) }
 .sync code { font-family: var(--f-mono); font-size: .85em; background: var(--panel); padding: 1px 5px; border-radius: 3px }
+.steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; counter-reset: step }
+.steps li { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 10px; align-items: start }
+.steps .mark { width: 24px; height: 24px; border-radius: 50%; border: 1.5px solid var(--line); display: grid; place-items: center;
+  font: 600 .78rem var(--f-mono); color: var(--muted) }
+.steps li.done .mark { background: var(--auto-soft); border-color: var(--auto); color: var(--auto) }
+.steps li.now .mark { background: var(--accent); border-color: var(--accent); color: var(--accent-ink) }
+.steps li.done .what { color: var(--muted) }
+.steps li.now .what { font-weight: 700 }
+.steps .body { display: grid; gap: 6px; min-width: 0 }
+.cmd { display: flex; gap: 8px; align-items: stretch; min-width: 0 }
+.cmd code { flex: 1 1 auto; min-width: 0; overflow-x: auto; white-space: pre; font: .82rem/1.4 var(--f-mono); background: var(--soft);
+  border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px }
+.cmd .btn { flex: 0 0 auto }
+.where { font: 600 .7rem/1 var(--f-body); letter-spacing: .08em; text-transform: uppercase; color: var(--muted) }
 .note { font-size: .9rem; color: var(--muted) }
 .lock { font-size: .9rem; padding: 10px 12px; border-radius: 8px; background: var(--soft) }
 
@@ -193,6 +207,7 @@ details > summary { cursor: pointer; color: var(--muted) }
   <section id="repo" hidden>
     <div class="grid2">
       <div style="display:grid;gap:28px;min-width:0">
+        <div class="panel" id="stepsPanel"></div>
         <div class="panel" id="timePanel">
           <div class="panel-head"><h2 id="r-name">Repo</h2><span class="note" id="r-when"></span></div>
           <div class="gauge">
@@ -255,6 +270,11 @@ const QUESTIONS = [
   { id: "batch", name: "Keep going, ask me at the end", sub: "Claude picks the option that's easiest to undo, keeps working, and ends with one list of those choices for you to confirm or change." },
   { id: "decide-reversible", name: "Decide anything that can be undone", sub: "Claude decides and keeps going. Every decision it made without you is listed in the pull request and the end-of-run summary, with how to undo it." },
 ];
+const PIPELINES = [
+  { id: "gate", name: "Build Autopilot's gate", sub: "An AI reviewer checks every pull request, and it merges what the settings below allow." },
+  { id: "own", name: "This repo's own pipeline", sub: "The repo already has its own review and merge automation. Build Autopilot leaves merging to it and only sets how Claude asks questions." },
+  { id: "none", name: "Nobody: a person merges", sub: "Every pull request waits for a person to merge it." },
+];
 const TESTS = [
   { id: "full", name: "Every test before merging", sub: "Safest. A change waits for the whole suite." },
   { id: "fast-lane", name: "Quick tests first, full suite right after", sub: "Merges in minutes. If the full suite then fails, the change is undone automatically." },
@@ -268,6 +288,8 @@ const ALWAYS = [
   { id: "ai-flags-it", name: "Anything the AI reviewer says needs a person" },
 ];
 const DEFAULTS = {
+  pipeline: "gate",
+  required_checks: null,   // null = the checks found on the repo's main branch; a list = chosen on this page
   level: "manual",
   sensitive: { rule: "two-ai", paths: ["**/auth/**", "**/*login*", "**/payments/**", "**/billing/**", "**/phi/**", "**/migrations/**", ".github/**", "**/.env*", "**/secrets*"] },
   questions: "ask-now",
@@ -323,9 +345,14 @@ function renderStrip() {
   $("s-rev-sub").textContent = merged ? `${noRev} of ${merged} merged changes` : "of merged changes";
 }
 
-const COPY_FIELDS = ["level", "sensitive", "questions", "tests", "always_ask"];
+const COPY_FIELDS = ["pipeline", "level", "sensitive", "questions", "tests", "always_ask"];   // not required_checks: each repo has its own
 const nameOf = slug => slug === "_defaults" ? "Defaults for new repos" : repoOf(slug).split("/")[1];
-const levelName = slug => LEVELS[LEVEL_INDEX[settingsFor(slug).level] ?? 0].name;
+const levelName = slug => {
+  const st = settingsFor(slug);
+  if (st.pipeline === "own") return "Own pipeline";
+  if (st.pipeline === "none") return "A person merges";
+  return LEVELS[LEVEL_INDEX[st.level] ?? 0].name;
+};
 function trackedSlugs() {
   return [...new Set([...Object.keys(state.audits), ...Object.keys(state.settings).filter(s => s !== "_defaults")])]
     .sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
@@ -413,7 +440,8 @@ async function toggleHidden() {
   const hidden = new Set(state.hidden); const hiding = !hidden.has(s);
   hiding ? hidden.add(s) : hidden.delete(s);
   try {
-    await state.db.doc("config/page").set({ hidden: [...hidden].sort(), updated_at: new Date().toISOString() });
+    await state.db.doc("config/page").set({ hidden: [...hidden].sort(), plugin_path: state.pluginPath || null,
+      updated_at: new Date().toISOString() });
     toast(hiding ? `Hid ${nameOf(s)}. It's under Hidden in the list.` : `${nameOf(s)} is back in the list`);
   } catch (e) { toast("Couldn't change that. Try again in a moment."); }
 }
@@ -424,7 +452,7 @@ function renderSelected() {
   $("defaults").hidden = s !== "_defaults";
   if (!s) return;
   if (s === "_defaults") { renderSettings($("defaultsPanel"), "_defaults"); return; }
-  renderTime(s); renderRecs(s); renderSettings($("settingsPanel"), s);
+  renderSteps(s); renderTime(s); renderRecs(s); renderSettings($("settingsPanel"), s);
 }
 
 function renderTime(slug) {
@@ -462,6 +490,7 @@ function recIsOn(rec, st) {
   if (k === "tests" && v === "no-duplicate") return !!st.tests.skip_duplicate_main;
   if (k === "tests" && v === "fast-lane") return st.tests.lane === "fast-lane";
   if (k === "questions") return st.questions === v || (v === "batch" && st.questions === "decide-reversible");
+  if (k === "pipeline") return st.pipeline === v;
   return false;
 }
 function applyRec(st, rec) {
@@ -473,6 +502,7 @@ function applyRec(st, rec) {
   else if (k === "tests" && v === "no-duplicate") st.tests.skip_duplicate_main = true;
   else if (k === "tests" && v === "fast-lane") st.tests.lane = "fast-lane";
   else if (k === "questions") st.questions = v;
+  else if (k === "pipeline") st.pipeline = v;
   return st;
 }
 
@@ -530,9 +560,20 @@ function renderSettings(panel, slug) {
     el("span", { class: "note", text: isDef ? "Used by any repo without its own settings" : saved ? "Own settings" : "Using the defaults" })));
   if (!state.canEdit) panel.append(el("p", { class: "lock", text: "Only editors of this page can change repo settings. Ask the page's owner to make you an Editor." }));
 
+  // Who reviews and merges
+  const pipe = st.pipeline || "gate", audit = state.audits[slug] || {};
+  panel.append(el("div", { class: "field", style: "border-top:0;padding-top:0" },
+    el("div", { class: "lbl", text: "Who reviews and merges" }),
+    radioGroup(`pipe-${slug}`, PIPELINES, pipe, v => save(s => s.pipeline = v, `Who merges: ${PIPELINES.find(x => x.id === v).name}`)),
+    !isDef && audit.pipeline_hint === "own" && pipe !== "own"
+      ? el("p", { class: "lock", text: "This repo already has its own review or merge automation (" + (audit.pipeline_evidence || []).join("; ") +
+          "). Running the gate as well would mean two reviews per change and two merge bots undoing each other." })
+      : null));
+
+  if (pipe === "gate") {
   // Level
   const li = LEVEL_INDEX[st.level] ?? 0;
-  panel.append(el("div", { class: "field", style: "border-top:0;padding-top:0" },
+  panel.append(el("div", { class: "field" },
     el("div", { class: "lbl", text: "How far a change goes without you" }),
     el("div", { class: "modes", role: "radiogroup", "aria-label": "Automation level" }, LEVELS.map((L, i) =>
       el("button", { class: "mode" + (i < li ? " past" : ""), role: "radio", "aria-checked": String(i === li), disabled: !state.canEdit,
@@ -550,6 +591,11 @@ function renderSettings(panel, slug) {
     el("details", {}, el("summary", { text: "Which files count as sensitive" }),
       (() => { const ta = el("textarea", { id: `paths-${slug}`, disabled: !state.canEdit, "aria-label": "Sensitive file patterns, one per line" }); ta.value = st.sensitive.paths.join("\n");
         ta.addEventListener("change", () => save(s => s.sensitive.paths = ta.value.split("\n").map(x => x.trim()).filter(Boolean), "Sensitive file list edited")); return ta; })())));
+  } else {
+    panel.append(el("div", { class: "field" }, el("p", { class: "note", text: pipe === "own"
+      ? "Merging, the review and the sensitive-area rules are this repo's own. Build Autopilot doesn't install its gate or branch rules here; the settings below still tell Claude sessions when to ask you."
+      : "Every pull request waits for a person to merge it. The settings below tell Claude sessions when to ask you." })));
+  }
 
   panel.append(el("div", { class: "field" }, el("div", { class: "lbl", text: "When Claude is unsure" }),
     radioGroup(`q-${slug}`, QUESTIONS, st.questions, v => save(s => s.questions = v, `Questions: ${QUESTIONS.find(x => x.id === v).name}`))));
@@ -560,7 +606,9 @@ function renderSettings(panel, slug) {
         onchange: e => save(s => { const set = new Set(s.always_ask); e.target.checked ? set.add(a.id) : set.delete(a.id); s.always_ask = ALWAYS.map(x => x.id).filter(x => set.has(x)); }, `${e.target.checked ? "Always ask" : "Stopped always asking"}: ${a.name}`) }),
         el("span", { text: a.name })); }))));
 
-  panel.append(el("div", { class: "field" }, el("div", { class: "lbl", text: "Tests" }),
+  if (!isDef) panel.append(renderChecks(slug, st, pipe, save));
+
+  if (pipe === "gate") panel.append(el("div", { class: "field" }, el("div", { class: "lbl", text: "Tests" }),
     radioGroup(`t-${slug}`, TESTS, st.tests.lane, v => save(s => s.tests.lane = v, `Tests: ${TESTS.find(x => x.id === v).name}`)),
     el("label", { class: "opt", for: `dup-${slug}` }, el("input", { type: "checkbox", id: `dup-${slug}`, checked: !!st.tests.skip_duplicate_main, disabled: !state.canEdit,
       onchange: e => save(s => s.tests.skip_duplicate_main = e.target.checked, e.target.checked ? "Skip the repeat test run after merging" : "Run tests again after merging") }),
@@ -576,9 +624,49 @@ function renderSettings(panel, slug) {
   }
 }
 
+// The repo's CI checks, from its last audit, with "must pass before merge" toggles (used for the gate's branch rules).
+function renderChecks(slug, st, pipe, save) {
+  const raw = g(state.audits[slug] || {}, "checks", null);
+  const pickedNames = Array.isArray(st.required_checks) ? new Set(st.required_checks) : null;
+  const checks = Array.isArray(raw) ? raw.slice().sort((x, y) =>
+    ((pickedNames ? pickedNames.has(y.name) : y.required) ? 1 : 0) - ((pickedNames ? pickedNames.has(x.name) : x.required) ? 1 : 0)) : raw;
+  const box = el("div", { class: "field" }, el("div", { class: "lbl", text: "Checks that must pass before a merge" }));
+  if (!Array.isArray(checks) || !checks.length) {
+    box.append(el("p", { class: "note", text: "The repo's checks appear here after its next audit (/autopilot audit in the repo)." }));
+    return box;
+  }
+  const editable = pipe === "gate" && state.canEdit;
+  const chosen = Array.isArray(st.required_checks) ? new Set(st.required_checks)
+    : new Set(checks.filter(c => c.required || (c.on_main && c.app === "github-actions")).map(c => c.name));
+  box.append(el("p", { class: "note", text: pipe === "gate"
+    ? (Array.isArray(st.required_checks) ? "Your choice. The branch rules use exactly these." : "Suggested: what GitHub requires today, plus the tests that run on main. Change any to make it your choice.")
+    : "For reference: this repo's own rules decide what must pass. Ticks show what GitHub requires today." }));
+  const rows = checks.map((c, i) => {
+    const id = `chk-${slug}-${i}`, on = pipe === "gate" ? chosen.has(c.name) : !!c.required;
+    const neverOnPrs = !c.on_prs;
+    const meta = [c.required ? "required on GitHub now" : "", c.on_prs ? `ran on ${c.on_prs} pull requests` : "doesn't run on pull requests",
+      c.pass_rate != null ? `passes ${Math.round(100 * c.pass_rate)}%` : "", c.app && c.app !== "github-actions" ? `from ${c.app}` : ""].filter(Boolean).join(" · ");
+    return el("label", { class: "opt", for: id },
+      el("input", { type: "checkbox", id, checked: on, disabled: !editable || (neverOnPrs && !on),
+        onchange: e => save(s => {
+          const set = new Set(Array.isArray(s.required_checks) ? s.required_checks : [...chosen]);
+          e.target.checked ? set.add(c.name) : set.delete(c.name);
+          s.required_checks = checks.map(x => x.name).filter(n => set.has(n));
+        }, `${e.target.checked ? "Must pass" : "No longer required"}: ${c.name}`) }),
+      el("span", {}, c.name, el("small", { text: meta + (neverOnPrs ? ". Requiring it would block every merge." : "") })));
+  });
+  // Long lists: the ticked ones and the first few stay in view; the rest fold away.
+  const show = Math.max(6, rows.filter((r, i) => (pipe === "gate" ? chosen.has(checks[i].name) : checks[i].required)).length);
+  box.append(el("div", { class: "opts" }, rows.slice(0, show)));
+  if (rows.length > show) box.append(el("details", {}, el("summary", { text: `Show ${rows.length - show} more checks` }),
+    el("div", { class: "opts" }, rows.slice(show))));
+  return box;
+}
+
 function settingsBody(slug, st, now) {
   const prev = state.settings[slug] || null;
-  return { repo: slug === "_defaults" ? null : repoOf(slug), level: st.level, sensitive: st.sensitive, questions: st.questions, tests: st.tests,
+  return { repo: slug === "_defaults" ? null : repoOf(slug), pipeline: st.pipeline || "gate",
+    required_checks: Array.isArray(st.required_checks) ? st.required_checks : null, level: st.level, sensitive: st.sensitive, questions: st.questions, tests: st.tests,
     always_ask: st.always_ask, dismissed: st.dismissed || [], updated_at: now, updated_by: state.me || null, applied_at: prev ? prev.applied_at || null : null };
 }
 
@@ -595,6 +683,72 @@ async function saveSettings(slug, st, label) {
     toast(e && e.code === "invalid_argument" ? "You can't change settings on this page" : "Couldn't save. Try again in a moment.");
     if (e && e.code === "invalid_argument") { state.canEdit = false; renderSelected(); }
   } finally { state.writeBusy = false; }
+}
+
+// ---------------------------------------------------------------- next steps
+function copyText(t) {
+  const fallback = () => toast("Select the command and copy it");
+  try { navigator.clipboard.writeText(t).then(() => toast("Copied"), fallback); } catch (e) { fallback(); }
+}
+function scriptPath(name) {
+  const root = state.pluginPath || "<plugin folder>";
+  return `"${root.replace(/\/$/, "")}/scripts/${name}"`;
+}
+function nextSteps(slug) {
+  const st = settingsFor(slug), saved = state.settings[slug], ins = g(state.audits[slug] || {}, "install", null);
+  const pipe = st.pipeline || "gate", repo = repoOf(slug), known = !!ins;
+  const pending = saved && saved.updated_at && (!saved.applied_at || saved.updated_at > saved.applied_at);
+  const pr = ins && ins.open_apply_pr;
+  const policyIn = known && ins.pipeline_on_main === pipe && !pending;
+  const steps = [{ what: "Choose this repo's settings below", done: !!saved }];
+  if (pipe === "gate") {
+    steps.push({ what: "Set up the GitHub side: the app, locked environments, keys and repo settings", where: "Terminal",
+      cmd: `${scriptPath("setup-github-gate.sh")} ${repo}`, done: known && !!ins.environments_locked && !!ins.secrets_set,
+      note: "Your browser opens once per org, for the app. For several repos at once, use setup-github-gate-many.sh.",
+      link: `https://github.com/${repo}/settings/environments`, linkText: "See the repo's environments on GitHub" });
+    steps.push({ what: "Add the gate's files and these settings to the repo", where: "Claude session in this repo",
+      cmd: "/autopilot install", done: known && (!!pr || (!!ins.gate_on_main && policyIn)),
+      note: "Opens one pull request, and opens it in your browser. /autopilot install also does the branch rules in step 5 once that's merged." });
+    steps.push({ what: pr ? `Merge pull request #${pr.number}` : "Merge the pull request it opens", where: "GitHub",
+      link: pr ? pr.url : `https://github.com/${repo}/pulls?q=is%3Aopen+head%3Aautopilot%2Fpolicy-`,
+      linkText: pr ? "Open the pull request" : "Find it on GitHub", done: known && !!ins.gate_on_main && policyIn });
+    steps.push({ what: "Add the branch rules (only these checks and the gate can let a change in)", where: "Terminal",
+      cmd: `${scriptPath("setup-github-gate.sh")} ${repo} --ruleset`, done: known && !!ins.ruleset,
+      link: `https://github.com/${repo}/settings/rules`, linkText: "See the repo's branch rules on GitHub" });
+    steps.push({ what: "Try it: the four live checks in docs/v2-install.md, step 5", where: "GitHub", done: false, optional: true });
+  } else {
+    steps.push({ what: pipe === "own" ? "Record in the repo that it keeps its own pipeline" : "Record in the repo that a person merges",
+      where: "Claude session in this repo", cmd: "/autopilot apply", done: known && (!!pr || policyIn), note: "Opens one small pull request." });
+    steps.push({ what: pr ? `Merge pull request #${pr.number}` : "Merge the pull request it opens", where: "GitHub",
+      link: pr ? pr.url : `https://github.com/${repo}/pulls?q=is%3Aopen+head%3Aautopilot%2Fpolicy-`,
+      linkText: pr ? "Open the pull request" : "Find it on GitHub", done: known && policyIn });
+  }
+  return { steps, known, pending };
+}
+function renderSteps(slug) {
+  const panel = $("stepsPanel"); panel.textContent = "";
+  const { steps, known, pending } = nextSteps(slug);
+  const firstOpen = steps.findIndex(s => !s.done && !s.optional);
+  panel.append(el("div", { class: "panel-head" }, el("h2", { text: firstOpen < 0 ? "All set up" : "Next step" }),
+    el("span", { class: "note", text: known ? "As of the last audit" : "Status shows after the next audit" })));
+  if (pending && known) panel.append(el("p", { class: "lock", text: "You've changed settings since they were last put into the repo, so the repo is behind this page." }));
+  const ol = el("ol", { class: "steps" });
+  steps.forEach((s, i) => {
+    const cls = s.done ? "done" : i === firstOpen ? "now" : "";
+    const body = el("div", { class: "body" },
+      el("span", { class: "what", text: s.what }),
+      s.where ? el("span", { class: "where", text: s.where }) : null);
+    if (!s.done && s.cmd) body.append(el("div", { class: "cmd" }, el("code", { text: s.cmd }),
+      el("button", { class: "btn", type: "button", onclick: () => copyText(s.cmd), text: "Copy" })));
+    if (!s.done && s.link) body.append(el("a", { href: s.link, target: "_blank", rel: "noopener", text: (s.linkText || "Open on GitHub") + " ↗" }));
+    if (!s.done && s.note && i === firstOpen) body.append(el("small", { class: "note", text: s.note }));
+    ol.append(el("li", { class: cls }, el("span", { class: "mark", text: s.done ? "✓" : String(i + 1) }), body));
+  });
+  panel.append(ol);
+  const refresh = `/autopilot audit ${repoOf(slug)}`;
+  panel.append(el("div", { class: "cmd" }, el("code", { text: refresh }),
+    el("button", { class: "btn", type: "button", onclick: () => copyText(refresh), text: "Copy" })),
+    el("small", { class: "note", text: "After a step, refresh this list by running that in a Claude session." }));
 }
 
 async function queueFix(slug, r) {
@@ -664,6 +818,7 @@ async function boot() {
   }, () => {});
   db.doc("config/page").onSnapshot(d => {
     state.hidden = (d.exists && d.data().hidden) || [];
+    state.pluginPath = (d.exists && d.data().plugin_path) || "";
     renderStrip(); renderPicker(); renderSelected();
   }, () => {});
   db.collection("requests").onSnapshot(snap => {

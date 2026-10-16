@@ -45,6 +45,16 @@ When you're unsure how to proceed, check in order:
 | `legal-pricing` | change legal terms, contracts, prices, or claims customers will see |
 | `ai-flags-it` | proceed after the AI reviewer says a person must look |
 
+## Who merges: `pipeline`
+
+Check `pipeline` before anything about merging:
+
+- `own`: the repo has its own review and merge automation. Don't run your own AI review, don't merge, and don't turn
+  on auto-merge. Follow the repo's own instructions (its CLAUDE.md) for how a change lands, wait for its pipeline's
+  verdict, and report it. Skip "Merging, by level" and "Releasing" below; `questions` and `always_ask` still apply.
+- `none`: stop at the open pull request and tell the person it's ready, whatever `level` says.
+- `gate`, or no `pipeline` field: carry on below.
+
 ## Merging, by level
 
 After your change is pushed and the pull request is open:

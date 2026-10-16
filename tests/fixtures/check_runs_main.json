@@ -1,0 +1,49 @@
+{
+ "total_count": 4,
+ "check_runs": [
+  {
+   "name": "unit",
+   "status": "completed",
+   "conclusion": "success",
+   "app": {
+    "slug": "github-actions",
+    "id": 15368
+   },
+   "started_at": "2026-10-10T10:00:00Z",
+   "completed_at": "2026-10-10T10:10:00Z"
+  },
+  {
+   "name": "lint",
+   "status": "completed",
+   "conclusion": "success",
+   "app": {
+    "slug": "github-actions",
+    "id": 15368
+   },
+   "started_at": "2026-10-10T10:00:00Z",
+   "completed_at": "2026-10-10T10:03:00Z"
+  },
+  {
+   "name": "Vercel Preview",
+   "status": "completed",
+   "conclusion": "success",
+   "app": {
+    "slug": "vercel",
+    "id": 8329
+   },
+   "started_at": "2026-10-10T10:00:00Z",
+   "completed_at": "2026-10-10T10:02:00Z"
+  },
+  {
+   "name": "autopilot/gate",
+   "status": "completed",
+   "conclusion": "success",
+   "app": {
+    "slug": "github-actions",
+    "id": 15368
+   },
+   "started_at": "2026-10-10T10:00:00Z",
+   "completed_at": "2026-10-10T10:01:00Z"
+  }
+ ]
+}

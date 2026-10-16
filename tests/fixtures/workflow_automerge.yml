@@ -1,0 +1,13 @@
+name: Auto-merge
+on:
+  pull_request_target:
+    types: [labeled]
+jobs:
+  enable:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Arm it
+        run: |
+          echo "about to run gh pr merge --auto"
+          gh pr merge --squash \
+            --auto "$PR_URL"

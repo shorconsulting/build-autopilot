@@ -1,6 +1,6 @@
 ---
 description: Measure where builds wait on people, and apply each repo's automation settings from the Build Autopilot page
-argument-hint: "setup | audit [owner/repo ... | --org ORG] [--since 30d] | apply [owner/repo ...] | apply --me | settings"
+argument-hint: "setup | install [owner/repo] | audit [owner/repo ... | --org ORG] [--since 30d] | apply [owner/repo ...] | apply --me | settings"
 ---
 
 # /autopilot
@@ -21,7 +21,7 @@ ToolSearch if it is deferred):
 | `settings/_defaults` | Settings for repos with no settings document | The page |
 | `builders/<user id>` | One person's own preferences: `github`, `questions`, `quiet_hours` | That person, on the page |
 | `changes/<id>` | Who changed which setting, when | The page |
-| `config/page` | `hidden`: repos the page's list keeps under "Hidden" | The page |
+| `config/page` | `hidden`: repos the page's list keeps under "Hidden"; `plugin_path`: this plugin's folder, so the page can show full commands | The page; you set `plugin_path` on `setup` |
 | `requests/<owner>__<name>__<rec id>` | A one-time fix someone queued from a recommendation: `repo`, `rec_id`, `title`, `why`, `status` (`queued` or `filed`), `issue_number`, `issue_url` | The page queues; you file |
 
 ## Every run: file queued fixes first
@@ -69,7 +69,9 @@ Connects this computer to a Build Autopilot page and chooses which repos it trac
    track: numbers, owner names ("all of homeporthealth"), or "all". Don't guess; this is their choice.
 3. Run `audit` for the chosen repos (one run with several `--repo`). Repos can be added later with
    `/autopilot audit owner/repo`, and hidden on the page without deleting anything.
-4. Reply with the page link and one line on what to do there: pick a repo from the list, choose its settings, and
+4. Set `plugin_path` on `config/page` to `${CLAUDE_PLUGIN_ROOT}` (`ArtifactData` `update`, or `set` keeping `hidden` if the
+   document doesn't exist yet), so the page's "Next step" panel shows full script paths.
+5. Reply with the page link and one line on what to do there: pick a repo from the list, choose its settings, and
    use "Copy these settings to other repos" for the rest.
 
 ## audit
@@ -85,15 +87,46 @@ Read-only. Never change a repo, GitHub setting or workflow during an audit.
 3. Reply with the stdout summary, the page link, and, for each repo, the one recommendation that saves the most
    time. Don't list everything; the page does that.
 
+## install
+
+Takes one repo (default: the current checkout's) from chosen settings to working, as far as it can without the
+person, and says exactly what's left. Work through these in order, skipping what's already done; check the real
+state on GitHub each time rather than trusting the page.
+
+1. **Settings.** Read `settings/<owner>__<name>` (or `_defaults`). If there are none, give the page link, say "choose
+   this repo's settings there", and stop.
+2. **`pipeline: own` or `none`.** Run `apply` (below) and stop: that small pull request is all such a repo needs.
+3. **The GitHub side** (`pipeline: gate`). If the `autopilot` and `autopilot-review` environments aren't locked or
+   their secrets are missing, you can't do this part: it needs the person's browser and their Anthropic key. Give
+   them the exact command, with the full path, and stop:
+   `"${CLAUDE_PLUGIN_ROOT}/scripts/setup-github-gate.sh" OWNER/REPO`
+4. **The install pull request.** Run `apply`, which adds the gate's files. Open the pull request in the person's
+   browser (`open <url>` on macOS, `xdg-open` elsewhere), and say in one line that it needs their merge (it changes the
+   automation itself, so it's never merged automatically), with the link. Then stop.
+5. **Branch rules** (once the gate's workflow is on the default branch and no `build-autopilot` ruleset exists).
+   This changes the repo's settings: after it, nothing reaches the default branch except through a pull request that
+   passes the gate and the chosen checks, and nobody can push straight to it. Ask the person once, naming the
+   checks it will require. On a clear yes, run
+   `"${CLAUDE_PLUGIN_ROOT}/scripts/setup-github-gate.sh" OWNER/REPO --ruleset --yes` and report what it printed. If it
+   stops on something (for example a check that never runs on pull requests), pass that on; don't work around it.
+6. **Done.** Point the person to the four live checks in `docs/v2-install.md`, step 5. Then run `audit` for the repo
+   so the page's "Next step" panel catches up.
+
 ## apply
 
 Turns the page's choices into the repo's `.github/autopilot.json`.
 
 1. For each repo (default: the current checkout's), read `settings/<owner>__<name>`, falling back to
    `settings/_defaults`. If neither exists, say so and stop for that repo.
-2. Build the policy file exactly as `docs/policy.md` describes: `version: 1`, `repo`, `level`, `sensitive`,
-   `questions`, `tests`, `always_ask`, `source` (the page link) and `applied_at` (now, UTC). Drop page-only fields
-   (`dismissed`, `updated_by`, `updated_at`).
+2. Build the policy file exactly as `docs/policy.md` describes: `version: 1`, `repo`, `pipeline` (default `gate`),
+   `required_checks`, `level`, `sensitive`, `questions`, `tests`, `always_ask`, `source` (the page link) and
+   `applied_at` (now, UTC). Drop page-only fields (`dismissed`, `updated_by`, `updated_at`).
+   - `pipeline: gate`: the pull request also adds the gate's files (`docs/v2-install.md`, "What gets installed").
+     Afterwards, tell the person to run `scripts/setup-github-gate.sh OWNER/REPO --ruleset` once it's merged.
+   - `pipeline: own` or `none`: the pull request changes only `.github/autopilot.json` and the CLAUDE.md section.
+     Never add the gate's files, a ruleset or auto-merge to such a repo. If the gate's files are already there
+     from an earlier choice, the pull request removes them (`.github/workflows/autopilot.yml`, `.github/autopilot/`),
+     and you tell the person to delete the `build-autopilot` ruleset in the repo's settings.
 3. If the file on the default branch already matches (ignoring `applied_at`), report "already applied" and stop for
    that repo.
 4. Otherwise open a pull request on a branch `autopilot/policy-<date>` that changes only
@@ -111,6 +144,7 @@ Turns the page's choices into the repo's `.github/autopilot.json`.
    end-of-run summary (what you chose, why, how to undo it). Never decide silently.
    ```
 
+   Open it in the person's browser (`open <url>` on macOS, `xdg-open` elsewhere) and give the link.
    Title it "Autopilot policy: <level>, questions <questions>". In the body, list each setting in plain words and
    what changed from the previous file.
 5. This pull request changes the automation rules themselves, so never auto-merge it: it is a sensitive change

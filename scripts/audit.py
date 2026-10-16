@@ -31,6 +31,8 @@ MAX_PRS = 200
 MAX_RUNS = 500
 RUNS_PER_PAGE = 100
 DEFAULT_TRANSCRIPT_DIRS = ["~/.claude/projects"]
+ACTIONS_APP_ID = 15368
+GATE_CHECK_NAMES = ("autopilot/gate",)  # Build Autopilot's own gate, never offered as a toggle
 
 BOT_WORDS = ("claude", "sling", "coderabbit", "qodo", "copilot")
 TEST_FIX_RE = re.compile(r"(flak|intermittent|time of day|clock|fix .*test|test.*fail|CI:)", re.I)
@@ -200,9 +202,9 @@ def num(x):
 
 def parse_triggers(text):
     """What starts this workflow? -> {'push': None | {'branches': [...] | None, 'tags': bool}, 'pull_request': bool,
-    'workflow_dispatch': bool, 'workflow_run': bool, 'release': bool, 'schedule': bool}"""
-    out = {"push": None, "pull_request": False, "workflow_dispatch": False, "workflow_run": False,
-           "release": False, "schedule": False}
+    'pull_request_target': bool, 'workflow_dispatch': bool, 'workflow_run': bool, 'release': bool, 'schedule': bool}"""
+    out = {"push": None, "pull_request": False, "pull_request_target": False, "workflow_dispatch": False,
+           "workflow_run": False, "release": False, "schedule": False}
     lines = text.splitlines()
     start = None
     for i, ln in enumerate(lines):
@@ -296,9 +298,12 @@ def normalize_checks(rollup):
         done = parse_ts(c.get("completedAt"))
         if not done or c.get("status") not in (None, "COMPLETED"):
             continue
-        out.append({"name": c.get("name") or "", "workflow": c.get("workflowName") or "",
+        wf = c.get("workflowName") or ""
+        out.append({"name": c.get("name") or "", "workflow": wf,
                     "ok": (c.get("conclusion") or "").upper() == "SUCCESS",
                     "conclusion": (c.get("conclusion") or "").lower(),
+                    # the rollup does not name the app; a check that belongs to a workflow is a GitHub Actions one
+                    "app": "github-actions" if wf else None, "app_id": ACTIONS_APP_ID if wf else None,
                     "started": parse_ts(c.get("startedAt")), "completed": done})
     return out
 
@@ -309,8 +314,10 @@ def checks_from_api(repo, sha):
     for c in data.get("check_runs", []):
         if c.get("status") != "completed":
             continue
+        app = c.get("app") or {}
         out.append({"name": c.get("name") or "", "workflow": "", "ok": c.get("conclusion") == "success",
                     "conclusion": (c.get("conclusion") or "").lower(),
+                    "app": app.get("slug"), "app_id": app.get("id"),
                     "started": parse_ts(c.get("started_at")), "completed": parse_ts(c.get("completed_at"))})
     return [c for c in out if c["completed"]]
 
@@ -494,41 +501,49 @@ def deploy_metrics(workflows, wf_text, runs, merged, default_branch):
 # ---------------------------------------------------------------- repo settings
 
 def protection_info(repo, branch):
-    """Returns (branch_protection dict, note or None)."""
+    """Returns (branch_protection dict, note or None). Required check names come from classic branch protection
+    and from the rulesets that apply to the branch; a 403 or 404 on either means "nothing required from there"."""
     unknown = {"status": "unknown", "required_reviews": None, "required_checks": None, "enforce_admins": None}
     none = {"status": "none", "required_reviews": 0, "required_checks": [], "enforce_admins": False}
+    notes = []
     try:
         d = gh_api("repos/%s/branches/%s/protection" % (repo, branch))
+        info = dict(none)
     except GhError as e:
+        d, info = None, dict(none)
         if e.status == 403:
-            return unknown, "Branch protection could not be read (403: the token needs admin access)."
-        if e.status != 404:
-            return unknown, "Branch protection could not be read: %s" % e
-        d = None
-    info = dict(none)
+            info = dict(unknown)
+            notes.append("Branch protection could not be read (403: the token needs admin access); "
+                         "checks it requires are not shown as required.")
+        elif e.status == 404:
+            notes.append("No classic branch protection on %s (404); required checks come from rulesets only." % branch)
+        else:
+            info = dict(unknown)
+            notes.append("Branch protection could not be read: %s" % e)
     if d:
         rsc = d.get("required_status_checks") or {}
         checks = [c.get("context") if isinstance(c, dict) else c for c in (rsc.get("checks") or [])] \
-            or list(rsc.get("contexts") or [])
+            + list(rsc.get("contexts") or [])
         info = {"status": "set",
                 "required_reviews": (d.get("required_pull_request_reviews") or {}).get("required_approving_review_count", 0)
                 if d.get("required_pull_request_reviews") else 0,
-                "required_checks": [c for c in checks if c],
+                "required_checks": sorted({c for c in checks if c}),
                 "enforce_admins": bool((d.get("enforce_admins") or {}).get("enabled"))}
-    try:  # newer repos use rulesets instead of classic protection
+    try:  # newer repos use rulesets instead of classic protection; this lists the rules in force, org rulesets included
         rules = gh_api("repos/%s/rules/branches/%s" % (repo, branch)) or []
-    except GhError:
+    except GhError as e:
         rules = []
+        notes.append("Rulesets could not be read (%s); checks they require are not shown as required." % e)
     for rule in rules:
         t, params = rule.get("type"), rule.get("parameters") or {}
         if t == "pull_request":
             info["required_reviews"] = max(info["required_reviews"] or 0, params.get("required_approving_review_count", 0))
             info["status"] = "set"
         elif t == "required_status_checks":
-            info["required_checks"] = sorted(set(info["required_checks"]) |
+            info["required_checks"] = sorted(set(info["required_checks"] or []) |
                                              {c.get("context") for c in params.get("required_status_checks", []) if c.get("context")})
             info["status"] = "set"
-    return info, None
+    return info, " ".join(notes) or None
 
 
 def has_codeowners(repo):
@@ -568,6 +583,217 @@ def sling_labels_used(repo, since):
     issues = gh_json(["issue", "list", "--repo", repo, "--state", "all", "--search", "created:>=%s" % since.date().isoformat(),
                       "--json", "labels", "--limit", "200"]) or []
     return any((lb.get("name") or "").lower() in SLING_LABELS for i in issues for lb in i.get("labels") or [])
+
+
+# ---------------------------------------------------------------- CI checks a repo runs (for "must pass before merge")
+
+def collect_checks(main_runs, merged, required):
+    """One entry per distinct check name, from the latest default-branch commit and the merged PRs' heads.
+
+    main_runs: raw check-run dicts of the default branch's latest commit. merged: pr_metrics' merged list. required:
+    check names that branch protection or a ruleset requires. Returns (list, names that are required but were not seen)."""
+    req = {r.lower() for r in required or []}
+    gate = {g.lower() for g in GATE_CHECK_NAMES}
+    seen = {}  # lower-cased name -> {'name', 'app', 'app_id', 'on_main', 'outcomes': [one conclusion per PR]}
+
+    def entry(name):
+        return seen.setdefault(name.lower(), {"name": name, "app": None, "app_id": None, "on_main": False, "outcomes": []})
+
+    for c in main_runs or []:
+        name = c.get("name") or ""
+        if not name or name.lower() in gate:
+            continue
+        e = entry(name)
+        e["on_main"] = True
+        app = c.get("app") or {}
+        e["app"], e["app_id"] = app.get("slug") or e["app"], app.get("id") or e["app_id"]
+    for p, _c, _m in merged:
+        checks = p.get("_checks")
+        if checks is None:
+            checks = normalize_checks(p.get("statusCheckRollup"))
+        latest = {}  # a re-run of the same check on one head counts once: the last finished one
+        for c in checks:
+            if not c["name"] or c["name"].lower() in gate:
+                continue
+            k = c["name"].lower()
+            if k not in latest or (c["completed"] and latest[k]["completed"] and c["completed"] >= latest[k]["completed"]):
+                latest[k] = c
+        for k, c in latest.items():
+            e = entry(c["name"])
+            e["outcomes"].append(c["conclusion"])
+            if c.get("app") and not e["app"]:
+                e["app"], e["app_id"] = c["app"], c.get("app_id")
+    out = []
+    for k, e in seen.items():
+        good = sum(1 for o in e["outcomes"] if o == "success")
+        bad = sum(1 for o in e["outcomes"] if o in FAILED)  # skipped and neutral are neither: left out of the rate
+        out.append({"name": e["name"], "app": e["app"], "app_id": e["app_id"], "required": k in req,
+                    "on_main": e["on_main"], "on_prs": len(e["outcomes"]),
+                    "pass_rate": round(good / float(good + bad), 2) if good + bad else None})
+    out.sort(key=lambda c: (not c["required"], -c["on_prs"], c["name"].lower()))
+    missing = sorted(r for r in (required or []) if r.lower() not in seen and r.lower() not in gate)
+    return out, missing
+
+
+# ---------------------------------------------------------------- does the repo already have its own review / merge pipeline?
+
+LLM_REVIEWER_RE = re.compile(r"claude|qwen|openai|coderabbit", re.I)
+AUTO_MERGE_RE = re.compile(r"gh\s+pr\s+merge\b[^\n]*--auto|merge\s+--auto|enablePullRequestAutoMerge|"
+                           r"enable-pull-request-automerge|enable-auto-merge", re.I)
+
+
+def workflow_steps(text):
+    """[('uses', 'owner/action@v1') | ('run', 'script text')] for the steps of a workflow file. Comments are dropped,
+    block scalars (`run: |`) are joined, shell line continuations are folded, `echo`/`printf` lines are ignored."""
+    out, lines, i = [], text.splitlines(), 0
+    while i < len(lines):
+        ln = lines[i]
+        i += 1
+        if ln.lstrip().startswith("#"):
+            continue
+        m = re.match(r"^(\s*)-?\s*(uses|run)\s*:\s*(.*?)\s*$", ln)
+        if not m:
+            continue
+        kind, rest, key_col = m.group(2), m.group(3), m.start(2)  # key_col: where `run:` itself starts on the line
+        if kind == "uses":
+            out.append(("uses", re.sub(r"\s+#.*$", "", rest).strip("'\"")))
+            continue
+        body = []
+        if re.match(r"^[|>][+-]?\d?$", rest):  # block scalar: every following line indented deeper than the key
+            while i < len(lines) and (not lines[i].strip() or len(lines[i]) - len(lines[i].lstrip()) > key_col):
+                body.append(lines[i])
+                i += 1
+        else:
+            body.append(rest)
+        code = "\n".join(b for b in body if not b.lstrip().startswith("#") and not re.match(r"^\s*(echo|printf)\b", b))
+        out.append(("run", re.sub(r"\\\n\s*", " ", code)))
+    return out
+
+
+def pipeline_detect(wf_text):
+    """-> ('own' | 'gate', evidence). 'own' when a workflow that runs on pull requests uses an LLM reviewer or turns
+    on auto-merge, so Build Autopilot's gate would be a second reviewer / a second merger on the same pull requests."""
+    evidence = []
+    for path in sorted(wf_text):
+        text = wf_text[path] or ""
+        trig = parse_triggers(text)
+        if not (trig["pull_request"] or trig["pull_request_target"]):
+            continue
+        fname = os.path.basename(path)
+        steps = workflow_steps(text)
+        found = []
+        if any(k == "uses" and "anthropics/claude-code-action" in v for k, v in steps):
+            found.append("runs anthropics/claude-code-action on pull requests (AI review)")
+        else:
+            terms = sorted({t.lower() for k, v in steps for t in LLM_REVIEWER_RE.findall(v)})
+            if terms:
+                found.append("runs an AI reviewer step on pull requests (mentions %s)" % ", ".join(terms))
+        merge = next((m.group(0) for k, v in steps for m in [AUTO_MERGE_RE.search(v)] if m), None)
+        if merge:
+            found.append("enables auto-merge (%s)" % re.sub(r"\s+", " ", merge)[:60])
+        evidence.extend("%s: %s" % (fname, f) for f in found)
+    return ("own" if evidence else "gate"), evidence[:5]
+
+
+# ---------------------------------------------------------------- is Build Autopilot installed here, and how far along?
+
+AUTOPILOT_ENVS = ("autopilot", "autopilot-review")
+ENV_SECRETS = {"autopilot": "AUTOPILOT_APP_PRIVATE_KEY", "autopilot-review": "ANTHROPIC_API_KEY"}
+ENV_VARIABLES = {"autopilot": ("AUTOPILOT_APP_ID", "AUTOPILOT_APP_CLIENT_ID")}
+APPLY_BRANCH_PREFIX = "autopilot/policy-"
+
+
+def install_info(repo, branch):
+    """-> (install dict, notes). Names only: no secret or variable value is ever requested (the list endpoints do not
+    return values). A thing that does not exist is False (null for a value that has nothing to show); a 403 or any other
+    failure to read is null with a note."""
+    notes, unreadable = [], set()
+
+    def get(label, path, paged=False, key=None):
+        """-> (data, state) with state 'ok' | 'missing' | 'unknown'."""
+        try:
+            if paged:
+                return gh_paged(path, key, 300)[0], "ok"
+            return gh_api(path), "ok"
+        except GhError as e:
+            if e.status == 404:
+                return None, "missing"
+            if label not in unreadable:
+                unreadable.add(label)
+                notes.append("Install check: %s could not be read (%s)." % (label, "403: the token lacks access" if e.status == 403 else e))
+            return None, "unknown"
+
+    def tri(*parts):
+        """AND of True/False/None parts: any False -> False, else any unknown -> None, else True."""
+        if any(p is False for p in parts):
+            return False
+        return None if any(p is None for p in parts) else True
+
+    out = {"policy_on_main": None, "pipeline_on_main": None, "gate_on_main": None, "environments_locked": None,
+           "secrets_set": None, "ruleset": None, "open_apply_pr": None}
+
+    # the policy file and the gate workflow, on the default branch
+    try:
+        text = fetch_text(repo, ".github/autopilot.json")
+        out["policy_on_main"] = True
+        try:
+            pol = json.loads(text)
+        except ValueError:
+            pol = {}
+            notes.append("Install check: .github/autopilot.json is not valid JSON; treated as pipeline \"gate\".")
+        out["pipeline_on_main"] = (pol.get("pipeline") if isinstance(pol, dict) else None) or "gate"
+    except GhError as e:
+        if e.status == 404:
+            out["policy_on_main"] = False
+        else:
+            notes.append("Install check: .github/autopilot.json could not be read (%s)." % e)
+    _d, st = get("the gate workflow", "repos/%s/contents/.github/workflows/autopilot.yml" % repo)
+    out["gate_on_main"] = None if st == "unknown" else st == "ok"
+
+    # environments: both exist, restricted to custom branch policies that allow the default branch and nothing else
+    locked = []
+    for env in AUTOPILOT_ENVS:
+        d, st = get("environment %s" % env, "repos/%s/environments/%s" % (repo, env))
+        if st != "ok":
+            locked.append(None if st == "unknown" else False)
+            continue
+        custom = ((d or {}).get("deployment_branch_policy") or {}).get("custom_branch_policies") is True
+        if not custom:
+            locked.append(False)
+            continue
+        pol, st = get("branch policies of %s" % env, "repos/%s/environments/%s/deployment-branch-policies" % (repo, env),
+                      True, "branch_policies")
+        locked.append(None if st == "unknown" else (False if st == "missing" else
+                                                   sorted(p.get("name") for p in pol) == [branch]))
+    out["environments_locked"] = tri(*locked)
+
+    # secrets and variables by name
+    have = []
+    for env, name in ENV_SECRETS.items():
+        d, st = get("secrets of %s" % env, "repos/%s/environments/%s/secrets" % (repo, env), True, "secrets")
+        have.append(None if st == "unknown" else (st == "ok" and name in {x.get("name") for x in d}))
+    for env, names in ENV_VARIABLES.items():
+        d, st = get("variables of %s" % env, "repos/%s/environments/%s/variables" % (repo, env), True, "variables")
+        for name in names:
+            have.append(None if st == "unknown" else (st == "ok" and name in {x.get("name") for x in d}))
+    out["secrets_set"] = tri(*have)
+
+    # the repo-level ruleset
+    d, st = get("rulesets", "repos/%s/rulesets?includes_parents=false" % repo, True, None)
+    if st == "ok":
+        out["ruleset"] = any(r.get("name") == "build-autopilot" and r.get("enforcement") == "active" for r in d or [])
+    elif st == "missing":
+        out["ruleset"] = False
+
+    # an open pull request that applies the policy
+    try:
+        prs = gh_json(["pr", "list", "--repo", repo, "--state", "open", "--json", "number,url,headRefName",
+                       "--limit", "100"]) or []
+        hit = next((p for p in prs if (p.get("headRefName") or "").startswith(APPLY_BRANCH_PREFIX)), None)
+        out["open_apply_pr"] = {"number": hit["number"], "url": hit.get("url")} if hit else None
+    except GhError as e:
+        notes.append("Install check: open pull requests could not be read (%s)." % e)
+    return out, notes
 
 
 # ---------------------------------------------------------------- Claude Code transcripts
@@ -826,7 +1052,7 @@ def collect_interruptions(dirs, repos, checkouts, since, tz):
 
 # ---------------------------------------------------------------- recommendations
 
-def recommendations(p, ci, dep, auto, inter, waits, window_days, default_branch):
+def recommendations(p, ci, dep, auto, inter, waits, window_days, default_branch, pipeline=("gate", [])):
     weeks = window_days / 7.0
     out = []
     merged = p["merged"]
@@ -909,6 +1135,14 @@ def recommendations(p, ci, dep, auto, inter, waits, window_days, default_branch)
             ["Claude keeps working while you are away", "Fewer approvals to click through"],
             ["Occasionally Claude picks a different option than you would have; that is why only reversible choices qualify"],
             "medium", "questions", "decide-reversible")
+    if pipeline[0] == "own":
+        rec("keep-own-pipeline", "Keep this repo's own review and merge pipeline",
+            "This repo already has its own AI review or merge automation (%s)." % "; ".join(pipeline[1]),
+            0.0,
+            ["No double review cost",
+             "Its merge bot and Build Autopilot's gate would otherwise fight over auto-merge"],
+            ["Build Autopilot's settings for level and sensitive areas don't apply there (the repo's own rules do)"],
+            "low", "pipeline", "own")
     if inter["permission_denials"] >= 5:
         rec("permission-allowlist", "Pre-approve the safe commands Claude keeps being blocked on",
             "%d commands were blocked for permission in this window. Estimate: 2 minutes lost each." % inter["permission_denials"],
@@ -980,6 +1214,22 @@ def audit_repo(repo, since, now, window_days, inter_by_repo, tz, log=lambda m: N
 
     pr_stats, waits, merged = pr_metrics(prs, len(open_prs), bp.get("required_checks") or [], since,
                                          branch_run_shas(runs), tz)
+    log("checks")
+    main_runs, _t = step("Checks on %s" % branch, lambda: gh_paged("repos/%s/commits/%s/check-runs" % (repo, branch),
+                                                                    "check_runs", MAX_RUNS), ([], False))
+    result["checks"], missing = collect_checks(main_runs, merged, bp.get("required_checks") or [])
+    if missing:
+        notes.append("Required by branch protection or a ruleset but not seen on %s or the merged pull requests: %s." % (
+            branch, ", ".join(missing)))
+    hint, evidence = pipeline_detect(wf_text)
+    result["pipeline_hint"], result["pipeline_evidence"] = hint, evidence
+    log("install state")
+    install, install_notes = step("Install state", lambda: install_info(repo, branch),
+                                  ({"policy_on_main": None, "pipeline_on_main": None, "gate_on_main": None,
+                                    "environments_locked": None, "secrets_set": None, "ruleset": None,
+                                    "open_apply_pr": None}, []))
+    result["install"] = install
+    notes.extend(install_notes)
     result["prs"] = pr_stats
     result["ci"] = ci_metrics(runs, merged, branch, len(merged))
     result["deploy"] = deploy_metrics(wf_list, wf_text, runs, merged, branch)
@@ -997,7 +1247,7 @@ def audit_repo(repo, since, now, window_days, inter_by_repo, tz, log=lambda m: N
     inter = inter_by_repo.get(repo) or interruption_summary(new_interruptions())
     result["interruptions"] = inter
     result["recommendations"] = recommendations(pr_stats, result["ci"], result["deploy"], auto, inter, waits,
-                                                window_days, branch)
+                                                window_days, branch, (hint, evidence))
     result["notes"] = notes
     return result
 

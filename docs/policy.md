@@ -12,6 +12,8 @@ A repo without the file behaves as `manual` with questions `ask-now`: exactly as
 {
   "version": 1,
   "repo": "your-org/your-repo",
+  "pipeline": "gate",
+  "required_checks": ["API · unit + integration", "lint"],
   "level": "auto-merge",
   "sensitive": {
     "rule": "two-ai",
@@ -27,6 +29,31 @@ A repo without the file behaves as `manual` with questions `ask-now`: exactly as
 ```
 
 ## Fields
+
+### `pipeline`: who reviews and merges
+
+| Value | Means | What Build Autopilot does in the repo |
+|---|---|---|
+| `gate` (default) | Build Autopilot's GitHub gate reviews every pull request and merges what the settings allow. | `/autopilot apply` installs the gate; `level`, `sensitive`, `tests` and `required_checks` all apply. |
+| `own` | The repo already has its own review and merge automation, and keeps it. | Writes only this file. Doesn't install the gate or branch rules, and never turns on auto-merge itself: the repo's own pipeline decides. `questions` and `always_ask` still apply to Claude sessions. `level`, `sensitive` and `tests` are ignored. |
+| `none` | Nobody merges automatically; a person merges every pull request. | Writes only this file. Claude sessions stop at the open pull request. `questions` and `always_ask` still apply. |
+
+Running two merge systems in one repo makes them fight (each turns the other's auto-merge off), so a repo picks one.
+
+Moving a repo from `gate` to `own` or `none`: `/autopilot apply` removes the gate's files, and
+`scripts/setup-github-gate.sh OWNER/REPO` offers to delete the `build-autopilot` ruleset. Do both. The ruleset requires
+the gate's check, which nothing posts any more, so until it's gone no pull request can merge (see "Removing it" in
+`v2-install.md`).
+
+### `required_checks`: what must pass before a merge
+
+The names of the CI checks (as shown on a pull request) that must pass before anything merges. With `pipeline: gate`
+they become the required test checks in the repo's branch ruleset, beside the gate's own `autopilot/gate`. With
+`own` or `none` they are recorded only; the repo's existing rules decide. An empty list means "the checks GitHub Actions
+reported on the default branch's latest commit", which the setup script shows before using them.
+
+Turning a test suite off entirely is a change to the repo's workflow files, made through a pull request, not a
+setting here.
 
 ### `level`: how far a change goes without a person
 

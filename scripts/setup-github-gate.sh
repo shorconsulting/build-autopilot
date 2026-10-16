@@ -120,6 +120,48 @@ IS_ADMIN=$(printf '%s' "$REPO_JSON" | jq -r '.permissions.admin // false')
 OWNER_TYPE=$(gh api "users/$OWNER" --jq .type)
 say "Default branch: $DEFAULT_BRANCH. Owner type: $OWNER_TYPE."
 
+# The repo's settings (if /autopilot apply has written them): a repo that keeps its own pipeline, or where a person
+# merges everything, doesn't get the gate at all.
+POLICY_RAW=$(gh api "repos/$REPO/contents/.github/autopilot.json?ref=$DEFAULT_BRANCH" --jq .content 2>/dev/null \
+               | base64 -d 2>/dev/null || true)
+PIPELINE=""
+if [ -n "$POLICY_RAW" ]; then
+  # Same reading as the gate: a missing field means gate; any value that isn't a string is an error.
+  PIPELINE=$(printf '%s' "$POLICY_RAW" | jq -r 'if has("pipeline") then (.pipeline | if type == "string" then . else "<invalid>" end) else "gate" end' 2>/dev/null) \
+    || die ".github/autopilot.json on $DEFAULT_BRANCH isn't valid JSON"
+  printf '%s' "$POLICY_RAW" | jq -e '(.required_checks // []) | type == "array" and all(type == "string")' >/dev/null 2>&1 \
+    || die ".github/autopilot.json's required_checks must be a list of check names"
+fi
+[ -n "$PIPELINE" ] || PIPELINE=gate
+# A repo that left the gate must not keep its ruleset: it requires a check nothing will post any more, so every
+# pull request would stay blocked.
+leave_gate() {
+  local rid
+  rid=$(gh api --paginate "repos/$REPO/rulesets?includes_parents=false" --jq ".[] | select(.name == \"$RULESET_NAME\") | .id" | head -1)
+  if [ -n "$rid" ]; then
+    say "But the \"$RULESET_NAME\" branch ruleset is still on, and it requires the gate's check, which nothing will post now."
+    say "Until it's removed, no pull request in $REPO can merge."
+    if confirm "Delete the \"$RULESET_NAME\" ruleset now?"; then
+      gh api -X DELETE "repos/$REPO/rulesets/$rid" >/dev/null
+      say "  Deleted."
+    else
+      warn "left the ruleset in place; delete it in $REPO's Settings > Rules > Rulesets"
+    fi
+  fi
+  if gh api "repos/$REPO/contents/.github/workflows/autopilot.yml?ref=$DEFAULT_BRANCH" >/dev/null 2>&1; then
+    say "The gate's files are still in the repo (it does nothing now). /autopilot apply opens a pull request that removes them."
+  fi
+  exit 0
+}
+case "$PIPELINE" in
+  own)  say "$REPO keeps its own review and merge pipeline (pipeline: own), so it doesn't need the gate."
+        leave_gate ;;
+  none) say "In $REPO a person merges every pull request (pipeline: none), so it doesn't need the gate."
+        leave_gate ;;
+  gate) ;;
+  *)    die "unknown pipeline '$PIPELINE' in $REPO's .github/autopilot.json" ;;
+esac
+
 mkdir -p "$STATE_DIR/apps" "$STATE_DIR/keys"
 chmod 700 "$STATE_DIR" "$STATE_DIR/keys"
 APP_META="$STATE_DIR/apps/$OWNER.json"
@@ -428,6 +470,12 @@ if [ "$DO_RULESET" -eq 1 ]; then
   # pass it, including the pull request that installs the gate.
   if ! gh api "repos/$REPO/contents/.github/workflows/autopilot.yml?ref=$DEFAULT_BRANCH" >/dev/null 2>&1; then
     die "the gate isn't on $DEFAULT_BRANCH yet, so a ruleset requiring it would block every merge. Run /autopilot apply, merge that pull request, then re-run this with --ruleset"
+  fi
+  if [ "${#TEST_CHECKS[@]}" -eq 0 ] && [ -n "$POLICY_RAW" ]; then
+    while IFS= read -r line; do [ -n "$line" ] && TEST_CHECKS+=("$line"); done <<EOF
+$(printf '%s' "$POLICY_RAW" | jq -r '(.required_checks // [])[] | strings')
+EOF
+    [ "${#TEST_CHECKS[@]}" -eq 0 ] || say "Using the checks chosen on the settings page (required_checks)."
   fi
   if [ "${#TEST_CHECKS[@]}" -eq 0 ]; then
     HEAD_SHA=$(gh api "repos/$REPO/commits/$DEFAULT_BRANCH" --jq .sha)

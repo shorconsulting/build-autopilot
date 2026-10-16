@@ -342,6 +342,29 @@ class Patterns(unittest.TestCase):
 
 
 class Settings(unittest.TestCase):
+    def test_commands_say_the_gate_is_off_under_own_pipeline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            checkout, head = h.make_repo(tmp, dict(h.POLICY, pipeline="own"), {"src/app.ts": "x\n"})
+            pull = dict(h.make_event(head)["pull_request"], state="open", merged=False)
+            for body, who in (("/autopilot stop", "User"), ("/autopilot resume", "User"),
+                              ("/autopilot approve %s" % head, "User"), ("/autopilot stop", "Bot")):
+                gh = h.FakeGitHub(pull)
+                ev = {"repository": {"full_name": h.REPO, "default_branch": "main"},
+                      "issue": {"number": 7, "pull_request": {"url": "x"}}, "comment": gh.command(body, "david", who)}
+                self.assertEqual(gate.cmd_approve(checkout, ev, gh, h.APP_SLUG, h.RUN_URL), "ignored: no settings")
+                said = [c["body"] for c in gh.comments if "gate is off" in c.get("body", "")]
+                self.assertEqual(len(said), 1 if who == "User" else 0, body + " " + who)
+                self.assertEqual(gh.status_for(head), "-")   # nothing written to the check
+
+    def test_pipeline_own_or_none_turns_the_gate_off(self):
+        base = {"version": 1, "repo": "acme/widgets", "level": "auto-merge"}
+        for pipeline in ("own", "none"):
+            self.assertIsNone(gate.parse_policy(json.dumps(dict(base, pipeline=pipeline)), "acme/widgets"))
+        self.assertEqual(gate.parse_policy(json.dumps(base), "acme/widgets").level, "auto-merge")   # default: gate
+        self.assertIn("unknown pipeline", gate.parse_policy(json.dumps(dict(base, pipeline="both")), "acme/widgets").error)
+        bad = dict(base, pipeline="gate", required_checks="lint")
+        self.assertIn("required_checks", gate.parse_policy(json.dumps(bad), "acme/widgets").error)
+
     def parse(self, obj):
         return gate.parse_policy(json.dumps(obj) if not isinstance(obj, str) else obj, h.REPO)
 

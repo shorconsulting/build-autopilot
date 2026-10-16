@@ -2,6 +2,7 @@
 import datetime as dt
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -24,9 +25,16 @@ def fx(name):
 class FakeGh:
     """Stands in for audit.gh. Answers from fixtures, records every call, and fails the test on any write."""
 
-    def __init__(self, repo="acme/widgets", protection=404, rules=None, rollup_fails=False, codeowners=(".github/CODEOWNERS",)):
+    def __init__(self, repo="acme/widgets", protection=404, rules=None, rollup_fails=False, codeowners=(".github/CODEOWNERS",),
+                 protection_body=None, rules_status=None, prs="prs_merged.json", workflows=None,
+                 files=None, envs=None, rulesets=None, forbid=(), apply_pr=None):
         self.repo, self.protection, self.rules = repo, protection, rules or []
         self.rollup_fails, self.codeowners = rollup_fails, set(codeowners)
+        self.protection_body, self.rules_status, self.prs = protection_body, rules_status, prs
+        self.workflows = workflows or {}  # {"name.yml": fixture file} added to the repo's workflows
+        self.files = files or {}  # {"path": text} files on the default branch
+        self.envs = envs or {}  # {"autopilot": {"custom": True, "policies": ["main"], "secrets": [...], "variables": [...]}}
+        self.rulesets, self.forbid, self.apply_pr = rulesets or [], tuple(forbid), apply_pr
         self.calls = []
 
     def __call__(self, args):
@@ -41,35 +49,71 @@ class FakeGh:
             return fx("issues.json")
         if args[0] == "pr":
             if "open" in args:
+                if "headRefName" in args[args.index("--json") + 1]:
+                    rows = [{"number": 9, "url": "https://github.com/acme/widgets/pull/9", "headRefName": "feat/other"}]
+                    if self.apply_pr:
+                        rows.append(self.apply_pr)
+                    return json.dumps(rows)
                 return fx("prs_open.json")
             if self.rollup_fails and "statusCheckRollup" in args[args.index("--json") + 1]:
                 raise audit.GhError("GraphQL: timeout")
-            prs = json.loads(fx("prs_merged.json"))
+            prs = json.loads(fx(self.prs))
             if self.rollup_fails:
                 for p in prs:
                     p.pop("statusCheckRollup")
             return json.dumps(prs)
         path = [a for a in args if a.startswith("repos/")][0]
+        for bad in self.forbid:
+            if bad in path:
+                raise audit.GhError("Resource not accessible (HTTP 403)", 403)
         if path == "repos/%s" % self.repo:
             return fx("repo.json")
+        m = re.search(r"/environments/([^/?]+)(?:/([a-z-]+))?", path)
+        if m:
+            env, sub = self.envs.get(m.group(1)), m.group(2)
+            if env is None:
+                raise audit.GhError("Not Found (HTTP 404)", 404)
+            if sub is None:
+                return json.dumps({"name": m.group(1), "deployment_branch_policy":
+                                   {"protected_branches": False, "custom_branch_policies": env["custom"]}})
+            if sub == "deployment-branch-policies":
+                return json.dumps({"total_count": len(env["policies"]),
+                                   "branch_policies": [{"name": n, "type": "branch"} for n in env["policies"]]})
+            key = sub  # secrets / variables: names only, as GitHub lists them
+            return json.dumps({"total_count": len(env[key]), key: [{"name": n} for n in env[key]]})
+        if "/rulesets" in path:
+            return json.dumps(self.rulesets if "page=1" in path else [])
         if "/actions/runs" in path:
             return fx("runs_page1.json") if "page=1" in path else json.dumps({"workflow_runs": []})
         if path.endswith("/actions/workflows"):
-            return fx("workflows.json")
+            data = json.loads(fx("workflows.json"))
+            for i, name in enumerate(sorted(self.workflows)):
+                data["workflows"].append({"id": 100 + i, "name": name, "path": ".github/workflows/" + name, "state": "active"})
+            return json.dumps(data)
+        for name, fixture in self.workflows.items():
+            if path.endswith("/contents/.github/workflows/" + name):
+                return fx(fixture)
         if "/contents/.github/workflows/test.yml" in path:
             return fx("workflow_test.yml")
         if "/contents/.github/workflows/deploy.yml" in path:
             return fx("workflow_deploy.yml")
         if "/contents/" in path:
-            if path.split("/contents/")[1] in self.codeowners:
+            cpath = path.split("/contents/")[1]
+            if cpath in self.files:
+                return self.files[cpath] if "-H" in args else json.dumps({"name": cpath})
+            if cpath in self.codeowners:
                 return json.dumps({"name": "CODEOWNERS"})
             raise audit.GhError("Not Found (HTTP 404)", 404)
         if "/branches/main/protection" in path:
             if self.protection:
                 raise audit.GhError("HTTP %d" % self.protection, self.protection)
-            return json.dumps({})
+            return fx(self.protection_body) if self.protection_body else json.dumps({})
         if "/rules/branches/main" in path:
-            return json.dumps(self.rules)
+            if self.rules_status:
+                raise audit.GhError("HTTP %d" % self.rules_status, self.rules_status)
+            return fx(self.rules) if isinstance(self.rules, str) else json.dumps(self.rules)
+        if "/commits/main/check-runs" in path:
+            return fx("check_runs_main.json")
         if "/check-runs" in path:
             return json.dumps({"check_runs": [{"name": "unit", "status": "completed", "conclusion": "success",
                                                "started_at": "2026-10-01T17:05:00Z", "completed_at": "2026-10-01T17:20:00Z"}]})
@@ -262,6 +306,196 @@ class RepoAudit(Base):
         self.assertGreater(len(fake.calls), 8)  # FakeGh asserts on each call; this proves it saw them
 
 
+class Checks(Base):
+    """The `checks` list: what the settings page offers as "must pass before merge" toggles."""
+
+    def checks(self, **kw):
+        r = self.audit(FakeGh(prs="prs_merged_mixed.json", **kw))
+        return r, {c["name"]: c for c in r["checks"]}
+
+    def test_required_via_classic_protection_and_via_the_rules_endpoint(self):
+        r, by = self.checks(protection=0, protection_body="protection.json", rules="rules_effective.json")
+        self.assertEqual({n for n, c in by.items() if c["required"]}, {"unit", "lint", "e2e", "Vercel Preview"})  # contexts, checks[], rules
+        self.assertEqual(r["automation"]["branch_protection"]["required_checks"], ["Vercel Preview", "e2e", "lint", "unit"])
+        _, by = self.checks(protection=0, protection_body="protection.json")  # protection alone
+        self.assertEqual({n for n, c in by.items() if c["required"]}, {"unit", "lint"})
+        _, by = self.checks(rules="rules_effective.json")  # rules alone, protection is a 404
+        self.assertEqual({n for n, c in by.items() if c["required"]}, {"e2e", "Vercel Preview"})
+
+    def test_a_404_on_protection_means_not_required_with_a_note(self):
+        r, by = self.checks()
+        self.assertFalse(any(c["required"] for c in by.values()))
+        self.assertTrue(any("404" in n and "branch protection" in n.lower() for n in r["notes"]))
+
+    def test_403_on_protection_or_rules_means_not_required_with_a_note(self):
+        r, by = self.checks(protection=403, rules_status=403)
+        self.assertFalse(any(c["required"] for c in by.values()))
+        self.assertTrue(any("Branch protection could not be read (403" in n for n in r["notes"]))
+        self.assertTrue(any("Rulesets could not be read" in n for n in r["notes"]))
+        _, by = self.checks(protection=403, rules="rules_effective.json")  # rulesets still count when protection is unreadable
+        self.assertTrue(by["e2e"]["required"])
+
+    def test_pass_rate_leaves_skipped_and_neutral_out_of_the_denominator(self):
+        _, by = self.checks()
+        unit = by["unit"]  # success, success, failure, skipped
+        self.assertEqual((unit["on_prs"], unit["pass_rate"]), (4, 0.67))
+        self.assertEqual((by["lint"]["on_prs"], by["lint"]["pass_rate"]), (3, None))  # skipped, neutral, skipped
+        self.assertEqual((by["e2e"]["on_prs"], by["e2e"]["pass_rate"]), (1, 1.0))
+
+    def test_app_and_main_come_from_the_default_branch_check_runs(self):
+        _, by = self.checks()
+        self.assertEqual(set(by["unit"]), {"name", "app", "app_id", "required", "on_main", "on_prs", "pass_rate"})
+        self.assertEqual((by["unit"]["app"], by["unit"]["app_id"], by["unit"]["on_main"]), ("github-actions", 15368, True))
+        self.assertEqual((by["Vercel Preview"]["app"], by["Vercel Preview"]["app_id"]), ("vercel", 8329))
+        self.assertEqual((by["Vercel Preview"]["on_main"], by["Vercel Preview"]["on_prs"], by["Vercel Preview"]["pass_rate"]),
+                         (True, 0, None))
+        self.assertEqual((by["e2e"]["on_main"], by["e2e"]["app"]), (False, "github-actions"))  # only on PRs: app from the workflow
+
+    def test_the_autopilot_gate_is_left_out_and_order_is_required_first_then_on_prs(self):
+        r, by = self.checks(rules="rules_effective.json")
+        self.assertNotIn("autopilot/gate", by)
+        self.assertEqual([c["name"] for c in r["checks"]], ["e2e", "Vercel Preview", "unit", "lint"])
+
+    def test_no_extra_call_per_pull_request_and_a_required_check_never_seen_is_noted(self):
+        fake = FakeGh(prs="prs_merged_mixed.json", rules=[{"type": "required_status_checks",
+                      "parameters": {"required_status_checks": [{"context": "ghost"}]}}])
+        r = self.audit(fake)
+        self.assertFalse(any("shaX" in " ".join(c) for c in fake.calls))
+        self.assertEqual(sum(1 for c in fake.calls if any("/commits/main/check-runs" in a for a in c)), 1)
+        self.assertTrue(any("ghost" in n for n in r["notes"]))
+        self.assertNotIn("ghost", [c["name"] for c in r["checks"]])
+
+    def test_checks_use_the_fallback_per_pr_data_when_the_rollup_failed(self):
+        r = self.audit(FakeGh(rollup_fails=True))
+        self.assertEqual({c["name"] for c in r["checks"]}, {"unit", "lint", "Vercel Preview"})
+        self.assertEqual({c["name"]: c["on_prs"] for c in r["checks"]}["unit"], 4)
+
+
+class PipelineHint(Base):
+    def detect(self, **files):
+        return audit.pipeline_detect({".github/workflows/%s.yml" % k: fx(v) for k, v in files.items()})
+
+    def test_claude_code_action_on_pull_requests_is_own(self):
+        hint, ev = self.detect(reviewer="workflow_claude.yml")
+        self.assertEqual(hint, "own")
+        self.assertEqual(ev, ["reviewer.yml: runs anthropics/claude-code-action on pull requests (AI review)"])
+
+    def test_gh_pr_merge_auto_is_own_and_echo_text_and_comments_do_not_count(self):
+        hint, ev = self.detect(merge="workflow_automerge.yml")
+        self.assertEqual((hint, len(ev)), ("own", 1))
+        self.assertTrue(ev[0].startswith("merge.yml: enables auto-merge (gh pr merge --squash --auto"))
+        self.assertEqual(audit.pipeline_detect({"a.yml": "on: pull_request\njobs:\n  x:\n    steps:\n"
+                                               "      - run: echo \"gh pr merge --auto\"\n      # - run: gh pr merge --auto\n"})[0], "gate")
+
+    def test_plain_ci_and_manual_deploy_are_gate_even_with_a_fake_api_key(self):
+        hint, ev = self.detect(test="workflow_test.yml", deploy="workflow_deploy.yml")
+        self.assertEqual((hint, ev), ("gate", []))
+
+    def test_other_llm_reviewers_count_but_only_on_pull_request_triggers(self):
+        text = "on: [pull_request]\njobs:\n  r:\n    steps:\n      - uses: coderabbitai/ai-pr-reviewer@v1\n"
+        hint, ev = audit.pipeline_detect({".github/workflows/cr.yml": text})
+        self.assertEqual(hint, "own")
+        self.assertIn("coderabbit", ev[0])
+        self.assertEqual(audit.pipeline_detect({"cr.yml": text.replace("[pull_request]", "[push]")})[0], "gate")
+        self.assertEqual(audit.pipeline_detect({"q.yml": "on:\n  pull_request_target:\njobs:\n  r:\n    steps:\n"
+                                               "      - run: python qwen_review.py\n"})[0], "own")
+
+    def test_evidence_is_capped_at_five(self):
+        files = {"w%d.yml" % i: fx("workflow_claude.yml") for i in range(8)}
+        self.assertEqual(len(audit.pipeline_detect(files)[1]), 5)
+
+    def test_in_the_repo_output_and_the_keep_own_pipeline_recommendation(self):
+        r = self.audit()
+        self.assertEqual((r["pipeline_hint"], r["pipeline_evidence"]), ("gate", []))
+        self.assertNotIn("keep-own-pipeline", {x["id"] for x in r["recommendations"]})
+        r = self.audit(FakeGh(workflows={"reviewer.yml": "workflow_claude.yml", "auto-merge.yml": "workflow_automerge.yml"}))
+        self.assertEqual(r["pipeline_hint"], "own")
+        self.assertEqual([e.split(":")[0] for e in r["pipeline_evidence"]], ["auto-merge.yml", "reviewer.yml"])
+        rec = {x["id"]: x for x in r["recommendations"]}["keep-own-pipeline"]
+        self.assertEqual(rec["title"], "Keep this repo's own review and merge pipeline")
+        self.assertEqual(rec["setting"], {"key": "pipeline", "value": "own"})
+        self.assertEqual((rec["risk"], rec["saves_hours_per_week"]), ("low", 0.0))
+        self.assertIn("reviewer.yml", rec["why"])
+        self.assertEqual(set(rec), {"id", "title", "why", "saves_hours_per_week", "pros", "cons", "risk", "setting"})
+        self.assertTrue(any("double review" in p for p in rec["pros"]) and rec["cons"])
+
+
+GOOD_ENVS = {"autopilot": {"custom": True, "policies": ["main"], "secrets": ["AUTOPILOT_APP_PRIVATE_KEY"],
+                           "variables": ["AUTOPILOT_APP_ID", "AUTOPILOT_APP_CLIENT_ID", "OTHER"]},
+             "autopilot-review": {"custom": True, "policies": ["main"], "secrets": ["ANTHROPIC_API_KEY"], "variables": []}}
+
+
+class Install(Base):
+    def install(self, **kw):
+        r = self.audit(FakeGh(**kw))
+        return r["install"], r["notes"]
+
+    def test_nothing_installed_is_all_false_and_null(self):
+        i, _ = self.install()
+        self.assertEqual(i, {"policy_on_main": False, "pipeline_on_main": None, "gate_on_main": False,
+                             "environments_locked": False, "secrets_set": False, "ruleset": False, "open_apply_pr": None})
+
+    def test_fully_installed(self):
+        apply_pr = {"number": 12, "url": "https://github.com/acme/widgets/pull/12", "headRefName": "autopilot/policy-2026-10-16"}
+        i, notes = self.install(files={".github/autopilot.json": '{"pipeline": "own", "level": 2}',
+                                       ".github/workflows/autopilot.yml": "name: gate\n"},
+                                envs=GOOD_ENVS, apply_pr=apply_pr,
+                                rulesets=[{"name": "other", "enforcement": "active"},
+                                          {"name": "build-autopilot", "enforcement": "active"}])
+        self.assertEqual(i, {"policy_on_main": True, "pipeline_on_main": "own", "gate_on_main": True,
+                             "environments_locked": True, "secrets_set": True, "ruleset": True,
+                             "open_apply_pr": {"number": 12, "url": "https://github.com/acme/widgets/pull/12"}})
+        self.assertFalse(any("Install check" in n for n in notes))
+
+    def test_pipeline_defaults_to_gate_when_the_field_is_missing(self):
+        i, _ = self.install(files={".github/autopilot.json": '{"level": 2}'})
+        self.assertEqual((i["policy_on_main"], i["pipeline_on_main"]), (True, "gate"))
+
+    def test_environments_must_be_locked_to_exactly_the_default_branch(self):
+        for patch in ({"custom": False}, {"policies": ["main", "dev"]}, {"policies": ["dev"]}, {"policies": []}):
+            envs = json.loads(json.dumps(GOOD_ENVS))
+            envs["autopilot-review"].update(patch)
+            self.assertFalse(self.install(envs=envs)[0]["environments_locked"], patch)
+        self.assertFalse(self.install(envs={"autopilot": GOOD_ENVS["autopilot"]})[0]["environments_locked"])  # one is missing
+
+    def test_secrets_need_all_four_names(self):
+        for env, key, drop in (("autopilot", "secrets", "AUTOPILOT_APP_PRIVATE_KEY"), ("autopilot-review", "secrets", "ANTHROPIC_API_KEY"),
+                               ("autopilot", "variables", "AUTOPILOT_APP_ID"), ("autopilot", "variables", "AUTOPILOT_APP_CLIENT_ID")):
+            envs = json.loads(json.dumps(GOOD_ENVS))
+            envs[env][key].remove(drop)
+            self.assertFalse(self.install(envs=envs)[0]["secrets_set"], drop)
+
+    def test_inactive_or_differently_named_rulesets_do_not_count(self):
+        i, _ = self.install(rulesets=[{"name": "build-autopilot", "enforcement": "disabled"}, {"name": "Build-Autopilot-2", "enforcement": "active"}])
+        self.assertFalse(i["ruleset"])
+
+    def test_only_policy_branches_count_as_the_apply_pr(self):
+        i, _ = self.install(apply_pr={"number": 5, "url": "u", "headRefName": "autopilot/other-5"})
+        self.assertIsNone(i["open_apply_pr"])
+
+    def test_a_403_is_null_with_a_note_not_false(self):
+        i, notes = self.install(envs=GOOD_ENVS, forbid=("/secrets", "/rulesets"))
+        self.assertIsNone(i["secrets_set"])
+        self.assertIsNone(i["ruleset"])
+        self.assertTrue(i["environments_locked"])
+        self.assertTrue(any("Install check" in n and "403" in n and "secrets" in n for n in notes))
+        self.assertTrue(any("Install check" in n and "rulesets" in n for n in notes))
+        i, _ = self.install(forbid=("/environments/autopilot",))
+        self.assertIsNone(i["environments_locked"])
+
+    def test_a_missing_environment_beats_an_unreadable_one(self):
+        i, _ = self.install(envs={"autopilot": GOOD_ENVS["autopilot"]}, forbid=("/environments/autopilot-review",))
+        self.assertIsNone(i["environments_locked"])  # one locked, one unreadable: cannot say
+        i, _ = self.install(forbid=("/environments/autopilot-review",))
+        self.assertFalse(i["environments_locked"])  # autopilot is simply not there
+
+    def test_install_values_are_never_read_only_names(self):
+        fake = FakeGh(envs=GOOD_ENVS)
+        self.audit(fake)
+        for c in fake.calls:  # the list endpoints return names only; nothing like a /secrets/NAME or /variables/NAME read
+            self.assertNotRegex(" ".join(c), r"/(secrets|variables)/[A-Z]")
+
+
 class Transcripts(Base):
     def collect(self, dirs, checkouts=None, repos=("acme/widgets",)):
         return audit.collect_interruptions(dirs, list(repos), checkouts or {}, self.since, self.tz)
@@ -398,7 +632,8 @@ class EndToEnd(Base):
             self.assertEqual(data["generated_at"], "2026-10-15T12:00:00Z")
             self.assertEqual(len(data["repos"]), 1)
             repo = data["repos"][0]
-            for key in ("prs", "ci", "deploy", "automation", "interruptions", "recommendations"):
+            for key in ("prs", "ci", "deploy", "automation", "interruptions", "recommendations", "checks", "pipeline_hint",
+                        "pipeline_evidence", "install"):
                 self.assertIn(key, repo)
             self.assertEqual(repo["interruptions"]["sessions"], 2)
             self.assertIn("waited over 2 hours", buf.getvalue())

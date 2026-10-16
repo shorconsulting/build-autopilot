@@ -147,7 +147,8 @@ class Policy:
 
 
 def parse_policy(raw, repo):
-    """The settings file's text -> Policy, or None when the repo has no file (then the gate does nothing).
+    """The settings file's text -> Policy, or None when the repo has no file or its `pipeline` is `own` or `none`
+    (then the gate does nothing).
 
     Anything malformed gives a Policy with `error` set, which blocks automation rather than guessing."""
     if raw is None:
@@ -162,6 +163,14 @@ def parse_policy(raw, repo):
         return Policy(error="the settings file has version %r; this gate understands version 1" % data.get("version"))
     if data.get("repo") and str(data["repo"]).lower() != repo.lower():
         return Policy(error="the settings file is for %s, not %s" % (data["repo"], repo))
+    pipeline = data.get("pipeline", "gate")
+    if pipeline in ("own", "none"):
+        return None   # the repo uses its own pipeline, or a person merges everything: the gate stays out of it
+    if pipeline != "gate":
+        return Policy(error="unknown pipeline %r" % pipeline)
+    checks = data.get("required_checks", [])
+    if not isinstance(checks, list) or not all(isinstance(c, str) for c in checks):
+        return Policy(error="`required_checks` must be a list of check names")
     level = data.get("level", "manual")
     if level not in LEVELS:
         return Policy(error="unknown level %r" % level)
@@ -676,7 +685,8 @@ HOLD_UNDO = ("comment `/autopilot stop` on this pull request (or add the `%s` la
 def decide(policy, pr, cls, reviews, setup):
     """Combine the settings, what the change touches and the AI verdicts into one result. No I/O."""
     if policy is None:
-        return Decision("NONE", notes=["This repo has no autopilot settings, so the gate does nothing."])
+        return Decision("NONE", notes=["This repo has no autopilot settings for the gate (none, or its pipeline is "
+                                       "its own or manual), so the gate does nothing."])
     on_default = pr.base_ref == pr.default_branch
     person, changes, notes, skipped_asks = [], [], [], []
 
@@ -1238,7 +1248,8 @@ def cmd_decide(checkout, event, gh, handover_text, app_id, app_slug, run_url, mo
     default_branch = event["repository"]["default_branch"]
     policy = load_policy(checkout, repo)
     if policy is None:
-        print("No %s on %s: the gate does nothing." % (POLICY_PATH, default_branch))
+        print("No %s on %s, or it hands this repo to another pipeline: the gate does nothing."
+              % (POLICY_PATH, default_branch))
         return Decision("NONE")
     pr = live_pull_request(gh, repo, event["pull_request"]["number"], default_branch)
     if pr.state != "open":
@@ -1473,13 +1484,26 @@ def stale_command(gh, repo, number, comment, run_attempt):
     return ""
 
 
+def gate_off(gh, repo, event, command):
+    """A command in a repo where the gate is off (no settings, or `pipeline` is own/none): say so on the pull
+    request, so nobody believes a stop or approval took effect. Only answers a person, never an app or bot."""
+    user = event["comment"].get("user") or {}
+    if event["issue"].get("pull_request") and user.get("type") == "User" \
+            and not event["comment"].get("performed_via_github_app"):
+        command_reply(gh, repo, event["issue"]["number"],
+                      "Build Autopilot's gate is off in this repo (it has no gate settings, or they leave merging to "
+                      "the repo's own pipeline or to a person), so `/autopilot %s` did nothing here. To keep a pull "
+                      "request from merging, turn auto-merge off or convert it to a draft." % command)
+    return "ignored: no settings"
+
+
 def cmd_stop(checkout, event, gh, run_url="", roles=("admin", "maintain", "write")):
     """`/autopilot stop`: anyone who can push puts the pull request on hold: auto-merge off, the autopilot-hold label
     on, the check red. Only an admin, a maintainer or `/autopilot resume` lifts it. A stop only ever stops, so even a
     re-run of an old one is honoured."""
     repo = event["repository"]["full_name"]
     if load_policy(checkout, repo) is None:
-        return "ignored: no settings"
+        return gate_off(gh, repo, event, "stop")
     number = event["issue"]["number"]
     user = event["comment"].get("user") or {}
     login = user.get("login", "")
@@ -1509,7 +1533,7 @@ def cmd_resume(checkout, event, gh, app_slug, roles=("admin", "maintain"), run_a
     """`/autopilot resume` from an admin or maintainer lifts a hold; removing the label triggers a fresh review."""
     repo = event["repository"]["full_name"]
     if load_policy(checkout, repo) is None:
-        return "ignored: no settings"
+        return gate_off(gh, repo, event, "resume")
     number = event["issue"]["number"]
     user = event["comment"].get("user") or {}
     login = user.get("login", "")
@@ -1549,7 +1573,7 @@ def cmd_approve(checkout, event, gh, app_slug, run_url, roles=("admin", "maintai
     if not issue.get("pull_request") or not m:
         return "ignored: not an approval comment"
     if load_policy(checkout, repo) is None:
-        return "ignored: no settings"
+        return gate_off(gh, repo, event, "approve")
     number = issue["number"]
     user = comment.get("user") or {}
     login = user.get("login", "")

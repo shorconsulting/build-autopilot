@@ -1,0 +1,13 @@
+name: Reviewer
+on:
+  pull_request:
+    types: [opened, synchronize]
+# gh pr merge --auto is only mentioned in this comment
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: anthropics/claude-code-action@v1
+        with:
+          prompt: review this pull request
