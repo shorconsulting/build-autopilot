@@ -21,6 +21,25 @@ What the gate does, and why it is built this way: [v2-report.md](v2-report.md). 
 Copy the files byte for byte. Don't edit the workflow per repo except the two places marked below (required check
 names live in the ruleset, not the workflow).
 
+## The quick way: one script (admin)
+
+`scripts/setup-github-gate.sh` does the admin steps below for one repo: it creates the org's app (your browser opens
+once; you click "Create GitHub App"), installs it on the repo, locks the two environments, stores the secrets and
+variables (you type the Anthropic key; it isn't shown), sets the repo settings and, with `--ruleset`, the branch
+ruleset. Re-running is safe; finished steps are skipped. Try `--dry-run` first: it changes nothing.
+
+```bash
+scripts/setup-github-gate.sh Velocity-Org/chasing-shade --dry-run
+```
+
+```bash
+scripts/setup-github-gate.sh Velocity-Org/chasing-shade --ruleset
+```
+
+The app's key stays on the computer that created it (`~/.build-autopilot/keys/<org>.pem`, readable only by you); the
+next repo in the same org reuses it. Then run `/autopilot apply` for the install pull request (step 2) and do the
+checks in step 5. The manual steps follow, for reference.
+
 ## Once per GitHub organization: the Build Autopilot app (admin)
 
 The gate acts as a dedicated GitHub App, not as the workflow's built-in token, for three reasons: a merge made with the
