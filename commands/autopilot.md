@@ -68,7 +68,7 @@ Connects this computer to a Build Autopilot page and chooses which repos it trac
    per repo with its last push date), and say which are already on the page (`audits` documents). Ask which to
    track: numbers, owner names ("all of homeporthealth"), or "all". Don't guess; this is their choice.
 3. Run `audit` for the chosen repos (one run with several `--repo`). Repos can be added later with
-   `/autopilot audit owner/repo`, and hidden on the page without deleting anything.
+   `/build-autopilot:autopilot audit owner/repo`, and hidden on the page without deleting anything.
 4. Set `plugin_path` on `config/page` to `${CLAUDE_PLUGIN_ROOT}` (`ArtifactData` `update`, or `set` keeping `hidden` if the
    document doesn't exist yet), so the page's "Next step" panel shows full script paths.
 5. Reply with the page link and one line on what to do there: pick a repo from the list, choose its settings, and

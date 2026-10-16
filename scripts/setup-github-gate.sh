@@ -14,7 +14,7 @@
 #      autopilot/gate check required, plus the repo's test checks). Only needed for level auto-merge
 #      or autopilot. Note: after this, nobody can push straight to the default branch.
 #
-# It does not add the gate's files to the repo: run /autopilot apply for that (one pull request a person merges).
+# It does not add the gate's files to the repo: run /build-autopilot:autopilot apply for that (one pull request a person merges).
 #
 # Usage:
 #   scripts/setup-github-gate.sh OWNER/REPO [--ruleset] [--test-check "NAME"]... [--dry-run] [--yes]
@@ -120,7 +120,7 @@ IS_ADMIN=$(printf '%s' "$REPO_JSON" | jq -r '.permissions.admin // false')
 OWNER_TYPE=$(gh api "users/$OWNER" --jq .type)
 say "Default branch: $DEFAULT_BRANCH. Owner type: $OWNER_TYPE."
 
-# The repo's settings (if /autopilot apply has written them): a repo that keeps its own pipeline, or where a person
+# The repo's settings (if /build-autopilot:autopilot apply has written them): a repo that keeps its own pipeline, or where a person
 # merges everything, doesn't get the gate at all.
 POLICY_RAW=$(gh api "repos/$REPO/contents/.github/autopilot.json?ref=$DEFAULT_BRANCH" --jq .content 2>/dev/null \
                | base64 -d 2>/dev/null || true)
@@ -149,7 +149,7 @@ leave_gate() {
     fi
   fi
   if gh api "repos/$REPO/contents/.github/workflows/autopilot.yml?ref=$DEFAULT_BRANCH" >/dev/null 2>&1; then
-    say "The gate's files are still in the repo (it does nothing now). /autopilot apply opens a pull request that removes them."
+    say "The gate's files are still in the repo (it does nothing now). /build-autopilot:autopilot apply opens a pull request that removes them."
   fi
   exit 0
 }
@@ -469,7 +469,7 @@ if [ "$DO_RULESET" -eq 1 ]; then
   # The ruleset requires the gate's check; until the gate's workflow is on the default branch nothing could ever
   # pass it, including the pull request that installs the gate.
   if ! gh api "repos/$REPO/contents/.github/workflows/autopilot.yml?ref=$DEFAULT_BRANCH" >/dev/null 2>&1; then
-    die "the gate isn't on $DEFAULT_BRANCH yet, so a ruleset requiring it would block every merge. Run /autopilot apply, merge that pull request, then re-run this with --ruleset"
+    die "the gate isn't on $DEFAULT_BRANCH yet, so a ruleset requiring it would block every merge. Run /build-autopilot:autopilot apply, merge that pull request, then re-run this with --ruleset"
   fi
   if [ "${#TEST_CHECKS[@]}" -eq 0 ] && [ -n "$POLICY_RAW" ]; then
     while IFS= read -r line; do [ -n "$line" ] && TEST_CHECKS+=("$line"); done <<EOF
@@ -525,6 +525,6 @@ fi
 
 # ---------------------------------------------------------------- done
 step "Done"
-say "Next: in $REPO, run /autopilot apply. It opens one pull request adding the gate's files; a person merges it."
+say "Next: in $REPO, run /build-autopilot:autopilot apply. It opens one pull request adding the gate's files; a person merges it."
 say "Then do the checks in step 5 of docs/v2-install.md (README-only PR, a workflow PR, /autopilot stop, the spoof test)."
 say "The app key stays at $APP_KEY on this computer; keep it out of every repo and chat."

@@ -1,7 +1,7 @@
 # The autopilot policy
 
 Each repo's automation settings live in one file, `.github/autopilot.json`, on the repo's default branch. The
-Build Autopilot page is where people choose them; `/autopilot apply` writes the page's choices into the repo as
+Build Autopilot page is where people choose them; `/build-autopilot:autopilot apply` writes the page's choices into the repo as
 a pull request. Claude sessions (and, from v2, the GitHub workflow) read the file. Nobody edits it by hand.
 
 A repo without the file behaves as `manual` with questions `ask-now`: exactly as today.
@@ -34,13 +34,13 @@ A repo without the file behaves as `manual` with questions `ask-now`: exactly as
 
 | Value | Means | What Build Autopilot does in the repo |
 |---|---|---|
-| `gate` (default) | Build Autopilot's GitHub gate reviews every pull request and merges what the settings allow. | `/autopilot apply` installs the gate; `level`, `sensitive`, `tests` and `required_checks` all apply. |
+| `gate` (default) | Build Autopilot's GitHub gate reviews every pull request and merges what the settings allow. | `/build-autopilot:autopilot apply` installs the gate; `level`, `sensitive`, `tests` and `required_checks` all apply. |
 | `own` | The repo already has its own review and merge automation, and keeps it. | Writes only this file. Doesn't install the gate or branch rules, and never turns on auto-merge itself: the repo's own pipeline decides. `questions` and `always_ask` still apply to Claude sessions. `level`, `sensitive` and `tests` are ignored. |
 | `none` | Nobody merges automatically; a person merges every pull request. | Writes only this file. Claude sessions stop at the open pull request. `questions` and `always_ask` still apply. |
 
 Running two merge systems in one repo makes them fight (each turns the other's auto-merge off), so a repo picks one.
 
-Moving a repo from `gate` to `own` or `none`: `/autopilot apply` removes the gate's files, and
+Moving a repo from `gate` to `own` or `none`: `/build-autopilot:autopilot apply` removes the gate's files, and
 `scripts/setup-github-gate.sh OWNER/REPO` offers to delete the `build-autopilot` ruleset. Do both. The ruleset requires
 the gate's check, which nothing posts any more, so until it's gone no pull request can merge (see "Removing it" in
 `v2-install.md`).
@@ -77,7 +77,7 @@ automation rules themselves (`.github/**`, which includes this file).
 | `human` | The change waits for a person to merge, whatever the `level`. |
 | `same` | No extra step. Not recommended. |
 
-A change to `.github/autopilot.json` itself is only ever made by `/autopilot apply` from the page.
+A change to `.github/autopilot.json` itself is only ever made by `/build-autopilot:autopilot apply` from the page.
 
 ### `questions`: what a Claude session does when it's unsure
 

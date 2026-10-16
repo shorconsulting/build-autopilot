@@ -1,7 +1,7 @@
 # Installing the v2 gate in a repo
 
-This is the procedure `/autopilot apply` follows to put the GitHub side of a repo's autopilot settings in place. Steps
-marked **(admin)** change repo or org settings and need a person with admin rights; `/autopilot apply` prints the exact
+This is the procedure `/build-autopilot:autopilot apply` follows to put the GitHub side of a repo's autopilot settings in place. Steps
+marked **(admin)** change repo or org settings and need a person with admin rights; `/build-autopilot:autopilot apply` prints the exact
 command for those and does not run them itself. Everything else arrives in the repo through one pull request that a
 person merges.
 
@@ -36,7 +36,7 @@ scripts/setup-github-gate.sh Velocity-Org/chasing-shade --dry-run
 scripts/setup-github-gate.sh Velocity-Org/chasing-shade
 ```
 
-Then `/autopilot apply` and merge its pull request. Only after the gate is on the default branch, add the ruleset
+Then `/build-autopilot:autopilot apply` and merge its pull request. Only after the gate is on the default branch, add the ruleset
 (the script refuses earlier, because a ruleset requiring the gate's check would block every merge, the install
 pull request included):
 
@@ -206,7 +206,7 @@ as a comment on the merged pull request, with how to run the tests anyway.
 
 ## Updating the gate
 
-Re-run `/autopilot apply`: it opens one pull request with the new template files, which a person merges (the gate
+Re-run `/build-autopilot:autopilot apply`: it opens one pull request with the new template files, which a person merges (the gate
 marks it "needs a person", as it does for any change to itself).
 
 To move to a newer Claude SDK, regenerate the hash-pinned requirements on any machine with Python 3.12:
