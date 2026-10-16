@@ -378,6 +378,11 @@ fi
 # ---------------------------------------------------------------- 6. ruleset
 if [ "$DO_RULESET" -eq 1 ]; then
   step "6. Branch ruleset \"$RULESET_NAME\""
+  # The ruleset requires the gate's check; until the gate's workflow is on the default branch nothing could ever
+  # pass it, including the pull request that installs the gate.
+  if ! gh api "repos/$REPO/contents/.github/workflows/autopilot.yml?ref=$DEFAULT_BRANCH" >/dev/null 2>&1; then
+    die "the gate isn't on $DEFAULT_BRANCH yet, so a ruleset requiring it would block every merge. Run /autopilot apply, merge that pull request, then re-run this with --ruleset"
+  fi
   if [ "${#TEST_CHECKS[@]}" -eq 0 ]; then
     HEAD_SHA=$(gh api "repos/$REPO/commits/$DEFAULT_BRANCH" --jq .sha)
     FOUND=$(gh api --paginate "repos/$REPO/commits/$HEAD_SHA/check-runs?app_id=$ACTIONS_APP_ID&per_page=100" \

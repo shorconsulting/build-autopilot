@@ -33,12 +33,19 @@ scripts/setup-github-gate.sh Velocity-Org/chasing-shade --dry-run
 ```
 
 ```bash
+scripts/setup-github-gate.sh Velocity-Org/chasing-shade
+```
+
+Then `/autopilot apply` and merge its pull request. Only after the gate is on the default branch, add the ruleset
+(the script refuses earlier, because a ruleset requiring the gate's check would block every merge, the install
+pull request included):
+
+```bash
 scripts/setup-github-gate.sh Velocity-Org/chasing-shade --ruleset
 ```
 
 The app's key stays on the computer that created it (`~/.build-autopilot/keys/<org>.pem`, readable only by you); the
-next repo in the same org reuses it. Then run `/autopilot apply` for the install pull request (step 2) and do the
-checks in step 5. The manual steps follow, for reference.
+next repo in the same org reuses it. After the ruleset, do the checks in step 5. The manual steps follow, for reference.
 
 ## Once per GitHub organization: the Build Autopilot app (admin)
 
