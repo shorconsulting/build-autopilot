@@ -12,6 +12,7 @@ A repo without the file behaves as `manual` with questions `ask-now`: exactly as
 {
   "version": 1,
   "repo": "your-org/your-repo",
+  "phase": "prelaunch",
   "pipeline": "gate",
   "required_checks": ["API · unit + integration", "lint"],
   "level": "auto-merge",
@@ -106,11 +107,24 @@ say.
 | `legal-pricing` | Legal terms, contracts, prices or claims shown to customers. |
 | `ai-flags-it` | The AI reviewer says a change needs a person. |
 
+### `phase`: where the product is
+
+One setting that picks the defaults below; any field set explicitly overrides its phase default. Moving phase is
+one edit to this file.
+
+| `phase` | Aim | `tests.lane` | AI review | Merge and release |
+|---|---|---|---|---|
+| `prelaunch` | Finish the build fast; nothing is live | `wave` | Sensitive paths only, or on request | Auto-merge on quick tests; nothing to release |
+| `live-no-customers` | Prove it runs for real | `fast-lane` | Sensitive paths, `two-ai` | Auto-merge, then auto-release with a health check that rolls back |
+| `customers` | Protect users and their data | `full` | Every PR, `two-ai`; `human` for sensitive paths | Auto-merge, release with one click |
+
+Not yet on the settings page or in `apply` (v1 records it only); a repo with `pipeline: own` maps it onto its own switches.
+
 ### `tests`
 
 | Field | Values |
 |---|---|
-| `lane` | `full`: every test runs before merging. `fast-lane`: quick tests gate the merge; the full suite runs right after and the change is undone automatically if it fails. |
+| `lane` | `full`: every test runs before merging. `fast-lane`: quick tests gate the merge; the full suite runs right after and the change is undone automatically if it fails. `wave`: quick tests gate the merge; the full suite runs on `main` in batches (one run going, the newest push waiting, so each run covers whatever merged meanwhile) and on demand at the end of a wave; no automatic undo -- a red run means fix `main` before landing more. No batch-size setting: the batch sizes itself to how long the suite takes. |
 | `skip_duplicate_main` | `true` skips re-running the same tests on `main` after a merge when the pull request already passed them on the same code. |
 
 ## What enforces it

@@ -278,6 +278,7 @@ const PIPELINES = [
 const TESTS = [
   { id: "full", name: "Every test before merging", sub: "Safest. A change waits for the whole suite." },
   { id: "fast-lane", name: "Quick tests first, full suite right after", sub: "Merges in minutes. If the full suite then fails, the change is undone automatically." },
+  { id: "wave", name: "Wave QA: quick tests per change, full suite in batches", sub: "Before launch. The full suite runs on main for whatever merged since the last run, and at the end of each wave. A red run means fix main first." },
 ];
 const ALWAYS = [
   { id: "delete-data", name: "Deleting or overwriting real customer data" },

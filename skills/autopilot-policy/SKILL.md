@@ -114,8 +114,10 @@ and carry on with everything else. Don't stop the whole run for it.
 ## Tests
 
 `tests.skip_duplicate_main` and `tests.lane` describe the repo's CI. They change workflows, not your behaviour,
-except: with `lane: fast-lane`, run the targeted tests for what you touched before opening the PR and leave the
-full suite to CI.
+except: with `lane: fast-lane` or `lane: wave`, run the targeted tests for what you touched before opening the PR
+and leave the full suite to CI. With `wave`, when the full-suite run on `main` is red, fixing `main` comes before
+landing anything else. `phase` (`prelaunch`, `live-no-customers`, `customers`) supplies defaults for fields the
+file leaves out.
 
 ## Decided without you
 
