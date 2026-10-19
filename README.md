@@ -21,6 +21,8 @@ Nothing about any particular person's repos is built in.
 | `/build-autopilot:setup`, `:install`, `:audit`, `:apply`, `:settings` | `setup` makes or connects your page and picks your repos; `install` takes a repo through every remaining step; `audit` fills the page; `apply` writes a repo's settings into `.github/autopilot.json` with one pull request; `apply --me` saves your own preferences on this computer. |
 | `autopilot-policy` skill | Makes every Claude session in a repo follow that repo's settings. |
 | `scripts/lanes.py` | Phases and test lanes: what each phase sets, which `tests.suites` a set of changed files runs (so the mobile suite runs when the app or the database changes, and not otherwise), and rewriting a workflow's `paths:` list from the policy. Waves (`phase: prelaunch`, the `wave` test lane) are the default. |
+| `scripts/autopilot-rollout.sh` | Finds every repo you can see that has `.github/autopilot.json` and prepares one pull request each, updating the installed gate files and adding new settings keys with defaults only. `--dry-run` by default; `--apply` opens the pull requests; nothing is ever merged. |
+| `scripts/check_pr_claims.py` | Fails when a pull request body lists a requirement as tested that no test file names. |
 | `docs/policy.md` | The settings, field by field, and what enforces each one today. |
 | `templates/github/` (v2) | The GitHub gate: a workflow that reviews every pull request with Claude, adds a second security review for sensitive files, and turns on auto-merge when the settings allow. Installed by `/build-autopilot:apply` following `docs/v2-install.md`; design and threat model in `docs/v2-report.md`. |
 

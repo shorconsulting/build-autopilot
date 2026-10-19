@@ -154,3 +154,29 @@ class Templates(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NewKeys(unittest.TestCase):
+    def test_missing_new_keys_get_defaults_and_set_values_win(self):
+        pol = {"version": 1, "level": "ai-review", "waves": {"batches_per_pr": 9}}
+        eff = lanes.effective(pol)
+        self.assertEqual(eff["waves"]["batches_per_pr"], 9)
+        self.assertEqual(eff["waves"]["sensitive_batches_per_pr"], 2)
+        self.assertEqual(eff["level"], "ai-review")
+        self.assertEqual(eff["review"]["batch_rows"], 8)
+        self.assertEqual(eff["models"]["risky"], "opus")
+        self.assertTrue(eff["tests"]["test_only_fast_lane"])
+        self.assertNotIn("review", pol)   # the input is not mutated
+
+    def test_defaults_file_is_valid(self):
+        self.assertEqual(lanes.validate_new_keys(lanes.new_defaults()), [])
+
+    def test_bad_values_are_reported(self):
+        bad = {"waves": {"mode": "x", "batches_per_pr": 0}, "review": {"max_rounds": "2"}, "models": []}
+        self.assertEqual(len(lanes.validate_new_keys(bad)), 4)
+
+    def test_test_only(self):
+        self.assertTrue(lanes.is_test_only(["apps/api/tests/a.test.ts", "e2e/login.spec.ts"]))
+        self.assertFalse(lanes.is_test_only(["apps/api/tests/a.test.ts", "apps/api/src/a.ts"]))
+        self.assertFalse(lanes.is_test_only([]))
+        self.assertFalse(lanes.is_test_only([".github/workflows/ci.yml"]))

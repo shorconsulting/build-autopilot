@@ -155,6 +155,34 @@ suite, so skipping on a pull request is a saving, never a gap. `scripts/lanes.py
 set of files runs; `scripts/lanes.py render POLICY SUITE WORKFLOW` rewrites the workflow's `on.pull_request.paths` list
 from the suite's `paths`, so the two cannot disagree (`apply` does this).
 
+### Settings added in 0.5.0 (the v50 learnings)
+
+All optional. A file that leaves one out gets the default shown, so an older file keeps working; the rollout script
+(`scripts/autopilot-rollout.sh`) adds missing keys with these defaults and changes nothing already chosen. The defaults
+are in `templates/github/new_key_defaults.json`. They are read by Claude sessions through the `autopilot-policy` skill
+and `scripts/lanes.py`; the GitHub gate ignores them.
+
+| Key | Default | Means |
+|---|---|---|
+| `waves.mode` | `waves` | `waves`: batches grouped into PRs. `integration`: one integration PR, CI once, then fix in waves (for repos not deployed anywhere). |
+| `waves.batches_per_pr` | `4` | Batches per PR. |
+| `waves.sensitive_batches_per_pr` | `2` | Batches per PR when any touches `sensitive.paths`. |
+| `waves.merge_order` | `serialize` | `serialize`: stacked PRs merge one at a time, each onto a main that has the previous one. `free`: no rule. |
+| `models.ordinary` / `models.risky` | `sonnet` / `opus` | Model for building and checking ordinary work, and for `models.risky_areas` (`access`, `billing`, `export`, `authority`, `deletion`). |
+| `tests.test_only_fast_lane` | `true` | A PR that only adds or changes test files runs the targeted tests, not the full end-to-end suite (`lanes.py testonly`). |
+| `review.max_rounds` | `2` | Rounds of independent review on a batch before findings are ranked and the rest go to the owner. |
+| `review.rank` | security, access, data-loss, correctness, style | Order findings are fixed in. |
+| `review.owner_may_accept_gaps` | `true` | The owner may accept the findings that remain. |
+| `review.batch_rows` | `8` | Rows per batch. |
+| `rerun.plain_rerun` | `died-before-tests` | A failed job is re-run once unchanged only if it died before any test body ran; otherwise root-cause. |
+| `wip_push.safety_push` | `true` | Pushes to `wip_push.branch_prefixes` branches may skip local hooks; `wip_push.gate_on` (`default-branch`, `ci`) still enforces the gate. |
+| `run_state.ledger_branch` | `ops/ledger` | Where run state lives on GitHub; `run_state.scripts_on_github` keeps workflow and restore scripts there too. |
+| `concurrency.agent_limit` | `min(16, cpus-2)` | The engine's real agent limit, to read before sizing a plan. |
+| `claims.check_pr_body` | `true` | PR bodies may list a requirement as tested only if a test names it (`scripts/check_pr_claims.py`). |
+
+Rolling these out to every repo where autopilot is installed: `scripts/autopilot-rollout.sh` (dry run by default; `--apply`
+opens one pull request per repo, and never merges).
+
 ## What enforces it
 
 | Setting | v1 (now) | v2 |
@@ -165,7 +193,8 @@ from the suite's `paths`, so the two cannot disagree (`apply` does this).
 | `phase` | Sets the other fields when chosen on the page; read by `scripts/lanes.py` | Same |
 | `tests.suites` | `apply` writes each suite's `paths` into its workflow's `on.pull_request.paths` in the same reviewed pull request | Same |
 | `tests.lane: wave` | `apply` adds `templates/github/workflows/test-lanes.yml` to a repo with no test workflow of its own, or tells you which two blocks to merge into the one it has | Same |
-| `tests.skip_duplicate_main` | Recorded only; `drafts/` has a reviewed example for one repo | Applied to the repo's test workflow by a reviewed pull request |
+| `tests.skip_duplicate_main` | Recorded only; `drafts/` has a reviewed example for one repo | Applied to the repo's test workflow by a reviewed pull request; `templates/github/autopilot/skip_duplicate_main.py` is the shared tree comparison |
+| `waves`, `models`, `review`, `rerun`, `wip_push`, `run_state`, `concurrency`, `claims`, `tests.test_only_fast_lane` | Claude sessions (the `autopilot-policy` skill, `lanes.py`, `check_pr_claims.py`) | Not read by the gate yet |
 | `sensitive` | Claude sessions run the second, adversarial review | The GitHub workflow requires both reviews |
 
 The v2 column is built (not yet installed anywhere): `templates/github/`, installed per [v2-install.md](v2-install.md), design and threat model in [v2-report.md](v2-report.md). Release-with-health-check for `autopilot` and the `fast-lane` test lane are not built yet; the `wave` lane and `tests.suites` are.
