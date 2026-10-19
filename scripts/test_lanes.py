@@ -108,6 +108,21 @@ class Suites(unittest.TestCase):
         self.assertEqual(len(lanes.validate(bad)), 3)
 
 
+class WavesAndReview(unittest.TestCase):
+    def test_defaults_are_added_and_change_nothing_already_set(self):
+        e = lanes.effective({"level": "manual", "waves": {"batches_per_pr": 4}})
+        self.assertEqual(e["waves"], {"batches_per_pr": 4, "sensitive_batches_per_pr": 1, "integration_pr": False})
+        self.assertEqual(e["review"], lanes.REVIEW_DEFAULTS)
+        self.assertEqual(e["level"], "manual")
+
+    def test_validate_new_blocks(self):
+        ok = {"waves": {"batches_per_pr": 4, "integration_pr": True}, "review": {"max_rounds": 2, "unresolved": "block"}}
+        self.assertEqual(lanes.validate(ok), [])
+        bad = {"waves": {"batches_per_pr": 0, "integration_pr": "yes", "nope": 1}, "review": {"unresolved": "shrug", "max_rounds": True}}
+        self.assertEqual(len(lanes.validate(bad)), 5)
+        self.assertEqual(lanes.validate({"waves": []}), ["waves must be an object"])
+
+
 class Render(unittest.TestCase):
     def test_replaces_only_the_paths_list(self):
         out = lanes.render_paths(WORKFLOW, MOBILE["paths"])

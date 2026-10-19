@@ -31,6 +31,12 @@ PRESETS = {
 }
 SUITE_ON_PR = ("when-touched", "always", "never")
 
+# Additive settings learned from the Wyset v50 overnight build (docs/waves-and-durability.md). A file that leaves them
+# out gets these; none of them changes what an existing file already means. Phase-independent on purpose.
+WAVES_DEFAULTS = {"batches_per_pr": 1, "sensitive_batches_per_pr": 1, "integration_pr": False}
+REVIEW_DEFAULTS = {"max_rounds": 3, "batch_rows": 8, "unresolved": "owner-accepts"}
+REVIEW_UNRESOLVED = ("owner-accepts", "block")
+
 
 def effective(policy):
     """The policy with every missing phase-governed field filled in from its phase. Never changes a field that is set."""
@@ -47,6 +53,12 @@ def effective(policy):
     tests.setdefault("lane", p["lane"])
     tests.setdefault("skip_duplicate_main", p["skip_duplicate_main"])
     tests.setdefault("suites", {})
+    waves = out.setdefault("waves", {})
+    for k, v in WAVES_DEFAULTS.items():
+        waves.setdefault(k, v)
+    review = out.setdefault("review", {})
+    for k, v in REVIEW_DEFAULTS.items():
+        review.setdefault(k, v)
     return out
 
 
@@ -109,6 +121,20 @@ def suites_to_run(policy, changed_files, event="pull_request"):
 def validate(policy):
     """Problems with the suite rules, as plain sentences; an empty list means fine."""
     problems = []
+    for key, defaults in (("waves", WAVES_DEFAULTS), ("review", REVIEW_DEFAULTS)):
+        block = policy.get(key, {})
+        if not isinstance(block, dict):
+            problems.append(f"{key} must be an object")
+            continue
+        for k, v in block.items():
+            if k not in defaults:
+                problems.append(f"{key}.{k} is not a known setting")
+            elif isinstance(defaults[k], bool) != isinstance(v, bool) or (
+                    isinstance(defaults[k], int) and not isinstance(defaults[k], bool)
+                    and (not isinstance(v, int) or v < 1)):
+                problems.append(f"{key}.{k} must be {'true or false' if isinstance(defaults[k], bool) else 'a whole number of 1 or more' if isinstance(defaults[k], int) else 'text'}")
+        if key == "review" and block.get("unresolved", "owner-accepts") not in REVIEW_UNRESOLVED:
+            problems.append(f"review.unresolved must be one of {', '.join(REVIEW_UNRESOLVED)}")
     suites = (policy.get("tests") or {}).get("suites", {})
     if not isinstance(suites, dict):
         return ["tests.suites must be an object of suite name to rules"]
