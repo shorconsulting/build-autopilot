@@ -20,6 +20,7 @@ Nothing about any particular person's repos is built in.
 | The Build Autopilot page | Shows each repo's audit, lets you turn recommendations on, and holds each repo's settings, plus each builder's own interruption preferences. One page per person or team; its link is kept in `~/.build-autopilot/config.json`. Pick a repo from the list; copy its settings to other repos in one step. |
 | `/build-autopilot:setup`, `:install`, `:audit`, `:apply`, `:settings` | `setup` makes or connects your page and picks your repos; `install` takes a repo through every remaining step; `audit` fills the page; `apply` writes a repo's settings into `.github/autopilot.json` with one pull request; `apply --me` saves your own preferences on this computer. |
 | `autopilot-policy` skill | Makes every Claude session in a repo follow that repo's settings. |
+| `scripts/lanes.py` | Phases and test lanes: what each phase sets, which `tests.suites` a set of changed files runs (so the mobile suite runs when the app or the database changes, and not otherwise), and rewriting a workflow's `paths:` list from the policy. Waves (`phase: prelaunch`, the `wave` test lane) are the default. |
 | `docs/policy.md` | The settings, field by field, and what enforces each one today. |
 | `templates/github/` (v2) | The GitHub gate: a workflow that reviews every pull request with Claude, adds a second security review for sensitive files, and turns on auto-merge when the settings allow. Installed by `/build-autopilot:apply` following `docs/v2-install.md`; design and threat model in `docs/v2-report.md`. |
 

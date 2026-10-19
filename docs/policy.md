@@ -22,7 +22,13 @@ A repo without the file behaves as `manual` with questions `ask-now`: exactly as
               "**/migrations/**", ".github/**", "**/.env*", "**/secrets*"]
   },
   "questions": "batch",
-  "tests": { "lane": "full", "skip_duplicate_main": true },
+  "tests": {
+    "lane": "wave",
+    "skip_duplicate_main": true,
+    "suites": {
+      "mobile": { "on_pr": "when-touched", "paths": ["apps/mobile/**", "packages/db/**", "**/migrations/**"] }
+    }
+  },
   "always_ask": ["delete-data", "spend-money", "message-people", "credentials", "legal-pricing", "ai-flags-it"],
   "source": "https://claude.ai/artifact/...",
   "applied_at": "2026-10-15T21:00:00Z"
@@ -118,14 +124,36 @@ one edit to this file.
 | `live-no-customers` | Prove it runs for real | `fast-lane` | Sensitive paths, `two-ai` | Auto-merge, then auto-release with a health check that rolls back |
 | `customers` | Protect users and their data | `full` | Every PR, `two-ai`; `human` for sensitive paths | Auto-merge, release with one click |
 
-Not yet on the settings page or in `apply` (v1 records it only); a repo with `pipeline: own` maps it onto its own switches.
+On the settings page, choosing a phase sets `level`, `sensitive.rule`, `tests.lane` and `tests.skip_duplicate_main` to
+the phase's values; each can be changed afterwards, and `phase` then records where the product is. A file that leaves a
+field out gets the phase's value (`scripts/lanes.py effective`). A file with no `phase` is `prelaunch`: **waves are the
+default**. A repo with `pipeline: own` maps the phase onto its own switches.
+
+`live-no-customers` sets `level` to `auto-merge`, not `autopilot`: the release workflow with a health check and rollback
+that `autopilot` needs is not built (`docs/v2-report.md`), so nothing here pretends to release for you.
 
 ### `tests`
 
 | Field | Values |
 |---|---|
-| `lane` | `full`: every test runs before merging. `fast-lane`: quick tests gate the merge; the full suite runs right after and the change is undone automatically if it fails. `wave`: quick tests gate the merge; the full suite runs on `main` in batches (one run going, the newest push waiting, so each run covers whatever merged meanwhile) and on demand at the end of a wave; no automatic undo -- a red run means fix `main` before landing more. No batch-size setting: the batch sizes itself to how long the suite takes. |
+| `lane` | `full`: every test runs before merging. `fast-lane`: quick tests gate the merge; the full suite runs right after and the change is undone automatically if it fails. `wave`: quick tests gate the merge; the full suite runs on `main` in batches (one run going, the newest push waiting, so each run covers whatever merged meanwhile) and on demand at the end of a wave; no automatic undo -- a red run means fix `main` before landing more. No batch-size setting: the batch sizes itself to how long the suite takes. `templates/github/workflows/test-lanes.yml` is the `wave` lane as a workflow. |
 | `skip_duplicate_main` | `true` skips re-running the same tests on `main` after a merge when the pull request already passed them on the same code. |
+| `suites` | Optional. Per-suite rules for a suite that is expensive or only matters to part of the repo, such as the mobile app's build and emulator tests (macOS minutes cost ten times Linux). A map of suite name to `{ "on_pr", "paths" }`. |
+
+`suites.<name>.on_pr`:
+
+| Value | A pull request runs the suite |
+|---|---|
+| `when-touched` (default) | only when a changed file matches one of `paths`. |
+| `always` | every time. |
+| `never` | never; it runs on `main` and on the schedule only. |
+
+`paths` are globs (`**` crosses folders, `*` stays in one, a pattern with no `/` matches at any depth). List what the suite
+actually depends on, not just its own folder: a suite that exercises the database should list the migrations and schema
+too, so a database change runs it even when none of its own files changed. `main` and the schedule always run every
+suite, so skipping on a pull request is a saving, never a gap. `scripts/lanes.py suites POLICY FILE...` says which suites a
+set of files runs; `scripts/lanes.py render POLICY SUITE WORKFLOW` rewrites the workflow's `on.pull_request.paths` list
+from the suite's `paths`, so the two cannot disagree (`apply` does this).
 
 ## What enforces it
 
@@ -134,10 +162,13 @@ Not yet on the settings page or in `apply` (v1 records it only); a repo with `pi
 | `questions`, `always_ask` | Every Claude session with the plugin (the `autopilot-policy` skill), and Sling through the repo's CLAUDE.md section | Same |
 | `level` up to `auto-merge` | Claude sessions turn on GitHub's own auto-merge for the pull request once the AI review approves, so it merges even if nobody is around | A GitHub workflow runs the AI review on every pull request and turns on auto-merge itself |
 | `level` = `autopilot` | Claude sessions release after merging, where they can | A release workflow with a health check and automatic undo |
-| `tests` | Recorded only | Applied to the repo's test workflow by a reviewed pull request |
+| `phase` | Sets the other fields when chosen on the page; read by `scripts/lanes.py` | Same |
+| `tests.suites` | `apply` writes each suite's `paths` into its workflow's `on.pull_request.paths` in the same reviewed pull request | Same |
+| `tests.lane: wave` | `apply` adds `templates/github/workflows/test-lanes.yml` to a repo with no test workflow of its own, or tells you which two blocks to merge into the one it has | Same |
+| `tests.skip_duplicate_main` | Recorded only; `drafts/` has a reviewed example for one repo | Applied to the repo's test workflow by a reviewed pull request |
 | `sensitive` | Claude sessions run the second, adversarial review | The GitHub workflow requires both reviews |
 
-The v2 column is built (not yet installed anywhere): `templates/github/`, installed per [v2-install.md](v2-install.md), design and threat model in [v2-report.md](v2-report.md). Release-with-health-check for `autopilot` and the `fast-lane` test lane are not built yet.
+The v2 column is built (not yet installed anywhere): `templates/github/`, installed per [v2-install.md](v2-install.md), design and threat model in [v2-report.md](v2-report.md). Release-with-health-check for `autopilot` and the `fast-lane` test lane are not built yet; the `wave` lane and `tests.suites` are.
 
 Claude Code's own safety rules still apply on top of this file. Where they block a step (for example copying files
 to a production server), the session leaves the exact command for a person and carries on with everything else.

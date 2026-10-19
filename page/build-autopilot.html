@@ -1,3 +1,4 @@
+<meta charset="utf-8">
 <title>Build Autopilot</title>
 <meta name="claude:viewport-fit-sides" content="cover">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -275,6 +276,18 @@ const PIPELINES = [
   { id: "own", name: "This repo's own pipeline", sub: "The repo already has its own review and merge automation. Build Autopilot leaves merging to it and only sets how Claude asks questions." },
   { id: "none", name: "Nobody: a person merges", sub: "Every pull request waits for a person to merge it." },
 ];
+const PHASES = [
+  { id: "prelaunch", name: "Before launch: build fast, in waves", sub: "Nothing is live. Changes merge on quick tests and the full suite runs in batches on main. This is the default.", preset: { level: "auto-merge", rule: "two-ai", lane: "wave", skip_duplicate_main: true } },
+  { id: "live-no-customers", name: "Live, no customers yet", sub: "Prove it runs for real. Quick tests gate the merge; the full suite runs right after and the change is undone if it fails.", preset: { level: "auto-merge", rule: "two-ai", lane: "fast-lane", skip_duplicate_main: true } },
+  { id: "customers", name: "Customers are using it", sub: "Protect their data. Every test runs before merging, and changes to sensitive areas wait for a person.", preset: { level: "auto-merge", rule: "human", lane: "full", skip_duplicate_main: true } },
+];
+const SUITE_ON_PR = [
+  { id: "when-touched", name: "Only when its files change" },
+  { id: "always", name: "On every pull request" },
+  { id: "never", name: "Never on pull requests (main and nightly only)" },
+];
+// What a suite that exercises the database also depends on, so a database change still runs it.
+const DB_GLOBS = ["**/migrations/**", "**/db/**", "**/schema/**"];
 const TESTS = [
   { id: "full", name: "Every test before merging", sub: "Safest. A change waits for the whole suite." },
   { id: "fast-lane", name: "Quick tests first, full suite right after", sub: "Merges in minutes. If the full suite then fails, the change is undone automatically." },
@@ -289,12 +302,13 @@ const ALWAYS = [
   { id: "ai-flags-it", name: "Anything the AI reviewer says needs a person" },
 ];
 const DEFAULTS = {
+  phase: "prelaunch",      // waves are the default; choosing a phase on the page sets level, sensitive.rule and tests.lane
   pipeline: "gate",
   required_checks: null,   // null = the checks found on the repo's main branch; a list = chosen on this page
-  level: "manual",
+  level: "auto-merge",
   sensitive: { rule: "two-ai", paths: ["**/auth/**", "**/*login*", "**/payments/**", "**/billing/**", "**/phi/**", "**/migrations/**", ".github/**", "**/.env*", "**/secrets*"] },
   questions: "ask-now",
-  tests: { lane: "full", skip_duplicate_main: false },
+  tests: { lane: "wave", skip_duplicate_main: true, suites: {} },
   always_ask: ALWAYS.map(a => a.id),
   dismissed: [],
 };
@@ -319,7 +333,13 @@ function el(tag, attrs = {}, ...kids) {
 }
 function toast(msg) { const t = $("toast"); t.textContent = msg; t.hidden = false; clearTimeout(toast._t); toast._t = setTimeout(() => t.hidden = true, 2600); }
 function weeks(a) { return Math.max(1, (a.window_days || 30) / 7); }
-function settingsFor(slug) { return Object.assign(clone(DEFAULTS), clone(state.settings._defaults || {}), clone(state.settings[slug] || {})); }
+function settingsFor(slug) {
+  const out = Object.assign(clone(DEFAULTS), clone(state.settings._defaults || {}), clone(state.settings[slug] || {}));
+  const saved = state.settings[slug];
+  if (saved && slug !== "_defaults" && !("phase" in saved) && !(state.settings._defaults && "phase" in state.settings._defaults)) out.phase = null;  // saved before phases existed
+  out.tests = Object.assign({ suites: {} }, out.tests); if (!out.tests.suites) out.tests.suites = {};
+  return out;
+}
 
 function machineHoursPerWeek(a) {
   const merged = g(a, "prs.merged", 0), ci = g(a, "prs.ci_min.median", null);
@@ -561,6 +581,16 @@ function renderSettings(panel, slug) {
     el("span", { class: "note", text: isDef ? "Used by any repo without its own settings" : saved ? "Own settings" : "Using the defaults" })));
   if (!state.canEdit) panel.append(el("p", { class: "lock", text: "Only editors of this page can change repo settings. Ask the page's owner to make you an Editor." }));
 
+  // Where the product is: one choice that sets the level, the review rule for sensitive files and the test lane
+  panel.append(el("div", { class: "field", style: "border-top:0;padding-top:0" },
+    el("div", { class: "lbl", text: "Where the product is" }),
+    radioGroup(`phase-${slug}`, PHASES, st.phase, v => save(s => {
+      const p = PHASES.find(x => x.id === v).preset;
+      s.phase = v; s.level = p.level; s.sensitive = Object.assign({}, s.sensitive, { rule: p.rule });
+      s.tests = Object.assign({}, s.tests, { lane: p.lane, skip_duplicate_main: p.skip_duplicate_main });
+    }, `Phase: ${PHASES.find(x => x.id === v).name}`)),
+    el("p", { class: "note", text: st.phase ? "Picking one sets the automation level, the review rule for sensitive areas and the test lane below. You can still change each afterwards." : "This repo's settings were saved before phases existed. Pick one to set them together, or leave the settings below as they are." })));
+
   // Who reviews and merges
   const pipe = st.pipeline || "gate", audit = state.audits[slug] || {};
   panel.append(el("div", { class: "field", style: "border-top:0;padding-top:0" },
@@ -615,6 +645,8 @@ function renderSettings(panel, slug) {
       onchange: e => save(s => s.tests.skip_duplicate_main = e.target.checked, e.target.checked ? "Skip the repeat test run after merging" : "Run tests again after merging") }),
       el("span", {}, "Skip the repeat test run after merging", el("small", { text: "When the change already passed the same tests on the same code." })))));
 
+  panel.append(renderSuites(slug, st, save));
+
   if (!isDef) {
     const upd = saved && saved.updated_at, app = saved && saved.applied_at;
     const pending = upd && (!app || upd > app);
@@ -667,9 +699,41 @@ function renderChecks(slug, st, pipe, save) {
   return box;
 }
 
+function renderSuites(slug, st, save) {
+  const suites = st.tests.suites || {}, names = Object.keys(suites).sort();
+  const box = el("div", { class: "field" }, el("div", { class: "lbl", text: "Test suites that only matter to part of the repo" }),
+    el("p", { class: "note", text: "For a suite that is slow or costly, such as the mobile app's build and emulator tests, choose when a pull request runs it. Main and the nightly run always run every suite." }));
+  for (const name of names) {
+    const sp = suites[name], paths = sp.paths || [], id = `suite-${slug}-${name}`;
+    const hasDb = DB_GLOBS.every(g => paths.includes(g));
+    box.append(el("div", { class: "opt", style: "display:block" },
+      el("div", { class: "lbl", text: name }),
+      radioGroup(`suite-${slug}-${name}-onpr`, SUITE_ON_PR, sp.on_pr || "when-touched", v => save(s => s.tests.suites[name].on_pr = v, `${name}: ${SUITE_ON_PR.find(x => x.id === v).name}`)),
+      (sp.on_pr || "when-touched") === "when-touched" ? el("div", {},
+        el("label", { for: id, class: "note", text: "Run it when a changed file matches (one pattern per line)" }),
+        el("textarea", { id, rows: Math.max(3, paths.length + 1), disabled: !state.canEdit, style: "width:100%;font-family:inherit",
+          onchange: e => save(s => s.tests.suites[name].paths = e.target.value.split("\n").map(x => x.trim()).filter(Boolean), `${name}: changed when it runs`) }, paths.join("\n")),
+        el("label", { class: "opt", for: `${id}-db` }, el("input", { type: "checkbox", id: `${id}-db`, checked: hasDb, disabled: !state.canEdit,
+          onchange: e => save(s => { const cur = (s.tests.suites[name].paths || []).filter(x => !DB_GLOBS.includes(x)); s.tests.suites[name].paths = e.target.checked ? cur.concat(DB_GLOBS) : cur; },
+            e.target.checked ? `${name}: also runs when the database changes` : `${name}: no longer runs for database changes`) }),
+          el("span", {}, "Also run it when the database changes", el("small", { text: "Migrations and schema files, so a database change can't break it unseen." })))) : null,
+      el("button", { type: "button", class: "btn", disabled: !state.canEdit, text: "Remove this suite", onclick: () => save(s => { delete s.tests.suites[name]; }, `Removed the ${name} suite rule`) })));
+  }
+  const nid = `suite-new-${slug}`;
+  box.append(el("div", { class: "opt", style: "display:block" },
+    el("label", { for: nid, class: "note", text: "Add a suite (the name of its workflow or job, such as mobile)" }),
+    el("input", { id: nid, type: "text", disabled: !state.canEdit, placeholder: "mobile" }),
+    el("button", { type: "button", class: "btn", disabled: !state.canEdit, text: "Add", onclick: () => {
+      const v = $(nid).value.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
+      if (!v || suites[v]) return toast(v ? "That suite is already listed" : "Give the suite a name");
+      save(s => { s.tests.suites[v] = { on_pr: "when-touched", paths: [] }; }, `Added a rule for the ${v} suite`);
+    } })));
+  return box;
+}
+
 function settingsBody(slug, st, now) {
   const prev = state.settings[slug] || null;
-  return { repo: slug === "_defaults" ? null : repoOf(slug), pipeline: st.pipeline || "gate",
+  return { repo: slug === "_defaults" ? null : repoOf(slug), phase: st.phase || null, pipeline: st.pipeline || "gate",
     required_checks: Array.isArray(st.required_checks) ? st.required_checks : null, level: st.level, sensitive: st.sensitive, questions: st.questions, tests: st.tests,
     always_ask: st.always_ask, dismissed: st.dismissed || [], updated_at: now, updated_by: state.me || null, applied_at: prev ? prev.applied_at || null : null };
 }

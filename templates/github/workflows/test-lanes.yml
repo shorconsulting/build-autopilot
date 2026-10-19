@@ -1,0 +1,73 @@
+# Build Autopilot: the `wave` test lane (tests.lane: wave).
+#
+# While nothing is live, a pull request does not wait for the whole suite. It waits for the quick tests, and the
+# full suite runs on main in batches:
+#
+#   - pull_request: the quick tests only. The job is named `test`, so a branch rule that requires `test` still works.
+#   - push to main: the full suite. The `full` job's concurrency group never cancels a run in progress, and GitHub
+#     keeps at most one run waiting behind it and replaces an older waiting run with the newest. So one run is going
+#     and the newest push is waiting: each run covers whatever merged while the one before it ran. There is no
+#     batch size to set; the batch sizes itself to how long the suite takes.
+#   - workflow_dispatch: the full suite on demand, for the end of a wave ("Run workflow" on the Actions tab, or
+#     `gh workflow run test-lanes.yml`).
+#
+# A red `full` run on main means fix main before landing more. There is no automatic undo in this lane.
+#
+# Copy this file to .github/workflows/, and set the two commands below. If the repo already has a test workflow, merge
+# these triggers and the two concurrency groups into it instead of adding a second workflow that runs the same tests.
+#
+# Does not need the gate. Use `tests.suites` in .github/autopilot.json for per-suite path rules; see docs/policy.md.
+
+name: test-lanes
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  QUICK_TESTS: npm run test:quick    # what a pull request must pass: fast, covers the files the change touches
+  FULL_TESTS: npm test               # everything
+
+jobs:
+  test:
+    name: test
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    concurrency:
+      group: quick-${{ github.event.pull_request.number }}
+      cancel-in-progress: true       # a newer push to the same pull request makes the older run worthless
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: ${{ env.QUICK_TESTS }}
+
+  full:
+    name: full suite
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    concurrency:
+      group: full-suite-main
+      cancel-in-progress: false      # never cancel the run in progress; the newest waiting run replaces older waiting ones
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: ${{ env.FULL_TESTS }}
+      - name: Say what this run covered
+        if: always()
+        run: |
+          echo "### Full suite on \`${GITHUB_SHA::7}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "Covers every change merged to main since the previous full run started." >> "$GITHUB_STEP_SUMMARY"

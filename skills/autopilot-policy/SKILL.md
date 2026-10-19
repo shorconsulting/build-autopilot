@@ -117,7 +117,13 @@ and carry on with everything else. Don't stop the whole run for it.
 except: with `lane: fast-lane` or `lane: wave`, run the targeted tests for what you touched before opening the PR
 and leave the full suite to CI. With `wave`, when the full-suite run on `main` is red, fixing `main` comes before
 landing anything else. `phase` (`prelaunch`, `live-no-customers`, `customers`) supplies defaults for fields the
-file leaves out.
+file leaves out; a file with no `phase` is `prelaunch`, which is the wave lane.
+
+`tests.suites` names suites that only matter to part of the repo (the mobile app's, for example). Before opening a PR,
+run each suite whose `paths` match a file you changed (`python3 <plugin>/scripts/lanes.py suites .github/autopilot.json
+FILE...` lists them), and no others. A change to the database, its migrations or its schema is the usual reason a suite
+you did not touch still runs: list those paths in the suite and the rule follows. Never skip a suite on `main` or the
+schedule; only pull requests skip.
 
 ## Decided without you
 

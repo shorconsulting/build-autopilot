@@ -114,8 +114,8 @@ Turns the page's choices into the repo's `.github/autopilot.json`.
 
 1. For each repo (default: the current checkout's), read `settings/<owner>__<name>`, falling back to
    `settings/_defaults`. If neither exists, say so and stop for that repo.
-2. Build the policy file exactly as `docs/policy.md` describes: `version: 1`, `repo`, `pipeline` (default `gate`),
-   `required_checks`, `level`, `sensitive`, `questions`, `tests`, `always_ask`, `source` (the page link) and
+2. Build the policy file exactly as `docs/policy.md` describes: `version: 1`, `repo`, `phase` (leave it out when the page has none: the repo's settings were saved before phases existed), `pipeline` (default `gate`),
+   `required_checks`, `level`, `sensitive`, `questions`, `tests` (with `suites` when the page has any), `always_ask`, `source` (the page link) and
    `applied_at` (now, UTC). Drop page-only fields (`dismissed`, `updated_by`, `updated_at`).
    - `pipeline: gate`: the pull request also adds the gate's files (`docs/v2-install.md`, "What gets installed").
      Afterwards, tell the person to run `scripts/setup-github-gate.sh OWNER/REPO --ruleset` once it's merged.
@@ -123,6 +123,19 @@ Turns the page's choices into the repo's `.github/autopilot.json`.
      Never add the gate's files, a ruleset or auto-merge to such a repo. If the gate's files are already there
      from an earlier choice, the pull request removes them (`.github/workflows/autopilot.yml`, `.github/autopilot/`),
      and you tell the person to delete the `build-autopilot` ruleset in the repo's settings.
+   - `tests.suites` (any `pipeline`): for each suite with `on_pr: when-touched`, run
+     `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/lanes.py render .github/autopilot.json <suite> <workflow>` against the
+     workflow that runs it (the suite's name, or the one the person names) and put the result in the same pull request,
+     so the workflow's `on.pull_request.paths` is the suite's `paths`. For `always`, remove the workflow's `paths:`
+     filter; for `never`, remove its `pull_request:` trigger and leave `schedule` and `push`. If `render` says it
+     cannot (a `paths-ignore`, or no `pull_request.paths`), say so in the pull request body and leave that workflow alone.
+     Run `lanes.py suites` over the last merged pull request's files for one example in the body: which suites it would have run.
+   - `tests.lane: wave`: if the repo has no workflow that runs its tests on pull requests and on pushes to the
+     default branch, add `templates/github/workflows/test-lanes.yml` (set its two commands from the repo's `package.json`
+     scripts and ask nothing); if it has one, list in the body the two changes that make it the wave lane (a quick-tests
+     job on `pull_request`, the full suite on `push` to the default branch with a concurrency group that has
+     `cancel-in-progress: false`) and make them. Workflow files are sensitive paths: this is part of the same
+     pull request, which is never auto-merged.
 3. If the file on the default branch already matches (ignoring `applied_at`), report "already applied" and stop for
    that repo.
 4. Otherwise open a pull request on a branch `autopilot/policy-<date>` that changes only
