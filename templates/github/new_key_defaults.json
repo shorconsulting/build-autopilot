@@ -1,0 +1,58 @@
+{
+  "waves": {
+    "mode": "waves",
+    "batches_per_pr": 4,
+    "sensitive_batches_per_pr": 2,
+    "merge_order": "serialize"
+  },
+  "models": {
+    "ordinary": "sonnet",
+    "risky": "opus",
+    "risky_areas": [
+      "access",
+      "billing",
+      "export",
+      "authority",
+      "deletion"
+    ]
+  },
+  "review": {
+    "max_rounds": 2,
+    "rank": [
+      "security",
+      "access",
+      "data-loss",
+      "correctness",
+      "style"
+    ],
+    "owner_may_accept_gaps": true,
+    "batch_rows": 8
+  },
+  "rerun": {
+    "plain_rerun": "died-before-tests"
+  },
+  "wip_push": {
+    "safety_push": true,
+    "branch_prefixes": [
+      "wip/",
+      "ops/"
+    ],
+    "gate_on": [
+      "default-branch",
+      "ci"
+    ]
+  },
+  "run_state": {
+    "ledger_branch": "ops/ledger",
+    "scripts_on_github": true
+  },
+  "concurrency": {
+    "agent_limit": "min(16, cpus-2)"
+  },
+  "claims": {
+    "check_pr_body": true
+  },
+  "tests": {
+    "test_only_fast_lane": true
+  }
+}

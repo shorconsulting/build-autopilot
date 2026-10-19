@@ -13,9 +13,11 @@ Three things, all standard library:
 Command line:
     lanes.py effective  .github/autopilot.json
     lanes.py suites     .github/autopilot.json  path/one path/two ...
+    lanes.py testonly   path/one path/two ...      (exit 0 when every path is a test file)
     lanes.py render     .github/autopilot.json  SUITE  .github/workflows/mobile-apps.yml   (prints the new file)
 """
 import json
+import os
 import re
 import sys
 
@@ -30,6 +32,29 @@ PRESETS = {
     "customers": {"level": "auto-merge", "sensitive_rule": "human", "lane": "full", "skip_duplicate_main": True},
 }
 SUITE_ON_PR = ("when-touched", "always", "never")
+
+# Keys added after v1 shipped (the v50 learnings). Their defaults live in one JSON file that the rollout script
+# also reads, so a rolled-out file and `effective()` agree. A repo's own values always win.
+NEW_DEFAULTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "templates", "github",
+                                 "new_key_defaults.json")
+WAVE_MODES = ("waves", "integration")
+MERGE_ORDERS = ("serialize", "free")
+TEST_FILE_GLOBS = ("**/tests/**", "**/test/**", "**/__tests__/**", "**/*.test.*", "**/*.spec.*", "**/test_*.py",
+                   "**/*_test.py", "**/*_test.go", "**/e2e/**", "**/fixtures/**")
+
+
+def new_defaults():
+    with open(NEW_DEFAULTS_FILE, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _fill(target, defaults):
+    """Add keys missing from `target` (recursing into objects); never overwrite a value that is set."""
+    for k, v in defaults.items():
+        if k not in target:
+            target[k] = json.loads(json.dumps(v))
+        elif isinstance(v, dict) and isinstance(target[k], dict):
+            _fill(target[k], v)
 
 
 def effective(policy):
@@ -47,6 +72,8 @@ def effective(policy):
     tests.setdefault("lane", p["lane"])
     tests.setdefault("skip_duplicate_main", p["skip_duplicate_main"])
     tests.setdefault("suites", {})
+    tests.setdefault("test_only_fast_lane", True)
+    _fill(out, new_defaults())
     return out
 
 
@@ -106,9 +133,44 @@ def suites_to_run(policy, changed_files, event="pull_request"):
     return run
 
 
+def is_test_only(changed_files, extra_globs=()):
+    """True when a change touches only test files (and at least one file), so a targeted test run can stand in for
+    the full end-to-end suite. Anything else, including a deleted-then-renamed non-test path, is not test-only."""
+    files = list(changed_files)
+    return bool(files) and all(matches(f, TEST_FILE_GLOBS + tuple(extra_globs)) for f in files)
+
+
+def validate_new_keys(policy):
+    """Problems with the post-v1 keys. Missing keys are fine (they take defaults); wrong types or values are not."""
+    problems = []
+    w = policy.get("waves", {})
+    if not isinstance(w, dict):
+        return ["waves must be an object"]
+    if w.get("mode", "waves") not in WAVE_MODES:
+        problems.append("waves.mode must be one of " + ", ".join(WAVE_MODES))
+    if w.get("merge_order", "serialize") not in MERGE_ORDERS:
+        problems.append("waves.merge_order must be one of " + ", ".join(MERGE_ORDERS))
+    for k in ("batches_per_pr", "sensitive_batches_per_pr"):
+        v = w.get(k, 1)
+        if isinstance(v, bool) or not isinstance(v, int) or v < 1:
+            problems.append("waves.%s must be a whole number of at least 1" % k)
+    r = policy.get("review", {})
+    if not isinstance(r, dict):
+        problems.append("review must be an object")
+    else:
+        for k in ("max_rounds", "batch_rows"):
+            v = r.get(k, 1)
+            if isinstance(v, bool) or not isinstance(v, int) or v < 1:
+                problems.append("review.%s must be a whole number of at least 1" % k)
+    for name in ("models", "rerun", "wip_push", "run_state", "concurrency", "claims"):
+        if name in policy and not isinstance(policy[name], dict):
+            problems.append("%s must be an object" % name)
+    return problems
+
+
 def validate(policy):
     """Problems with the suite rules, as plain sentences; an empty list means fine."""
-    problems = []
+    problems = validate_new_keys(policy)
     suites = (policy.get("tests") or {}).get("suites", {})
     if not isinstance(suites, dict):
         return ["tests.suites must be an object of suite name to rules"]
@@ -196,6 +258,8 @@ def main(argv):
         for name, why in suites_to_run(pol, argv[3:]).items():
             print(f"{name}\t{why}")
         return 0
+    if len(argv) >= 3 and argv[1] == "testonly":
+        return 0 if is_test_only(argv[2:]) else 1
     if len(argv) == 5 and argv[1] == "render":
         pol = effective(_load(argv[2]))
         spec = pol["tests"]["suites"].get(argv[3])

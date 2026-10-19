@@ -92,7 +92,7 @@ with required status checks).
 **The AI review.** Use a different agent from the one that wrote the code, on the strongest model available
 (Opus), with the PR diff and the issue or request. It checks: does the change do what was asked, could it break
 something that works today, is there a security or data-loss risk, are there tests for the new behaviour. It ends
-with APPROVE, CHANGES (fix and re-review, up to 2 rounds, then ask a person), or NEEDS A PERSON (treat as
+with APPROVE, CHANGES (fix and re-review, up to `review.max_rounds` rounds, default 2, then stop and rank what is left; see "Big builds"), or NEEDS A PERSON (treat as
 `ai-flags-it`). Post the verdict on the PR in words a non-engineer can follow.
 
 **Sensitive files.** A change touching any path matching `sensitive.paths`:
@@ -146,3 +146,42 @@ If you made no such decisions, write "Decided without you: nothing" so the perso
 Finish with a short summary the person can read in under a minute: what changed (in user terms), what merged,
 what was released, the **Decided without you** list, and anything waiting on them (only `always_ask` items,
 blocked release commands, or NEEDS A PERSON verdicts). If nothing is waiting on them, say so.
+
+## Big builds (many agents, many pull requests)
+
+These come from the overnight v50 build on Wyset (about 125 agents, 16.5M tokens, ten-plus CI runs). Every key
+below is optional; a file that leaves it out gets the default from `scripts/lanes.py effective`.
+
+- **Wave pull requests (`waves`).** Group batches into pull requests of `waves.batches_per_pr` (default 4), or
+  `waves.sensitive_batches_per_pr` (default 2) when a batch touches `sensitive.paths`. `waves.mode: integration` means
+  one integration PR for everything, CI once, then fix in waves; use it for a repo that is not deployed anywhere. Keep a
+  batch to about `review.batch_rows` (8) rows.
+- **Merge order (`waves.merge_order: serialize`).** Merge stacked PRs one at a time, each after the previous one has
+  landed, so each merges onto a main that already has its predecessor. Never merge two stacked PRs in parallel.
+- **Models by risk (`models`).** Build and check with `models.ordinary` (Sonnet). Use `models.risky` (Opus) for
+  anything in `models.risky_areas`: access, billing, export, authority, deletion. The independent reviewer is on the
+  strongest model whatever the area.
+- **Test-only PRs (`tests.test_only_fast_lane`).** When every changed file is a test file
+  (`python3 <plugin>/scripts/lanes.py testonly FILE...` exits 0), run the targeted tests for those files, not the full
+  end-to-end suite.
+- **One local gate.** Builders run the repo's gate once. The integrator only merges and regenerates; CI is the
+  verdict. Do not re-run the same gate again at the integrator. `wip_push.safety_push`: pushing work in progress to a
+  branch under `wip_push.branch_prefixes` may skip local hooks (`--no-verify`) so work survives a container reset. The
+  gate still runs for the default branch and in CI (`wip_push.gate_on`). Never use `--no-verify` for any other branch.
+- **Questions page.** With `questions: decide-reversible`, collect every reading and question into one run-level page
+  (or one section of the end-of-run summary), ranked by how much a wrong guess costs, most costly first.
+- **Re-runs (`rerun.plain_rerun: died-before-tests`).** Re-run a failed job once, unchanged, only when it died before
+  any test body ran (runner lost, setup or install step failed, timeout in checkout). Any failure after a test started
+  is root-caused, not re-run.
+- **Review cap (`review.max_rounds`).** Independent reviewers on a large batch do not reach "clean". After
+  `max_rounds` rounds stop reviewing, rank the remaining findings (`review.rank`: security and access first), fix the
+  top ones, and list the rest for the owner under **Decided without you**; with `review.owner_may_accept_gaps` the owner
+  may accept them. Do not hold a merge open for an all-clean verdict that cannot arrive.
+- **Duplicate CI on main.** `tests.skip_duplicate_main` already skips it; `templates/github/autopilot/skip_duplicate_main.py`
+  is the shared implementation.
+- **Durability (`run_state`).** Containers reset. Keep run state on a GitHub ledger branch (`run_state.ledger_branch`)
+  and commit workflow scripts and the restore script to GitHub, not only to the working directory.
+- **Concurrency (`concurrency.agent_limit`).** Read the engine's real agent limit (`min(16, CPUs-2)`) before sizing a
+  plan; do not plan for more parallel agents than that.
+- **No overclaiming (`claims.check_pr_body`).** A PR body may list a requirement ID as tested only if a test names it.
+  Run `python3 <plugin>/scripts/check_pr_claims.py BODY.md` before opening the PR; remove what it reports or add the tests.
