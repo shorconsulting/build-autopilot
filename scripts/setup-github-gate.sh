@@ -20,6 +20,7 @@
 #   scripts/setup-github-gate.sh OWNER/REPO [--ruleset] [--test-check "NAME"]... [--dry-run] [--yes]
 #   scripts/setup-github-gate.sh OWNER/REPO --pause-rules | --resume-rules
 #                                           [--key-file PATH] [--rotate-anthropic-key]
+#   scripts/setup-github-gate.sh OWNER/REPO --rotate-anthropic-key [--dry-run]   (only the Anthropic key)
 #
 #   --ruleset              also create/update the branch ruleset (asks which test checks to require)
 #   --test-check NAME      a test check the ruleset requires (repeat); default: offer the checks GitHub
@@ -27,7 +28,8 @@
 #   --dry-run              show what would change; make no changes (read-only calls only)
 #   --yes                  don't ask before each change
 #   --key-file PATH        use this .pem for the app (for an app created earlier, or a regenerated key)
-#   --rotate-anthropic-key ask for the Anthropic key again even if the secret is already set
+#   --rotate-anthropic-key set or replace only the review job's Anthropic key (asks for it, checks it with
+#                          Anthropic, stores it), then stop; with --ruleset, runs every step and asks for it there
 #   --allow-partial-checks require the chosen checks even if some recent pull requests didn't run them
 #   --allow-dropping       let the ruleset leave out checks that skip some pull requests (they then aren't required
 #                          anywhere, so a failure in them wouldn't stop a merge); without it the script stops
@@ -61,7 +63,7 @@ step() { printf '\n== %s\n' "$*"; }
 warn() { printf 'WARNING: %s\n' "$*" >&2; }
 die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
-usage() { sed -n '2,39p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,41p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 # Whatever happens (an error, Ctrl-C), remove the temp folder that may hold the app key and turn echo back on.
 CLEANUP_DIR=""
@@ -179,6 +181,73 @@ mkdir -p "$STATE_DIR/apps" "$STATE_DIR/keys"
 chmod 700 "$STATE_DIR" "$STATE_DIR/keys"
 APP_META="$STATE_DIR/apps/$OWNER.json"
 APP_KEY="$STATE_DIR/keys/$OWNER.pem"
+
+# env_state NAME -> prints locked | missing | unlocked | extra (allows more than the default branch)
+env_state() {
+  local env="$1" info policies others
+  info=$(gh api "repos/$REPO/environments/$env" 2>/dev/null) || { echo missing; return 0; }
+  if [ "$(printf '%s' "$info" | jq -r '.deployment_branch_policy.custom_branch_policies // false')" != "true" ]; then
+    echo unlocked; return 0
+  fi
+  policies=$(gh api --paginate "repos/$REPO/environments/$env/deployment-branch-policies" \
+               --jq '.branch_policies[] | "\(.type // "branch") \(.name)"')
+  others=$(printf '%s\n' "$policies" | grep -v -x "branch $DEFAULT_BRANCH" | grep -v '^$' || true)
+  if [ -n "$others" ]; then echo extra; return 0; fi
+  if printf '%s\n' "$policies" | grep -qx "branch $DEFAULT_BRANCH"; then echo locked; else echo unlocked; fi
+}
+# require_locked NAME: never store a secret in an environment other branches can use
+require_locked() {
+  local st
+  st=$(env_state "$1")
+  [ "$st" = "locked" ] || die "environment $1 is $st, not locked to $DEFAULT_BRANCH only; re-run and let step 3 lock it first"
+}
+# ask_anthropic_key: ask for the review job's Anthropic key (hidden), check it with Anthropic, store it in
+# autopilot-review. The key only ever goes through pipes: never a command line, a file or an exported variable.
+ask_anthropic_key() {
+  local key code
+  require_locked autopilot-review
+  say "  Tip: make a separate key in its own Anthropic workspace with a monthly spend limit."
+  printf '  Anthropic API key for %s (not shown as you type): ' "$REPO"
+  read -rs key </dev/tty || key=""
+  printf '\n'
+  case "$key" in
+    sk-ant-*) ;;
+    "") die "no key entered; nothing changed" ;;
+    *) die "that doesn't start with sk-ant-, so it isn't an Anthropic API key; nothing changed" ;;
+  esac
+  printf '  Checking the key with Anthropic... '
+  code=$(printf 'x-api-key: %s\nanthropic-version: 2023-06-01\n' "$key" \
+           | curl -sS -o /dev/null -w '%{http_code}' -H @- https://api.anthropic.com/v1/models 2>/dev/null) || code="000"
+  case "$code" in
+    200) say "it works." ;;
+    401|403) say ""; die "Anthropic rejected that key (HTTP $code); nothing changed" ;;
+    *) say ""
+       warn "couldn't check the key (HTTP $code)"
+       confirm "Store it anyway?" || die "nothing changed" ;;
+  esac
+  printf '%s' "$key" | gh secret set ANTHROPIC_API_KEY --env autopilot-review --repo "$REPO"
+  key=""
+  say "  Stored as ANTHROPIC_API_KEY in $REPO's autopilot-review environment."
+}
+# anthropic_key_updated: when the stored key was last set (empty if there is none)
+anthropic_key_updated() {
+  gh secret list --env autopilot-review --repo "$REPO" --json name,updatedAt \
+    --jq '.[] | select(.name == "ANTHROPIC_API_KEY") | .updatedAt' 2>/dev/null || true
+}
+
+# ---------------------------------------------------------------- just the Anthropic key
+if [ "$ROTATE_ANTHROPIC" -eq 1 ] && [ "$DO_RULESET" -eq 0 ] && [ -z "$RULES_ACTION" ]; then
+  step "Anthropic API key for $REPO"
+  say "Only the review job's key changes; nothing else in $REPO is touched."
+  [ "$(env_state autopilot-review)" != "missing" ] \
+    || die "$REPO has no autopilot-review environment yet; run $0 $REPO (without --rotate-anthropic-key) first"
+  WHEN=$(anthropic_key_updated)
+  if [ -n "$WHEN" ]; then say "Current key was set $WHEN; this replaces it."; else say "No key is set yet."; fi
+  [ "$DRY_RUN" -eq 1 ] && { say "  (dry run) would ask for the key, check it, and store it"; exit 0; }
+  ask_anthropic_key
+  say "  Now set $(anthropic_key_updated). The next pull request in $REPO uses it."
+  exit 0
+fi
 
 # ---------------------------------------------------------------- break glass: pause or resume the ruleset
 if [ -n "$RULES_ACTION" ]; then
@@ -446,25 +515,6 @@ lock_environment() {  # lock_environment NAME
   fi
   say "  $env: only $DEFAULT_BRANCH may use it."
 }
-# env_state NAME -> prints locked | missing | unlocked | extra (allows more than the default branch)
-env_state() {
-  local env="$1" info policies others
-  info=$(gh api "repos/$REPO/environments/$env" 2>/dev/null) || { echo missing; return 0; }
-  if [ "$(printf '%s' "$info" | jq -r '.deployment_branch_policy.custom_branch_policies // false')" != "true" ]; then
-    echo unlocked; return 0
-  fi
-  policies=$(gh api --paginate "repos/$REPO/environments/$env/deployment-branch-policies" \
-               --jq '.branch_policies[] | "\(.type // "branch") \(.name)"')
-  others=$(printf '%s\n' "$policies" | grep -v -x "branch $DEFAULT_BRANCH" | grep -v '^$' || true)
-  if [ -n "$others" ]; then echo extra; return 0; fi
-  if printf '%s\n' "$policies" | grep -qx "branch $DEFAULT_BRANCH"; then echo locked; else echo unlocked; fi
-}
-# require_locked NAME: never store a secret in an environment other branches can use
-require_locked() {
-  local st
-  st=$(env_state "$1")
-  [ "$st" = "locked" ] || die "environment $1 is $st, not locked to $DEFAULT_BRANCH only; re-run and let step 3 lock it first"
-}
 say "  Now: autopilot-review is $(env_state autopilot-review); autopilot is $(env_state autopilot)."
 if confirm "Create or lock the environments autopilot-review and autopilot?"; then
   lock_environment autopilot-review
@@ -485,7 +535,7 @@ fi
 
 HAS_ANTHROPIC=$(gh secret list --env autopilot-review --repo "$REPO" --json name --jq '[.[] | select(.name == "ANTHROPIC_API_KEY")] | length' 2>/dev/null || echo 0)
 if [ "$HAS_ANTHROPIC" != "0" ] && [ "$ROTATE_ANTHROPIC" -eq 0 ]; then
-  say "  ANTHROPIC_API_KEY is already set for autopilot-review (use --rotate-anthropic-key to replace it)."
+  say "  ANTHROPIC_API_KEY is already set for autopilot-review (to replace just that: $0 $REPO --rotate-anthropic-key)."
 elif [ -n "$GATE_ANTHROPIC_KEY" ]; then
   # Given once by setup-github-gate-many.sh, through the environment (never on a command line).
   if confirm "Store the Anthropic API key you entered at the start for the review job?"; then
@@ -493,20 +543,8 @@ elif [ -n "$GATE_ANTHROPIC_KEY" ]; then
     printf '%s' "$GATE_ANTHROPIC_KEY" | gh secret set ANTHROPIC_API_KEY --env autopilot-review --repo "$REPO"
     say "  Stored."
   fi
-elif confirm "Set the Anthropic API key for the review job (you type it; it isn't shown)?"; then
-  require_locked autopilot-review
-  say "  Tip: make a separate key in its own Anthropic workspace with a monthly spend limit."
-  printf '  Anthropic API key: '
-  read -rs ANTHROPIC_KEY </dev/tty || ANTHROPIC_KEY=""
-  printf '\n'
-  case "$ANTHROPIC_KEY" in
-    sk-ant-*) ;;
-    "") die "no key entered" ;;
-    *) warn "that doesn't start with sk-ant-; storing it anyway" ;;
-  esac
-  printf '%s' "$ANTHROPIC_KEY" | gh secret set ANTHROPIC_API_KEY --env autopilot-review --repo "$REPO"
-  ANTHROPIC_KEY=""
-  say "  Stored."
+elif confirm "Set the Anthropic API key for $REPO's review job (you type it; it isn't shown)?"; then
+  ask_anthropic_key
 fi
 
 # ---------------------------------------------------------------- 5. repo settings

@@ -51,6 +51,13 @@ installed in one visit, and keeps going if one repo fails):
 scripts/setup-github-gate-many.sh Velocity-Org/ranch-rides Velocity-Org/tidyhaus homeporthealth/app Shor-Consulting-Inc/wyset
 ```
 
+To set or replace only a repo's Anthropic key (nothing else is touched; the key is checked with Anthropic before
+it is stored):
+
+```bash
+scripts/setup-github-gate.sh Velocity-Org/chasing-shade --rotate-anthropic-key
+```
+
 The app's key stays on the computer that created it (`~/.build-autopilot/keys/<org>.pem`, readable only by you); the
 next repo in the same org reuses it. After the ruleset, do the checks in step 5. The manual steps follow, for reference.
 
