@@ -155,6 +155,13 @@ suite, so skipping on a pull request is a saving, never a gap. `scripts/lanes.py
 set of files runs; `scripts/lanes.py render POLICY SUITE WORKFLOW` rewrites the workflow's `on.pull_request.paths` list
 from the suite's `paths`, so the two cannot disagree (`apply` does this).
 
+### `read_cap`: stop whole-file Reads of long files
+
+`true` makes the plugin's `PreToolUse` hook (`scripts/read_cap.py`) refuse a `Read` that has no `limit` on a file over 300
+lines, with a one-line reason telling Claude to grep first or pass `offset` and `limit`. Absent or `false` (the default)
+allows every Read. Images, PDFs and notebooks are never refused, and the hook allows on any error. It reads the file
+from the session's working directory. Off by default; turn it on per repo.
+
 ## What enforces it
 
 | Setting | v1 (now) | v2 |
@@ -166,6 +173,7 @@ from the suite's `paths`, so the two cannot disagree (`apply` does this).
 | `tests.suites` | `apply` writes each suite's `paths` into its workflow's `on.pull_request.paths` in the same reviewed pull request | Same |
 | `tests.lane: wave` | `apply` adds `templates/github/workflows/test-lanes.yml` to a repo with no test workflow of its own, or tells you which two blocks to merge into the one it has | Same |
 | `tests.skip_duplicate_main` | Recorded only; `drafts/` has a reviewed example for one repo | Applied to the repo's test workflow by a reviewed pull request |
+| `read_cap` | The `PreToolUse` hook in `hooks/hooks.json` (`scripts/read_cap.py`) | Same |
 | `sensitive` | Claude sessions run the second, adversarial review | The GitHub workflow requires both reviews |
 
 The v2 column is built (not yet installed anywhere): `templates/github/`, installed per [v2-install.md](v2-install.md), design and threat model in [v2-report.md](v2-report.md). Release-with-health-check for `autopilot` and the `fast-lane` test lane are not built yet; the `wave` lane and `tests.suites` are.

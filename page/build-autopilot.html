@@ -219,6 +219,10 @@ details > summary { cursor: pointer; color: var(--muted) }
           <div class="facts" id="facts"></div>
           <p class="note" id="deployNote"></p>
         </div>
+        <div class="panel" id="effPanel" hidden>
+          <div class="panel-head"><h2>Context efficiency</h2><span class="note" id="effNote"></span></div>
+          <div class="facts" id="effFacts"></div>
+        </div>
         <div class="panel">
           <div class="panel-head"><h2>What would speed this up</h2><span class="note">Biggest saving first</span></div>
           <div class="recs" id="recs"></div>
@@ -473,7 +477,7 @@ function renderSelected() {
   $("defaults").hidden = s !== "_defaults";
   if (!s) return;
   if (s === "_defaults") { renderSettings($("defaultsPanel"), "_defaults"); return; }
-  renderSteps(s); renderTime(s); renderRecs(s); renderSettings($("settingsPanel"), s);
+  renderSteps(s); renderTime(s); renderEfficiency(s); renderRecs(s); renderSettings($("settingsPanel"), s);
 }
 
 function renderTime(slug) {
@@ -500,6 +504,22 @@ function renderTime(slug) {
   fact(pct(g(a, "prs.merged_after_tests_passed")), "of changes merged after their tests passed");
   fact(pct(g(a, "prs.merged_without_review")), "of changes merged with no review");
   $("deployNote").textContent = g(a, "deploy.note", "") || "";
+}
+
+function renderEfficiency(slug) {
+  const e = g(state.audits[slug] || {}, "efficiency", null);
+  $("effPanel").hidden = !e || !e.tool_results;
+  if (!e) return;
+  const f = $("effFacts"); f.textContent = "";
+  const fact = (big, small) => f.append(el("div", {}, el("b", { class: "num", text: big }), el("span", { text: small })));
+  const mix = e.model_mix_pct || {};
+  $("effNote").textContent = `${e.sessions} sessions · ${e.subagent_transcripts} subagent transcripts`;
+  fact(`${e.read_over_20k} of ${e.read_results}`, `Read results over 20k characters (avg ${Math.round((e.read_over_20k_avg_chars || 0) / 1000)}k)`);
+  fact(String(e.bash_over_20k), "Bash results over 20k characters");
+  fact(`${mix.opus || 0}% Opus`, `${mix.sonnet || 0}% Sonnet · ${mix.haiku || 0}% Haiku · ${mix.fable || 0}% Fable`);
+  fact(`${e.subagent_weighted_pct}%`, "of weighted token spend is subagents");
+  fact(`${e.tool_error_pct}%`, `of tool results were errors (${e.tool_errors} of ${e.tool_results})`);
+  fact(String(e.sessions_over_300k_context), "sessions grew past 300k context");
 }
 
 function recIsOn(rec, st) {
