@@ -2,11 +2,12 @@
 """Build Autopilot audit: where does a repo's build time go, and what could run without a human click?
 
     audit.py --repo OWNER/NAME [--repo OWNER/NAME ...] [--org ORG] [--since 30d|YYYY-MM-DD]
-             [--transcripts DIR ...] [--checkout OWNER/NAME=PATH ...] --out audit.json
+             [--transcripts DIR ...] [--checkout OWNER/NAME=PATH ...] [--history-dir DIR] --out audit.json
 
 STRICTLY READ-ONLY. It only runs `gh` read calls (GET requests, `pr list`, `issue list`, `repo list`) and read-only
 `git remote get-url`. It never writes to GitHub, never edits a repo, never changes a setting. Claude Code transcripts
-are only counted: no transcript text is ever written to the output.
+are only counted: no transcript text is ever written to the output. The one thing it writes besides --out is one line
+per repo per run to the local history folder (--history-dir, default ~/.build-autopilot/history).
 
 Needs python3 (3.9+, standard library only), gh (logged in) and git.
 """
@@ -22,11 +23,14 @@ import subprocess
 import sys
 from pathlib import Path
 
+import lanes  # same folder; lanes.matches is the policy's glob rule
+
 try:
     from zoneinfo import ZoneInfo
 except ImportError:  # pragma: no cover - python < 3.9
     ZoneInfo = None
 
+HISTORY_DIR = "~/.build-autopilot/history"
 MAX_PRS = 200
 MAX_RUNS = 500
 RUNS_PER_PAGE = 100
@@ -35,6 +39,7 @@ ACTIONS_APP_ID = 15368
 GATE_CHECK_NAMES = ("autopilot/gate",)  # Build Autopilot's own gate, never offered as a toggle
 
 BOT_WORDS = ("claude", "sling", "coderabbit", "qodo", "copilot")
+INCIDENT_RE = re.compile(r"\b(revert|hotfix)", re.I)  # a merged PR with this in its title is a revert or hotfix
 TEST_FIX_RE = re.compile(r"(flak|intermittent|time of day|clock|fix .*test|test.*fail|CI:)", re.I)
 DEPLOY_RE = re.compile(r"deploy|release|publish", re.I)
 AI_REVIEW_RE = re.compile(r"anthropic|claude|review", re.I)
@@ -341,19 +346,23 @@ def pr_metrics(prs, open_count, required_checks, since, runs_by_branch, tz):
         if m and c and m >= since:
             merged.append((p, c, m))
     open_to_merge, ci_min, waits, wait_rows = [], [], [], []
-    human = bot = unreviewed = test_fix = over2h = overnight = 0
+    human = bot = unreviewed = test_fix = over2h = overnight = reverts = changes = 0
     tested_ok = untested = 0
     fix_rounds = []
     for p, created, mergedat in merged:
         open_to_merge.append(max(0.0, minutes(created, mergedat)))
         if TEST_FIX_RE.search(p.get("title") or ""):
             test_fix += 1
+        if INCIDENT_RE.search(p.get("title") or ""):
+            reverts += 1
         author = login_of(p)
         reviewed = False
         for item in list(p.get("reviews") or []) + list(p.get("comments") or []):
             who = login_of(item)
             if not who or who == author:
                 continue
+            if item.get("state") == "CHANGES_REQUESTED" or "Changes needed" in (item.get("body") or "")[:200]:
+                changes += 1  # a person's request-changes review, or the gate's "Changes needed" verdict comment
             if is_bot(who):
                 bot += 1
             else:
@@ -396,7 +405,7 @@ def pr_metrics(prs, open_count, required_checks, since, runs_by_branch, tz):
         "human_reviews": human, "bot_reviews": bot, "merged_without_review": unreviewed,
         "merged_after_tests_passed": tested_ok, "merged_without_tests": untested,
         "fix_rounds_median": statistics.median(fix_rounds) if fix_rounds else None,
-        "test_fix_prs": test_fix,
+        "test_fix_prs": test_fix, "reverts": reverts, "changes_verdicts": changes,
         "examples_long_wait": [{"number": p["number"], "title": p.get("title"), "wait_hours": round(w / 60.0, 1)}
                                for w, p in wait_rows[:5] if w > 120],
     }, [w for w in waits], merged
@@ -453,7 +462,7 @@ def ci_metrics(runs, merged, default_branch, n_merged):
         "workflows": workflows,
         "runs_per_merged_pr": round(len(counted) / n_merged, 1) if n_merged else None,
         "duplicate_main_runs": dup_runs, "duplicate_main_minutes": round(dup_min),
-        "red_main_commits": len(red),
+        "red_main_commits": len(red), "red_main_shas": sorted(red),
     }
 
 
@@ -1253,9 +1262,198 @@ def recommendations(p, ci, dep, auto, inter, waits, window_days, default_branch,
     return out
 
 
+# ---------------------------------------------------------------- history, deltas, proposals
+
+HEADLINES = (
+    "prs.merged", "prs.open_to_merge_min.median", "prs.ci_min.median", "prs.wait_after_green_min.median",
+    "prs.wait_after_green_min.p90", "prs.wait_after_green_min.total_hours", "prs.waited_over_2h", "prs.waited_overnight",
+    "prs.merged_without_review", "prs.merged_after_tests_passed", "prs.test_fix_prs", "prs.reverts", "prs.changes_verdicts",
+    "ci.duplicate_main_runs", "ci.duplicate_main_minutes", "ci.red_main_commits",
+    "interruptions.questions", "interruptions.turns_ending_on_user", "interruptions.permission_denials",
+    "interruptions.short_approvals", "interruptions.per_active_day",
+    "efficiency.read_over_20k", "efficiency.read_over_20k_pct", "efficiency.bash_over_20k",
+    "efficiency.sessions_over_300k_context", "efficiency.model_mix_pct.opus", "efficiency.weighted_tokens",
+    "efficiency.subagent_weighted_pct", "efficiency.tool_error_pct")
+INCIDENTS = ("prs.reverts", "ci.red_main_commits", "prs.changes_verdicts")  # what a loosened setting must not make worse
+NOT_SETTINGS = ("version", "repo", "source", "applied_at")
+STRICT_TO_LOOSE = {  # docs/policy.md order, strictest first
+    "level": ["manual", "ai-review", "auto-merge", "autopilot"], "questions": ["ask-now", "batch", "decide-reversible"],
+    "sensitive.rule": ["human", "two-ai", "same"], "tests.lane": ["full", "fast-lane", "wave"], "read_cap": [True, False]}
+EFFICIENCY_LINES = (  # (metric, limit, the CLAUDE.md line)
+    ("efficiency.read_over_20k_pct", 25, "Grep or search first, then Read with offset/limit; never Read a whole file over ~300 lines."),
+    ("efficiency.bash_over_20k", 100, "Pipe Bash output through head, tail or grep so a result stays under ~200 lines."))
+
+
+def dig(d, path):
+    for k in path.split("."):
+        d = d.get(k) if isinstance(d, dict) else None
+    return d
+
+
+def flatten(d, pre=""):
+    out = {}
+    for k, v in (d or {}).items():
+        if isinstance(v, dict) and v:
+            out.update(flatten(v, pre + k + "."))
+        else:
+            out[pre + k] = v
+    return out
+
+
+def current_policy(repo):
+    """The repo's .github/autopilot.json minus bookkeeping fields; None when there is no file, False when unreadable."""
+    try:
+        pol = json.loads(fetch_text(repo, ".github/autopilot.json"))
+    except GhError as e:
+        return None if e.status == 404 else False
+    except ValueError:
+        return False
+    return {k: v for k, v in pol.items() if k not in NOT_SETTINGS} if isinstance(pol, dict) else False
+
+
+def history_file(folder, repo):
+    return Path(folder).expanduser() / (repo.replace("/", "__") + ".jsonl")
+
+
+def read_history(folder, repo):
+    """Past runs, oldest first. A missing file, a cut-off last line or a junk line is skipped, never fatal."""
+    try:
+        lines = history_file(folder, repo).read_text().splitlines()
+    except OSError:
+        return []
+    out = []
+    for ln in lines:
+        try:
+            e = json.loads(ln)
+        except ValueError:
+            continue
+        if isinstance(e, dict):
+            out.append(e)
+    return out
+
+
+def append_history(folder, repo, entry):
+    f = history_file(folder, repo)
+    f.parent.mkdir(parents=True, exist_ok=True)
+    old = f.read_text() if f.exists() else ""
+    with open(f, "a") as fh:
+        fh.write(("\n" if old and not old.endswith("\n") else "") + json.dumps(entry, default=str) + "\n")
+
+
+def settings_changed(prev, cur):
+    a, b = flatten(prev.get("settings")), flatten(cur.get("settings"))
+    return sorted(k for k in set(a) | set(b) if a.get(k) != b.get(k))
+
+
+def since_last(cur, prev):
+    out = {}
+    for k, v in (cur.get("metrics") or {}).items():
+        pv = (prev.get("metrics") or {}).get(k)
+        if isinstance(v, (int, float)) and isinstance(pv, (int, float)):
+            out[k] = {"previous": pv, "change": round(v - pv, 1)}
+    return {"previous_date": prev.get("date"), "metrics": out, "settings_changed": settings_changed(prev, cur)}
+
+
+def incident_dirs(merged, red_shas):
+    """Top-level directories of reverted/hotfix PRs and PRs whose merge broke main: {dir: how many such PRs touched it}."""
+    out = {}
+    for p, _c, _m in merged:
+        shas = {(p.get("mergeCommit") or {}).get("oid"), p.get("headRefOid")}
+        if INCIDENT_RE.search(p.get("title") or "") or shas & set(red_shas):
+            for d in {f["path"].split("/")[0] for f in p.get("files") or [] if "/" in f.get("path", "")}:
+                out[d] = out.get(d, 0) + 1
+    return out
+
+
+def _n(entry, key):
+    return (entry.get("metrics") or {}).get(key) or 0
+
+
+def _rank(field, v):
+    v = bool(v) if field == "read_cap" else v
+    order = STRICT_TO_LOOSE[field]
+    return order.index(v) if v in order else None
+
+
+def rule_revert_loosening(cur, hist):
+    """(a) A field was loosened in the previous run's settings_changed and things got worse since: propose reverting it."""
+    if len(hist) < 2:
+        return []
+    before, mid = hist[-2], hist[-1]
+    worse = [k for k in INCIDENTS if _n(cur, k) > _n(before, k)]
+    if not worse:
+        return []
+    a, b, c = (flatten(e.get("settings")) for e in (before, mid, cur))
+    ev = "; ".join("%s %s -> %s" % (k, _n(before, k), _n(cur, k)) for k in INCIDENTS)
+    return [{"field": f, "from": c[f], "to": a.get(f),
+             "reason": "%s was loosened (%s -> %s) and %s went up since." % (f, a.get(f), b.get(f), ", ".join(worse)),
+             "evidence": ev}
+            for f in STRICT_TO_LOOSE
+            if _rank(f, a.get(f)) is not None and _rank(f, b.get(f)) is not None and _rank(f, b.get(f)) > _rank(f, a.get(f))
+            and c.get(f) == b.get(f)]
+
+
+def rule_loosen_level(cur, hist):
+    """(b) A level stricter than auto-merge held 3 runs in a row with no incidents: propose one notch looser."""
+    runs = (hist + [cur])[-3:]
+    pols = [flatten(r.get("settings")) for r in runs]
+    levels = [p.get("level") for p in pols]
+    order = STRICT_TO_LOOSE["level"]
+    if len(runs) < 3 or len(set(levels)) != 1 or levels[0] not in order[:2] or pols[-1].get("pipeline", "gate") != "gate":
+        return []
+    if any(_n(r, k) for r in runs for k in INCIDENTS):
+        return []
+    return [{"field": "level", "from": levels[0], "to": order[order.index(levels[0]) + 1],
+             "reason": "Level %s held for 3 audits with no reverts, no failed runs on main and no CHANGES verdicts." % levels[0],
+             "evidence": "3 runs, %d changes merged, 0 incidents" % sum(_n(r, "prs.merged") for r in runs)}]
+
+
+def rule_hot_dirs(cur, hist):
+    """(c) 3+ reverts/broken merges in one top-level directory that sensitive.paths does not cover: propose adding it."""
+    paths = flatten(cur.get("settings")).get("sensitive.paths") or []
+    hot = sorted(d for d, n in (cur.get("incident_dirs") or {}).items() if n >= 3 and not lanes.matches(d + "/x", paths))
+    if not hot:
+        return []
+    return [{"field": "sensitive.paths", "from": paths, "to": paths + [d + "/**" for d in hot],
+             "reason": "Reverts or failed runs on main keep landing in %s." % ", ".join(d + "/" for d in hot),
+             "evidence": ", ".join("%s: %d changes" % (d, cur["incident_dirs"][d]) for d in hot)}]
+
+
+def rule_efficiency(cur, hist):
+    """(d) Big tool results over the limit in this run and the one before: propose a CLAUDE.md line for the repo."""
+    if not hist:
+        return []
+    return [{"field": "claude_md", "from": None, "to": line,
+             "reason": "%s was over %s in two audits in a row." % (k, lim),
+             "evidence": "%s -> %s" % (_n(hist[-1], k), _n(cur, k))}
+            for k, lim, line in EFFICIENCY_LINES if _n(cur, k) > lim and _n(hist[-1], k) > lim]
+
+
+RULES = (rule_revert_loosening, rule_loosen_level, rule_hot_dirs, rule_efficiency)
+
+
+def propose(cur, hist):
+    return [p for rule in RULES for p in rule(cur, hist)]
+
+
+def add_history(result, policy, folder, repo, now, window_days):
+    """Compare this run with the repo's past runs (since_last, proposals), then record it. `policy` False = unreadable."""
+    hist = read_history(folder, repo) if folder else []
+    if policy is False:  # could not read the file: assume unchanged rather than invent a settings change
+        policy = hist[-1].get("settings") if hist else None
+    cur = {"date": iso(now)[:10], "generated_at": iso(now), "window_days": window_days,
+           "metrics": {k: dig(result, k) for k in HEADLINES if dig(result, k) is not None},
+           "incident_dirs": result.get("incident_dirs") or {}, "settings": policy}
+    if hist:
+        result["since_last"] = since_last(cur, hist[-1])
+    result["proposals"] = propose(cur, hist)
+    if folder:
+        append_history(folder, repo, cur)
+
+
 # ---------------------------------------------------------------- one repo
 
-def audit_repo(repo, since, now, window_days, inter_by_repo, tz, log=lambda m: None):
+def audit_repo(repo, since, now, window_days, inter_by_repo, tz, log=lambda m: None, history_dir=None):
     notes = []
     try:
         meta = gh_api("repos/%s" % repo)
@@ -1282,7 +1480,7 @@ def audit_repo(repo, since, now, window_days, inter_by_repo, tz, log=lambda m: N
         notes.append(bp_note)
 
     log("pull requests")
-    fields = "number,title,createdAt,mergedAt,headRefOid,headRefName,mergeCommit,author,reviews,comments"
+    fields = "number,title,createdAt,mergedAt,headRefOid,headRefName,mergeCommit,author,reviews,comments,files"
     search = "merged:>=%s" % date
     base = ["pr", "list", "--repo", repo, "--state", "merged", "--search", search, "--limit", str(MAX_PRS)]
     prs = None
@@ -1332,6 +1530,7 @@ def audit_repo(repo, since, now, window_days, inter_by_repo, tz, log=lambda m: N
     notes.extend(install_notes)
     result["prs"] = pr_stats
     result["ci"] = ci_metrics(runs, merged, branch, len(merged))
+    result["incident_dirs"] = incident_dirs(merged, result["ci"].pop("red_main_shas"))
     result["deploy"] = deploy_metrics(wf_list, wf_text, runs, merged, branch)
 
     log("settings")
@@ -1350,6 +1549,7 @@ def audit_repo(repo, since, now, window_days, inter_by_repo, tz, log=lambda m: N
     result["recommendations"] = recommendations(pr_stats, result["ci"], result["deploy"], auto, inter, waits,
                                                 window_days, branch, (hint, evidence), eff)
     result["notes"] = notes
+    add_history(result, step("Settings file", lambda: current_policy(repo), False), history_dir, repo, now, window_days)
     return result
 
 
@@ -1412,6 +1612,7 @@ def parse_args(argv=None):
                     help="Claude Code projects folder; repeat for several (default: ~/.claude/projects)")
     ap.add_argument("--tz", metavar="ZONE", help="time zone for overnight waits, e.g. America/New_York (default: this computer's)")
     ap.add_argument("--checkout", action="append", default=[], metavar="OWNER/NAME=PATH")
+    ap.add_argument("--history-dir", metavar="DIR", help="where each run's summary is appended (default: %s)" % HISTORY_DIR)
     ap.add_argument("--out", required=True, metavar="FILE")
     return ap.parse_args(argv)
 
@@ -1447,7 +1648,8 @@ def main(argv=None, now=None):
         print("[%d/%d] %s" % (i, len(repos), repo), file=sys.stderr)
         try:
             out.append(audit_repo(repo, since, now, window_days, inter, tz,
-                                  log=lambda m, repo=repo: print("    %s: %s" % (repo, m), file=sys.stderr)))
+                                  log=lambda m, repo=repo: print("    %s: %s" % (repo, m), file=sys.stderr),
+                                  history_dir=args.history_dir or HISTORY_DIR))
         except Exception as e:  # never crash the whole audit for one repo
             out.append({"repo": repo, "error": "%s: %s" % (type(e).__name__, e)})
     report = {"generated_at": iso(now), "since": iso(since), "window_days": window_days, "repos": out,

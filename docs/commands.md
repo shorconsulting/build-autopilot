@@ -79,7 +79,8 @@ Read-only. Never change a repo, GitHub setting or workflow during an audit.
    several minutes for an org; run it in the background and wait for it.
 2. For each repo in the output without an `error`, write `audits/<owner>__<name>` with `ArtifactData` `set` (use one
    `batch` for several repos): the repo object plus `generated_at` and `window_days`. Write numbers only. The script
-   never includes transcript text; don't add any.
+   never includes transcript text; don't add any. The script itself appends the run to
+   `~/.build-autopilot/history/` and adds `since_last` and `proposals` to each repo; write them as they are.
 3. Reply with the stdout summary, the page link, and, for each repo, the one recommendation that saves the most
    time. Don't list everything; the page does that.
 
@@ -116,7 +117,7 @@ Turns the page's choices into the repo's `.github/autopilot.json`.
    `settings/_defaults`. If neither exists, say so and stop for that repo.
 2. Build the policy file exactly as `docs/policy.md` describes: `version: 1`, `repo`, `phase` (leave it out when the page has none: the repo's settings were saved before phases existed), `pipeline` (default `gate`),
    `required_checks`, `level`, `sensitive`, `questions`, `tests` (with `suites` when the page has any), `always_ask`, `source` (the page link) and
-   `applied_at` (now, UTC). Drop page-only fields (`dismissed`, `updated_by`, `updated_at`).
+   `applied_at` (now, UTC). Drop page-only fields (`dismissed`, `updated_by`, `updated_at`, `claude_md`).
    - `pipeline: gate`: the pull request also adds the gate's files (`docs/v2-install.md`, "What gets installed").
      Afterwards, tell the person to run `scripts/setup-github-gate.sh OWNER/REPO --ruleset` once it's merged.
    - `pipeline: own` or `none`: the pull request changes only `.github/autopilot.json` and the CLAUDE.md section.
@@ -136,7 +137,10 @@ Turns the page's choices into the repo's `.github/autopilot.json`.
      job on `pull_request`, the full suite on `push` to the default branch with a concurrency group that has
      `cancel-in-progress: false`) and make them. Workflow files are sensitive paths: this is part of the same
      pull request, which is never auto-merged.
-3. If the file on the default branch already matches (ignoring `applied_at`), report "already applied" and stop for
+   - `claude_md` (accepted proposals, a list of lines): append each line the repo's `CLAUDE.md` does not already
+     contain, under a `## Context habits` heading, in the same pull request. List each accepted proposal and its
+     evidence (from the audit's `proposals`) in the body.
+3. If the file on the default branch already matches (ignoring `applied_at`) and every accepted `claude_md` line is in `CLAUDE.md`, report "already applied" and stop for
    that repo.
 4. Otherwise open a pull request on a branch `autopilot/policy-<date>` that changes only
    `.github/autopilot.json` and, if it lacks one, adds this section to the repo's `CLAUDE.md` (so Sling and sessions

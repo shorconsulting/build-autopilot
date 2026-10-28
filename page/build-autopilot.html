@@ -85,6 +85,7 @@ header.top p { max-width: 64ch; color: var(--muted) }
 .facts > div { display: grid; gap: 2px; border-top: 1px solid var(--line); padding-top: 10px; min-width: 0 }
 .facts b { font: 600 1.5rem/1.1 var(--f-display) }
 .facts span { font-size: .88rem; color: var(--muted) }
+.facts .delta { font: 500 .75rem/1 var(--f-display); margin-left: 6px; color: var(--muted) }
 @media (max-width: 760px) { .facts { grid-template-columns: repeat(2, minmax(0, 1fr)) } }
 
 .recs { display: grid; gap: 12px }
@@ -218,6 +219,7 @@ details > summary { cursor: pointer; color: var(--muted) }
           </div>
           <div class="facts" id="facts"></div>
           <p class="note" id="deployNote"></p>
+          <p class="note" id="sinceNote" hidden></p>
         </div>
         <div class="panel" id="effPanel" hidden>
           <div class="panel-head"><h2>Context efficiency</h2><span class="note" id="effNote"></span></div>
@@ -495,15 +497,24 @@ function renderTime(slug) {
   $("bar-w").style.flex = `${w / tot} 1 0`; $("bar-w").textContent = `${fmtH(w)} h waiting`;
   $("bar").setAttribute("aria-label", `${fmtH(m)} hours a week of tests running, ${fmtH(w)} hours a week waiting on a person`);
   const f = $("facts"); f.textContent = "";
-  const fact = (big, small) => f.append(el("div", {}, el("b", { class: "num", text: big }), el("span", { text: small })));
-  fact(fmtMin(g(a, "prs.ci_min.median")), "tests take, for a typical change");
-  fact(fmtMin(g(a, "prs.wait_after_green_min.p90")), "the slowest tenth then wait for someone");
-  fact(`${g(a, "prs.waited_over_2h", 0)} of ${g(a, "prs.merged", 0)}`, "changes waited over 2 hours after passing");
-  fact(fmtH(g(a, "interruptions.per_active_day")), "times a day Claude stopped to ask");
+  const fact = (big, small, key) => f.append(el("div", {}, el("b", { class: "num", text: big }), delta(a, key), el("span", { text: small })));
+  fact(fmtMin(g(a, "prs.ci_min.median")), "tests take, for a typical change", "prs.ci_min.median");
+  fact(fmtMin(g(a, "prs.wait_after_green_min.p90")), "the slowest tenth then wait for someone", "prs.wait_after_green_min.p90");
+  fact(`${g(a, "prs.waited_over_2h", 0)} of ${g(a, "prs.merged", 0)}`, "changes waited over 2 hours after passing", "prs.waited_over_2h");
+  fact(fmtH(g(a, "interruptions.per_active_day")), "times a day Claude stopped to ask", "interruptions.per_active_day");
   const merged = g(a, "prs.merged", 0), pct = n => merged && n != null ? `${Math.round(100 * n / merged)}%` : "–";
-  fact(pct(g(a, "prs.merged_after_tests_passed")), "of changes merged after their tests passed");
-  fact(pct(g(a, "prs.merged_without_review")), "of changes merged with no review");
+  fact(pct(g(a, "prs.merged_after_tests_passed")), "of changes merged after their tests passed", "prs.merged_after_tests_passed");
+  fact(pct(g(a, "prs.merged_without_review")), "of changes merged with no review", "prs.merged_without_review");
   $("deployNote").textContent = g(a, "deploy.note", "") || "";
+  const ch = g(a, "since_last.settings_changed", []) || [];
+  $("sinceNote").hidden = !ch.length;
+  $("sinceNote").textContent = ch.length ? `Settings changed since last audit: ${ch.join(", ")}` : "";
+}
+
+// the change since the previous audit, as a small up/down figure next to a number (counts or the raw metric; nothing when flat)
+function delta(a, key) {
+  const c = g(a, "since_last.metrics", {})[key], n = c && c.change;
+  return el("i", { class: "delta", title: c ? `was ${c.previous} at the last audit` : "", text: n ? `${n > 0 ? "▲" : "▼"} ${fmtH(Math.abs(n))}` : "" });
 }
 
 function renderEfficiency(slug) {
@@ -511,18 +522,31 @@ function renderEfficiency(slug) {
   $("effPanel").hidden = !e || !e.tool_results;
   if (!e) return;
   const f = $("effFacts"); f.textContent = "";
-  const fact = (big, small) => f.append(el("div", {}, el("b", { class: "num", text: big }), el("span", { text: small })));
+  const a = state.audits[slug];
+  const fact = (big, small, key) => f.append(el("div", {}, el("b", { class: "num", text: big }), delta(a, key), el("span", { text: small })));
   const mix = e.model_mix_pct || {};
   $("effNote").textContent = `${e.sessions} sessions · ${e.subagent_transcripts} subagent transcripts`;
-  fact(`${e.read_over_20k} of ${e.read_results}`, `Read results over 20k characters (avg ${Math.round((e.read_over_20k_avg_chars || 0) / 1000)}k)`);
-  fact(String(e.bash_over_20k), "Bash results over 20k characters");
-  fact(`${mix.opus || 0}% Opus`, `${mix.sonnet || 0}% Sonnet · ${mix.haiku || 0}% Haiku · ${mix.fable || 0}% Fable`);
-  fact(`${e.subagent_weighted_pct}%`, "of weighted token spend is subagents");
-  fact(`${e.tool_error_pct}%`, `of tool results were errors (${e.tool_errors} of ${e.tool_results})`);
-  fact(String(e.sessions_over_300k_context), "sessions grew past 300k context");
+  fact(`${e.read_over_20k} of ${e.read_results}`, `Read results over 20k characters (avg ${Math.round((e.read_over_20k_avg_chars || 0) / 1000)}k)`, "efficiency.read_over_20k");
+  fact(String(e.bash_over_20k), "Bash results over 20k characters", "efficiency.bash_over_20k");
+  fact(`${mix.opus || 0}% Opus`, `${mix.sonnet || 0}% Sonnet · ${mix.haiku || 0}% Haiku · ${mix.fable || 0}% Fable`, "efficiency.model_mix_pct.opus");
+  fact(`${e.subagent_weighted_pct}%`, "of weighted token spend is subagents", "efficiency.subagent_weighted_pct");
+  fact(`${e.tool_error_pct}%`, `of tool results were errors (${e.tool_errors} of ${e.tool_results})`, "efficiency.tool_error_pct");
+  fact(String(e.sessions_over_300k_context), "sessions grew past 300k context", "efficiency.sessions_over_300k_context");
 }
 
+// A proposal from the audit's rules table, shaped like a recommendation so it renders and turns on the same way.
+function proposalRecs(a) {
+  return (g(a || {}, "proposals", []) || []).map(p => ({
+    id: `proposal:${p.field}:${JSON.stringify(p.to)}`, title: p.field === "claude_md" ? "Add a line to this repo's CLAUDE.md" : `Change ${p.field} to ${Array.isArray(p.to) ? p.to.join(", ") : p.to}`,
+    why: `${p.reason} Evidence: ${p.evidence}.${p.field === "claude_md" ? ` Line: "${p.to}"` : ""}`, saves_hours_per_week: 0, risk: p.field === "level" ? "medium" : "low",
+    pros: [p.evidence], cons: ["Reaches the repo only through a settings pull request that a person merges"], proposal: p }));
+}
+function getPath(o, path) { return path.split(".").reduce((x, k) => (x == null ? x : x[k]), o); }
+function setPath(o, path, v) { const ks = path.split("."), last = ks.pop(); ks.reduce((x, k) => (x[k] = x[k] || {}), o)[last] = v; }
+
 function recIsOn(rec, st) {
+  const pr = rec.proposal;
+  if (pr) return pr.field === "claude_md" ? (st.claude_md || []).includes(pr.to) : JSON.stringify(getPath(st, pr.field)) === JSON.stringify(pr.to);
   const k = g(rec, "setting.key"), v = g(rec, "setting.value");
   if (!k) return false;
   if (k === "merge") return LEVEL_INDEX[st.level] >= 2;
@@ -535,6 +559,8 @@ function recIsOn(rec, st) {
   return false;
 }
 function applyRec(st, rec) {
+  const pr = rec.proposal;
+  if (pr) { if (pr.field === "claude_md") st.claude_md = [...new Set([...(st.claude_md || []), pr.to])]; else setPath(st, pr.field, pr.to); return st; }
   const k = g(rec, "setting.key"), v = g(rec, "setting.value");
   const atLeast = id => { if (LEVEL_INDEX[st.level] < LEVEL_INDEX[id]) st.level = id; };
   if (k === "merge") atLeast("auto-merge");
@@ -550,12 +576,12 @@ function applyRec(st, rec) {
 function renderRecs(slug) {
   const box = $("recs"); box.textContent = "";
   const a = state.audits[slug]; const st = settingsFor(slug);
-  const recs = (g(a || {}, "recommendations", []) || []).slice().sort((x, y) => (y.saves_hours_per_week || 0) - (x.saves_hours_per_week || 0));
+  const recs = (g(a || {}, "recommendations", []) || []).slice().sort((x, y) => (y.saves_hours_per_week || 0) - (x.saves_hours_per_week || 0)).concat(proposalRecs(a));
   if (!recs.length) { box.append(el("p", { class: "muted", text: a ? "Nothing stands out in this repo's last audit." : "Recommendations appear after the first audit." })); return; }
   const dismissed = new Set(st.dismissed || []);
   const shown = recs.filter(r => !dismissed.has(r.id));
   for (const r of shown) {
-    const key = g(r, "setting.key"), oneOff = !key || key === "none";
+    const key = g(r, "setting.key"), oneOff = (!key || key === "none") && !r.proposal;
     const req = oneOff ? state.requests[`${slug}__${r.id}`] : null;
     const on = recIsOn(r, st) || !!req;
     const actions = el("div", { class: "actions" });
@@ -755,7 +781,8 @@ function settingsBody(slug, st, now) {
   const prev = state.settings[slug] || null;
   return { repo: slug === "_defaults" ? null : repoOf(slug), phase: st.phase || null, pipeline: st.pipeline || "gate",
     required_checks: Array.isArray(st.required_checks) ? st.required_checks : null, level: st.level, sensitive: st.sensitive, questions: st.questions, tests: st.tests,
-    always_ask: st.always_ask, dismissed: st.dismissed || [], updated_at: now, updated_by: state.me || null, applied_at: prev ? prev.applied_at || null : null };
+    always_ask: st.always_ask, dismissed: st.dismissed || [], ...(st.read_cap !== undefined ? { read_cap: st.read_cap } : {}),
+    ...((st.claude_md || []).length ? { claude_md: st.claude_md } : {}), updated_at: now, updated_by: state.me || null, applied_at: prev ? prev.applied_at || null : null };
 }
 
 async function saveSettings(slug, st, label) {

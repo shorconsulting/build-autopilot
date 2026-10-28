@@ -13,6 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import audit  # noqa: E402
 
+audit.HISTORY_DIR = tempfile.mkdtemp()  # main() tests must not write to the real ~/.build-autopilot
 FIX = Path(__file__).resolve().parent.parent / "tests" / "fixtures"
 NOW = dt.datetime(2026, 10, 15, 12, 0, tzinfo=dt.timezone.utc)
 READ_ONLY_GH = {("api",), ("pr", "list"), ("issue", "list"), ("repo", "list")}
@@ -682,6 +683,80 @@ class EndToEnd(Base):
             self.assertEqual(names, ["acme/widgets", "acme/gadgets"])
             gadgets = json.loads(Path(out).read_text())["repos"][1]
             self.assertIn("error", gadgets)  # unreadable repo is a record, not a crash
+
+
+def run(metrics=None, settings=None, dirs=None):
+    return {"metrics": metrics or {}, "settings": settings, "incident_dirs": dirs or {}}
+
+
+class History(unittest.TestCase):
+    def test_append_and_read_back_tolerates_a_partial_file(self):
+        d = tempfile.mkdtemp()
+        self.assertEqual(audit.read_history(d, "a/b"), [])  # missing file
+        audit.append_history(d, "a/b", {"n": 1})
+        with open(audit.history_file(d, "a/b"), "a") as fh:
+            fh.write('{"n": 2, "cut')  # killed mid-write
+        audit.append_history(d, "a/b", {"n": 3})
+        self.assertEqual([e["n"] for e in audit.read_history(d, "a/b")], [1, 3])
+
+    def test_since_last_has_numbers_and_settings_changed(self):
+        prev = run({"prs.merged": 4, "prs.ci_min.median": 20.0}, {"level": "manual", "tests": {"lane": "full"}})
+        cur = run({"prs.merged": 6, "prs.ci_min.median": 18.5}, {"level": "auto-merge", "tests": {"lane": "full"}})
+        s = audit.since_last(cur, prev)
+        self.assertEqual(s["metrics"]["prs.merged"], {"previous": 4, "change": 2})
+        self.assertEqual(s["metrics"]["prs.ci_min.median"]["change"], -1.5)
+        self.assertEqual(s["settings_changed"], ["level"])
+
+
+class HistoryRun(Base):
+    def test_second_run_of_the_same_repo_gets_since_last(self):
+        audit.gh = FakeGh()
+        d = tempfile.mkdtemp()
+        runs = [audit.audit_repo("acme/widgets", self.since, NOW, self.days, {}, self.tz, history_dir=d) for _ in range(2)]
+        self.assertNotIn("since_last", runs[0])
+        self.assertEqual(runs[1]["since_last"]["metrics"]["prs.merged"], {"previous": 4, "change": 0})
+        self.assertEqual(len(audit.read_history(d, "acme/widgets")), 2)
+
+
+class Proposals(unittest.TestCase):
+    def test_a_loosened_field_that_got_worse_is_proposed_for_revert(self):
+        before = run({"prs.reverts": 0}, {"level": "ai-review"})
+        mid = run({"prs.reverts": 0}, {"level": "auto-merge"})
+        cur = run({"prs.reverts": 2}, {"level": "auto-merge"})
+        p = audit.rule_revert_loosening(cur, [before, mid])
+        self.assertEqual([(x["field"], x["from"], x["to"]) for x in p], [("level", "auto-merge", "ai-review")])
+        self.assertIn("prs.reverts 0 -> 2", p[0]["evidence"])
+        self.assertEqual(audit.rule_revert_loosening(run({"prs.reverts": 0}, {"level": "auto-merge"}), [before, mid]), [])
+
+    def test_a_quiet_strict_level_is_loosened_one_notch(self):
+        r = run({"prs.merged": 5}, {"level": "ai-review"})
+        self.assertEqual(audit.rule_loosen_level(r, [r, r])[0]["to"], "auto-merge")
+        self.assertEqual(audit.rule_loosen_level(r, [r]), [])  # only 2 runs
+        bad = run({"prs.merged": 5, "ci.red_main_commits": 1}, {"level": "ai-review"})
+        self.assertEqual(audit.rule_loosen_level(r, [bad, r]), [])
+        auto = run({}, {"level": "auto-merge"})
+        self.assertEqual(audit.rule_loosen_level(auto, [auto, auto]), [])  # not stricter than auto-merge
+
+    def test_three_incidents_in_one_directory_propose_a_sensitive_path(self):
+        cur = run(settings={"sensitive": {"paths": ["**/auth/**"]}}, dirs={"api": 3, "web": 2, "auth": 4})
+        p = audit.rule_hot_dirs(cur, [])
+        self.assertEqual(p[0]["to"], ["**/auth/**", "api/**"])  # web has only 2; auth is already covered
+        self.assertEqual(audit.rule_hot_dirs(run(dirs={"web": 2}), []), [])
+
+    def test_incident_dirs_count_reverts_and_broken_merges(self):
+        t = dt.datetime(2026, 10, 1, tzinfo=dt.timezone.utc)
+        prs = [({"title": "Revert x", "files": [{"path": "api/a.py"}, {"path": "README.md"}]}, t, t),
+               ({"title": "Add y", "headRefOid": "red", "files": [{"path": "api/b.py"}]}, t, t),
+               ({"title": "Add z", "files": [{"path": "api/c.py"}]}, t, t)]
+        self.assertEqual(audit.incident_dirs(prs, ["red"]), {"api": 2})
+
+    def test_two_big_result_runs_in_a_row_propose_a_claude_md_line(self):
+        hi, lo = run({"efficiency.read_over_20k_pct": 30, "efficiency.bash_over_20k": 101}), run({"efficiency.read_over_20k_pct": 30})
+        p = audit.rule_efficiency(hi, [hi])
+        self.assertEqual([x["field"] for x in p], ["claude_md", "claude_md"])
+        self.assertIn("Read with offset/limit", p[0]["to"])
+        self.assertEqual(len(audit.rule_efficiency(hi, [lo])), 1)  # bash was fine last time
+        self.assertEqual(audit.rule_efficiency(hi, []), [])
 
 
 if __name__ == "__main__":
