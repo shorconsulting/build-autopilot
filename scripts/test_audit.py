@@ -510,6 +510,30 @@ class Transcripts(Base):
         self.assertEqual(i["per_active_day"], 1.7)
         self.assertEqual((meta["project_folders"], meta["mapped"], meta["unmapped"]), (3, 2, 1))
 
+    def test_efficiency_counts_from_a_tiny_transcript(self):
+        def ev(kind, ts, content, **kw):
+            return json.dumps(dict(type=kind, timestamp=ts, sessionId="s1", message=dict(content=content, **kw)))
+        ts = (self.since + dt.timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        use = lambda n: {"id": n, "name": "Read", "type": "tool_use", "input": {}}
+        res = lambda n, size, err=False: {"type": "tool_result", "tool_use_id": n, "is_error": err, "content": "x" * size}
+        usage = {"input_tokens": 10, "cache_read_input_tokens": 100, "cache_creation_input_tokens": 10, "output_tokens": 2}
+        lines = [ev("assistant", ts, [use("r1")], id="m1", model="claude-opus-5-5", usage=usage),
+                 ev("assistant", ts, [use("r1")], id="m1", model="claude-opus-5-5", usage=usage),  # streamed twice
+                 ev("assistant", ts, [{"id": "b1", "name": "Bash", "type": "tool_use", "input": {}}], id="m2",
+                    model="claude-sonnet-5-5", usage=usage),
+                 ev("user", ts, [res("r1", 30000), res("b1", 30000, True)])]
+        with tempfile.TemporaryDirectory() as tmp:
+            sdir = Path(tmp) / "-acme-widgets"
+            (sdir / "s1" / "subagents").mkdir(parents=True)
+            (sdir / "s1.jsonl").write_text("\n".join(lines))
+            (sdir / "s1" / "subagents" / "agent-a.jsonl").write_text(lines[2])
+            e = self.collect([tmp])[0]["acme/widgets"]["efficiency"]
+        self.assertEqual((e["sessions"], e["subagent_transcripts"]), (1, 1))
+        self.assertEqual((e["read_results"], e["read_over_20k"], e["bash_over_20k"]), (1, 1, 1))
+        self.assertEqual(e["model_mix_pct"]["opus"], 50.0)  # m1 once; m2 seen in the session and the subagent
+        self.assertEqual((e["tool_results"], e["tool_errors"]), (2, 1))
+        self.assertEqual(e["weighted_tokens"], 2 * (10 + 10 + 20 + 10))  # m1 and m2: 10 + 0.1*100 + 2*10 + 5*2
+
     def test_no_transcript_text_reaches_the_output(self):
         inter, meta = self.collect([str(FIX / "transcripts")])
         self.assertNotIn("SECRETPHRASE", json.dumps([inter, meta]))

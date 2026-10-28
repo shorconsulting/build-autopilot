@@ -906,6 +906,82 @@ def interruption_summary(acc):
             "per_active_day": round(total / days, 1) if days else 0.0}
 
 
+BIG_RESULT = 20000  # characters; a tool result this long is mostly noise the model has to carry
+FAMILIES = ("opus", "sonnet", "haiku", "fable")
+CTX_HANDOFF = 300000  # tokens in one message's context before an orchestrator should hand off
+TOKEN_WEIGHTS = (1.0, 0.1, 2.0, 5.0)  # input, cache read, cache write, output
+
+
+def new_efficiency():
+    return {"sessions": set(), "subagents": set(), "msgs": {}, "results": {}, "errors": 0, "tool_results": 0,
+            "over_ctx": set(), "reads": 0, "read_big": 0, "read_big_chars": 0, "bash_big": 0}
+
+
+def result_chars(content):
+    if isinstance(content, str):
+        return len(content)
+    return sum(len(x.get("text", "")) for x in content if isinstance(x, dict)) if isinstance(content, list) else 0
+
+
+def scan_efficiency(path, since, acc, sub):
+    """Counts only, from one transcript file (a session, or a subagent when `sub`). Never keeps text."""
+    names = {}
+    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            if not line.startswith("{"):
+                continue
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            ts = parse_ts(e.get("timestamp"))
+            kind = e.get("type")
+            if not ts or ts < since or kind not in ("user", "assistant"):
+                continue
+            acc["subagents" if sub else "sessions"].add(e.get("agentId") if sub else (e.get("sessionId") or str(path)))
+            msg = e.get("message") or {}
+            content = msg.get("content")
+            if kind == "assistant" and isinstance(msg, dict):
+                u = msg.get("usage") or {}
+                use = (u.get("input_tokens") or 0, u.get("cache_read_input_tokens") or 0,
+                       u.get("cache_creation_input_tokens") or 0, u.get("output_tokens") or 0)
+                model = str(msg.get("model") or "")
+                if msg.get("id") and any(f in model for f in FAMILIES):  # last line of a streamed message wins
+                    acc["msgs"][msg["id"]] = (next(f for f in FAMILIES if f in model), sub,
+                                              sum(w * n for w, n in zip(TOKEN_WEIGHTS, use)))
+                if not sub and sum(use[:3]) > CTX_HANDOFF:
+                    acc["over_ctx"].add(e.get("sessionId") or str(path))
+                for it in content if isinstance(content, list) else []:
+                    if isinstance(it, dict) and it.get("type") == "tool_use":
+                        names[it.get("id")] = it.get("name")
+            elif kind == "user" and isinstance(content, list):
+                for it in content:
+                    if not isinstance(it, dict) or it.get("type") != "tool_result":
+                        continue
+                    acc["results"][it.get("tool_use_id")] = (names.get(it.get("tool_use_id")), result_chars(it.get("content")),
+                                                           bool(it.get("is_error")))
+
+
+def efficiency_summary(acc):
+    msgs = list(acc["msgs"].values())
+    total_w = sum(m[2] for m in msgs)
+    mix = {f: round(100.0 * sum(1 for m in msgs if m[0] == f) / len(msgs), 1) if msgs else 0.0 for f in FAMILIES}
+    res = list(acc["results"].values())
+    reads = [r for r in res if r[0] == "Read"]
+    big = [r[1] for r in reads if r[1] > BIG_RESULT]
+    return {"sessions": len(acc["sessions"]), "subagent_transcripts": len(acc["subagents"]),
+            "sessions_over_300k_context": len(acc["over_ctx"]),
+            "read_results": len(reads), "read_over_20k": len(big),
+            "read_over_20k_pct": round(100.0 * len(big) / len(reads), 1) if reads else 0.0,
+            "read_over_20k_avg_chars": round(sum(big) / len(big)) if big else 0,
+            "bash_over_20k": sum(1 for r in res if r[0] == "Bash" and r[1] > BIG_RESULT),
+            "assistant_messages": len(msgs), "model_mix_pct": mix,
+            "weighted_tokens": round(total_w),
+            "subagent_weighted_pct": round(100.0 * sum(m[2] for m in msgs if m[1]) / total_w, 1) if total_w else 0.0,
+            "tool_results": len(res), "tool_errors": sum(1 for r in res if r[2]),
+            "tool_error_pct": round(100.0 * sum(1 for r in res if r[2]) / len(res), 1) if res else 0.0}
+
+
 def encode_path(p):
     """Claude Code's project-folder name for a path: every non-alphanumeric character becomes '-'."""
     return re.sub(r"[^A-Za-z0-9]", "-", p)
@@ -1004,6 +1080,7 @@ def slug_repo(slug, repos, checkouts):
 def collect_interruptions(dirs, repos, checkouts, since, tz):
     """-> ({repo: summary}, meta). Only counts; never keeps transcript text."""
     accs = {r: new_interruptions() for r in repos}
+    effs = {r: new_efficiency() for r in repos}
     meta = {"dirs_scanned": [], "dirs_unreadable": [], "project_folders": 0, "mapped": 0, "unmapped": 0,
             "files_unreadable": 0}
     seen_dirs = set()
@@ -1032,27 +1109,26 @@ def collect_interruptions(dirs, repos, checkouts, since, tz):
                 meta["unmapped"] += 1
                 continue
             meta["mapped"] += 1
-            try:
-                files = sorted(os.listdir(sdir))
-            except OSError:
-                meta["files_unreadable"] += 1
-                continue
-            for f in files:
-                if not f.endswith(".jsonl"):
-                    continue
-                fp = os.path.join(sdir, f)
-                try:
-                    if dt.datetime.fromtimestamp(os.path.getmtime(fp), dt.timezone.utc) < since:
+            for root, _dirs, files in os.walk(sdir):
+                for f in sorted(files):
+                    if not f.endswith(".jsonl"):
                         continue
-                    scan_transcript(fp, since, accs[repo], tz)
-                except OSError:
-                    meta["files_unreadable"] += 1
-    return {r: interruption_summary(a) for r, a in accs.items()}, meta
+                    fp = os.path.join(root, f)
+                    sub = root != sdir
+                    try:
+                        if dt.datetime.fromtimestamp(os.path.getmtime(fp), dt.timezone.utc) < since:
+                            continue
+                        if not sub:
+                            scan_transcript(fp, since, accs[repo], tz)
+                        scan_efficiency(fp, since, effs[repo], sub)
+                    except OSError:
+                        meta["files_unreadable"] += 1
+    return {r: dict(interruption_summary(a), efficiency=efficiency_summary(effs[r])) for r, a in accs.items()}, meta
 
 
 # ---------------------------------------------------------------- recommendations
 
-def recommendations(p, ci, dep, auto, inter, waits, window_days, default_branch, pipeline=("gate", [])):
+def recommendations(p, ci, dep, auto, inter, waits, window_days, default_branch, pipeline=("gate", []), eff=None):
     weeks = window_days / 7.0
     out = []
     merged = p["merged"]
@@ -1150,6 +1226,30 @@ def recommendations(p, ci, dep, auto, inter, waits, window_days, default_branch,
             ["Claude stops stalling on routine, harmless commands"],
             ["The list needs a one-time review so nothing risky slips onto it"],
             "low", "none", None)
+    eff = eff or {}
+
+    def eff_rec(id_, title, why):
+        rec(id_, title, why, 0.0, ["Smaller context on every later message, so the same work costs less"],
+            ["Takes a habit change in how Claude is asked to work"], "low", "none", None)
+
+    if eff.get("read_over_20k", 0) >= 5:
+        eff_rec("cap-reads", "Cap Read with offset/limit and grep first",
+                "%d of %d Read results were over 20k characters (average %d)." % (
+                    eff["read_over_20k"], eff["read_results"], eff["read_over_20k_avg_chars"]))
+    if eff.get("bash_over_20k", 0) >= 5:
+        eff_rec("cap-bash", "Pipe Bash output through head/tail/grep",
+                "%d Bash results were over 20k characters." % eff["bash_over_20k"])
+    mix = eff.get("model_mix_pct") or {}
+    if eff.get("assistant_messages", 0) >= 100 and mix.get("haiku", 0) < 5 and mix.get("opus", 0) + mix.get("fable", 0) > 50:
+        eff_rec("route-to-haiku", "Route mechanical work to Haiku",
+                "Haiku wrote %.1f%% of messages; Opus and Fable wrote %.1f%%." % (mix["haiku"], mix.get("opus", 0) + mix.get("fable", 0)))
+    if eff.get("subagent_transcripts", 0) >= 20 and eff.get("subagent_weighted_pct", 0) > 50:
+        eff_rec("retask-agents", "Re-task agents via SendMessage instead of spawning",
+                "%d subagent transcripts carried %.1f%% of weighted token spend." % (
+                    eff["subagent_transcripts"], eff["subagent_weighted_pct"]))
+    if eff.get("sessions_over_300k_context", 0) >= 1:
+        eff_rec("handoff-at-300k", "Hand off orchestrators at 300k context",
+                "%d sessions grew past 300k tokens of context." % eff["sessions_over_300k_context"])
     return out
 
 
@@ -1244,10 +1344,11 @@ def audit_repo(repo, since, now, window_days, inter_by_repo, tz, log=lambda m: N
                                   "enforce_admins": bp["enforce_admins"], "status": bp["status"]},
             "codeowners": codeowners, "ai_review_workflow": ai_review, "sling_labels_used": sling}
     result["automation"] = auto
-    inter = inter_by_repo.get(repo) or interruption_summary(new_interruptions())
-    result["interruptions"] = inter
+    inter = dict(inter_by_repo.get(repo) or interruption_summary(new_interruptions()))
+    eff = inter.pop("efficiency", None) or efficiency_summary(new_efficiency())
+    result["interruptions"], result["efficiency"] = inter, eff
     result["recommendations"] = recommendations(pr_stats, result["ci"], result["deploy"], auto, inter, waits,
-                                                window_days, branch, (hint, evidence))
+                                                window_days, branch, (hint, evidence), eff)
     result["notes"] = notes
     return result
 

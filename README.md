@@ -21,6 +21,8 @@ Nothing about any particular person's repos is built in.
 | `/build-autopilot:setup`, `:install`, `:audit`, `:apply`, `:settings` | `setup` makes or connects your page and picks your repos; `install` takes a repo through every remaining step; `audit` fills the page; `apply` writes a repo's settings into `.github/autopilot.json` with one pull request; `apply --me` saves your own preferences on this computer. |
 | `autopilot-policy` skill | Makes every Claude session in a repo follow that repo's settings. |
 | `scripts/lanes.py` | Phases and test lanes: what each phase sets, which `tests.suites` a set of changed files runs (so the mobile suite runs when the app or the database changes, and not otherwise), and rewriting a workflow's `paths:` list from the policy. Waves (`phase: prelaunch`, the `wave` test lane) are the default. |
+| Context efficiency (in `scripts/audit.py` and the page) | Per repo, from the same transcripts: Read and Bash results over 20k characters, the Opus / Sonnet / Haiku mix, weighted token spend and the subagent share, tool-error rate, with fixed recommendations (counts only). |
+| `scripts/read_cap.py` (hook, opt-in) | Refuses a `Read` with no `limit` on a file over 300 lines when the repo's `.github/autopilot.json` has `"read_cap": true`; allows everything else and never fails closed. |
 | `docs/policy.md` | The settings, field by field, and what enforces each one today. |
 | `templates/github/` (v2) | The GitHub gate: a workflow that reviews every pull request with Claude, adds a second security review for sensitive files, and turns on auto-merge when the settings allow. Installed by `/build-autopilot:apply` following `docs/v2-install.md`; design and threat model in `docs/v2-report.md`. |
 
