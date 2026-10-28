@@ -162,6 +162,17 @@ lines, with a one-line reason telling Claude to grep first or pass `offset` and 
 allows every Read. Images, PDFs and notebooks are never refused, and the hook allows on any error. It reads the file
 from the session's working directory. Off by default; turn it on per repo.
 
+## Proposals
+
+Each audit is recorded (one line per run in `~/.build-autopilot/history/`), compared with the run before it (`since_last` on the page), and run through four fixed rules. A rule that fires adds a proposal to the repo's page with its evidence; nothing is tuned by a model and nothing adapts.
+
+1. **Revert a loosening that made things worse.** A setting (`level`, `questions`, `sensitive.rule`, `tests.lane`, `read_cap`) was made less strict between two audits, and reverts or hotfixes, failed runs on `main` after a merge, or CHANGES verdicts are higher now than in the audit before the loosening: propose putting that one setting back.
+2. **Loosen a quiet level.** `level` is `manual` or `ai-review` (stricter than `auto-merge`) for three audits in a row with no reverts, no failed runs on `main` and no CHANGES verdicts: propose the next level up (`manual` → `ai-review` → `auto-merge` → `autopilot`).
+3. **Protect the directory that keeps breaking.** Three or more reverted, hotfixed or main-breaking changes touched one top-level directory in the window and `sensitive.paths` does not cover it: propose adding `<dir>/**`.
+4. **Keep Claude's results small.** More than 25% of Read results over 20k characters, or more than 100 Bash results over 20k, in two audits in a row: propose a line for the repo's `CLAUDE.md` (grep first and Read with offset/limit; pipe Bash output through head, tail or grep).
+
+Turning a proposal on only saves it as a choice on the page. It reaches the repo when you run `/build-autopilot:apply`, which puts settings in `.github/autopilot.json` and any `CLAUDE.md` line in the same pull request. **Nothing changes a repo without a merged pull request**, and that pull request is never auto-merged.
+
 ## What enforces it
 
 | Setting | v1 (now) | v2 |
