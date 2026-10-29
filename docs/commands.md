@@ -75,7 +75,8 @@ Connects this computer to a Build Autopilot page and chooses which repos it trac
 Read-only. Never change a repo, GitHub setting or workflow during an audit.
 
 1. Run `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/audit.py` with the repos or `--org` from the arguments (default: the
-   current checkout's `owner/repo`), `--since` (default `30d`), and `--out` a file in your scratchpad. It can take
+   current checkout's `owner/repo`), `--since` (default `30d`), `--cost`, and `--out` a file in your scratchpad.
+   `--cost` lists every run of the last 30 days; leave it out only when the person says `--no-cost`. It can take
    several minutes for an org; run it in the background and wait for it.
 2. For each repo in the output without an `error`, write `audits/<owner>__<name>` with `ArtifactData` `set` (use one
    `batch` for several repos): the repo object plus `generated_at` and `window_days`. Write numbers only. The script
@@ -83,6 +84,19 @@ Read-only. Never change a repo, GitHub setting or workflow during an audit.
    `~/.build-autopilot/history/` and adds `since_last` and `proposals` to each repo; write them as they are.
 3. Reply with the stdout summary, the page link, and, for each repo, the one recommendation that saves the most
    time. Don't list everything; the page does that.
+
+## cost
+
+Read-only: what CI costs and which standard rules would cut it (`docs/policy.md`, "ci_cost").
+
+1. Run `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/ci_cost.py --repo OWNER/NAME [--repo ...] --out <scratchpad>/cost.json`
+   (default: the current checkout's repo) in the background; a busy repo takes several minutes. If `gh auth status`
+   lacks `admin:org`, say once that prices are list prices and that `gh auth refresh -h github.com -s admin:org` gives
+   the org's own.
+2. Write each repo's result into its audit document: `ArtifactData` `update` on `audits/<owner>__<name>` with
+   `{"cost": <the repo object>}`.
+3. Reply with, per repo: the 7 / 14 / 30-day dollars (and the 7-day number per month), the three most expensive
+   workflow-and-trigger rows, and the findings with the largest `saves_usd`. Offer `apply` for the findings.
 
 ## install
 
@@ -120,7 +134,8 @@ Turns the page's choices into the repo's `.github/autopilot.json`.
    `applied_at` (now, UTC). Drop page-only fields (`dismissed`, `updated_by`, `updated_at`, `claude_md`).
    - `pipeline: gate`: the pull request also adds the gate's files (`docs/v2-install.md`, "What gets installed").
      Afterwards, tell the person to run `scripts/setup-github-gate.sh OWNER/REPO --ruleset` once it's merged.
-   - `pipeline: own` or `none`: the pull request changes only `.github/autopilot.json` and the CLAUDE.md section.
+   - `pipeline: own` or `none`: the pull request changes only `.github/autopilot.json`, the CLAUDE.md section, and
+     the workflow edits for `tests.suites` and `ci_cost` below.
      Never add the gate's files, a ruleset or auto-merge to such a repo. If the gate's files are already there
      from an earlier choice, the pull request removes them (`.github/workflows/autopilot.yml`, `.github/autopilot/`),
      and you tell the person to delete the `build-autopilot` ruleset in the repo's settings.
@@ -137,6 +152,13 @@ Turns the page's choices into the repo's `.github/autopilot.json`.
      job on `pull_request`, the full suite on `push` to the default branch with a concurrency group that has
      `cancel-in-progress: false`) and make them. Workflow files are sensitive paths: this is part of the same
      pull request, which is never auto-merged.
+   - `ci_cost` (any `pipeline`, `own` included): write the field (default `{"rules": "standard", "off": []}`). Unless
+     `rules` is `none`, read the latest audit's `cost.windows.7.findings` (run `ci_cost.py` if the audit has no `cost`)
+     and, for each finding whose rule is not in `off`, make its `fix` in the named workflow, in this pull request. Keep
+     every required check reporting (a skipped heavy job still lets the aggregate check pass; never a workflow-level
+     `paths-ignore` on a workflow that holds a required check). Leave anything the repo's own rules protect (a
+     CODEOWNERS or "gate" path that needs its own review) to that review: say so in the body. List each finding with
+     its evidence and `saves_usd` in the body, and the total. `ci-shard-balance` and `ci-waste` are reported, not edited.
    - `claude_md` (accepted proposals, a list of lines): append each line the repo's `CLAUDE.md` does not already
      contain, under a `## Context habits` heading, in the same pull request. List each accepted proposal and its
      evidence (from the audit's `proposals`) in the body.

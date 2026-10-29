@@ -10,7 +10,7 @@
       "name": "build-autopilot",
       "source": "./",
       "description": "Read-only audit of pull-request waits, CI, deploys, repo settings and Claude interruptions, with suggested automation per repo.",
-      "version": "0.6.0"
+      "version": "0.7.0"
     }
   ]
 }

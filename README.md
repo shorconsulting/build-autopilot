@@ -24,6 +24,7 @@ Nothing about any particular person's repos is built in.
 | Context efficiency (in `scripts/audit.py` and the page) | Per repo, from the same transcripts: Read and Bash results over 20k characters, the Opus / Sonnet / Haiku mix, weighted token spend and the subagent share, tool-error rate, with fixed recommendations (counts only). |
 | History and deltas (in `scripts/audit.py`) | Every audit appends one line per repo to `~/.build-autopilot/history/` (`--history-dir` to move it); the next audit shows what changed since, next to each number on the page, and which settings were changed. |
 | Proposals (in `scripts/audit.py` and the page) | Four fixed rules over the history propose a settings change or a `CLAUDE.md` line, with evidence and a Turn on choice; they land only through the `apply` pull request a person merges (`docs/policy.md`, "Proposals"). |
+| `scripts/ci_cost.py` and `/build-autopilot:cost` | Read-only. What CI costs over 7, 14 and 30 days -- by workflow, by trigger, by job, by runner, and on cancelled or failed runs -- billed the way GitHub bills (each job rounded up to a minute), and the standard CI cost rules each workflow breaks, with the dollars each fix saves. The rules are on for every repo by default (`ci_cost` in `docs/policy.md`); `apply` makes the fixes. Also `audit.py --cost`. |
 | `scripts/read_cap.py` (hook, opt-in) | Refuses a `Read` with no `limit` on a file over 300 lines when the repo's `.github/autopilot.json` has `"read_cap": true`; allows everything else and never fails closed. |
 | `docs/policy.md` | The settings, field by field, and what enforces each one today. |
 | `templates/github/` (v2) | The GitHub gate: a workflow that reviews every pull request with Claude, adds a second security review for sensitive files, and turns on auto-merge when the settings allow. Installed by `/build-autopilot:apply` following `docs/v2-install.md`; design and threat model in `docs/v2-report.md`. |
@@ -52,6 +53,7 @@ one, then lists the repos you've pushed to lately and asks which to track.
 /build-autopilot:audit                         # the current repo, last 30 days
 /build-autopilot:audit owner/repo              # add or refresh one repo
 /build-autopilot:audit --org my-org            # every repo in an org pushed to in the window
+/build-autopilot:cost                          # CI cost, 7/14/30 days, and the standard rules it breaks
 /build-autopilot:settings                      # open the page
 /build-autopilot:apply                         # put the page's choices into the current repo
 /build-autopilot:apply --me                    # your own preferences, on this computer
@@ -62,6 +64,7 @@ one, then lists the repos you've pushed to lately and asks which to track.
 ```bash
 python3 scripts/audit.py --repo owner/repo --since 30d --out audit.json
 python3 scripts/audit.py --org my-org --tz America/New_York --out audit.json
+python3 scripts/ci_cost.py --repo owner/repo --out cost.json
 ```
 
 ## Safe by default

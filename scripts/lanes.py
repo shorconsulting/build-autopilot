@@ -47,6 +47,9 @@ def effective(policy):
     tests.setdefault("lane", p["lane"])
     tests.setdefault("skip_duplicate_main", p["skip_duplicate_main"])
     tests.setdefault("suites", {})
+    cost = out.setdefault("ci_cost", {})  # every phase, every pipeline: the standard CI cost rules are on
+    cost.setdefault("rules", "standard")
+    cost.setdefault("off", [])
     return out
 
 

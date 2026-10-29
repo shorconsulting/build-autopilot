@@ -1273,7 +1273,9 @@ HEADLINES = (
     "interruptions.short_approvals", "interruptions.per_active_day",
     "efficiency.read_over_20k", "efficiency.read_over_20k_pct", "efficiency.bash_over_20k",
     "efficiency.sessions_over_300k_context", "efficiency.model_mix_pct.opus", "efficiency.weighted_tokens",
-    "efficiency.subagent_weighted_pct", "efficiency.tool_error_pct")
+    "efficiency.subagent_weighted_pct", "efficiency.tool_error_pct",
+    "cost.windows.7.usd", "cost.windows.7.usd_per_month", "cost.windows.30.usd", "cost.windows.30.usd_per_month")
+COST_JUMP = 0.25  # a 7-day cost per month this much above the last audit's is a regression
 INCIDENTS = ("prs.reverts", "ci.red_main_commits", "prs.changes_verdicts")  # what a loosened setting must not make worse
 NOT_SETTINGS = ("version", "repo", "source", "applied_at")
 STRICT_TO_LOOSE = {  # docs/policy.md order, strictest first
@@ -1429,7 +1431,28 @@ def rule_efficiency(cur, hist):
             for k, lim, line in EFFICIENCY_LINES if _n(cur, k) > lim and _n(hist[-1], k) > lim]
 
 
-RULES = (rule_revert_loosening, rule_loosen_level, rule_hot_dirs, rule_efficiency)
+def rule_ci_cost(cur, hist):
+    """(e) CI cost per month up COST_JUMP since the last audit, or over the policy's budget, while the standard CI cost
+    rules are off (wholly or in part): propose turning them all on."""
+    now = _n(cur, "cost.windows.7.usd_per_month")
+    if not now:
+        return []
+    flat = flatten(cur.get("settings"))
+    rules, off = flat.get("ci_cost.rules", "standard"), flat.get("ci_cost.off") or []
+    budget = flat.get("ci_cost.budget_usd_month")
+    before = _n(hist[-1], "cost.windows.7.usd_per_month") if hist else 0
+    why = []
+    if before and now > before * (1 + COST_JUMP):
+        why.append("CI cost rose from $%.0f to $%.0f a month since the last audit." % (before, now))
+    if budget and now > budget:
+        why.append("CI cost is $%.0f a month, over the $%.0f budget." % (now, budget))
+    if not why or (rules == "standard" and not off):
+        return []
+    return [{"field": "ci_cost", "from": {"rules": rules, "off": off}, "to": {"rules": "standard", "off": []},
+             "reason": " ".join(why), "evidence": "7-day cost, per month: $%.0f -> $%.0f" % (before or 0, now)}]
+
+
+RULES = (rule_revert_loosening, rule_loosen_level, rule_hot_dirs, rule_efficiency, rule_ci_cost)
 
 
 def propose(cur, hist):
@@ -1453,7 +1476,7 @@ def add_history(result, policy, folder, repo, now, window_days):
 
 # ---------------------------------------------------------------- one repo
 
-def audit_repo(repo, since, now, window_days, inter_by_repo, tz, log=lambda m: None, history_dir=None):
+def audit_repo(repo, since, now, window_days, inter_by_repo, tz, log=lambda m: None, history_dir=None, cost=False):
     notes = []
     try:
         meta = gh_api("repos/%s" % repo)
@@ -1548,6 +1571,11 @@ def audit_repo(repo, since, now, window_days, inter_by_repo, tz, log=lambda m: N
     result["interruptions"], result["efficiency"] = inter, eff
     result["recommendations"] = recommendations(pr_stats, result["ci"], result["deploy"], auto, inter, waits,
                                                 window_days, branch, (hint, evidence), eff)
+    if cost:  # many calls on a busy repo, so only when asked (ci_cost.py's docstring has the method)
+        import ci_cost  # imports this module; loaded here so plain audits never need it
+        log("CI cost (7/14/30 days)")
+        result["cost"] = step("CI cost", lambda: ci_cost.cost_repo(repo, now, wf_text=wf_text, default_branch=branch,
+                                                                   log=log), None)
     result["notes"] = notes
     add_history(result, step("Settings file", lambda: current_policy(repo), False), history_dir, repo, now, window_days)
     return result
@@ -1581,6 +1609,10 @@ def summarize(report):
                 p["human_reviews"], p["bot_reviews"], p["merged_without_review"], p["merged"]))
         lines.append("  Tests: %d duplicate runs on main (%d minutes), %d red commit(s) on main. Deploy: %s" % (
             ci["duplicate_main_runs"], ci["duplicate_main_minutes"], ci["red_main_commits"], dep["note"]))
+        if r.get("cost"):
+            w = r["cost"]["windows"]
+            lines.append("  CI cost: $%.0f last 7 days, $%.0f last 14, $%.0f last 30 (%s); %d standard-rule finding(s)." % (
+                w["7"]["usd"], w["14"]["usd"], w["30"]["usd"], r["cost"]["price_source"], len(w["7"]["findings"])))
         if it["sessions"]:
             lines.append("  Claude sessions: %d over %d active day(s); %d question(s), %d turn(s) that ended waiting on you, "
                          "%d blocked command(s), %d one-word approval(s)." % (
@@ -1613,6 +1645,8 @@ def parse_args(argv=None):
     ap.add_argument("--tz", metavar="ZONE", help="time zone for overnight waits, e.g. America/New_York (default: this computer's)")
     ap.add_argument("--checkout", action="append", default=[], metavar="OWNER/NAME=PATH")
     ap.add_argument("--history-dir", metavar="DIR", help="where each run's summary is appended (default: %s)" % HISTORY_DIR)
+    ap.add_argument("--cost", action="store_true",
+                    help="also measure CI cost over 7, 14 and 30 days and check the standard CI cost rules (ci_cost.py)")
     ap.add_argument("--out", required=True, metavar="FILE")
     return ap.parse_args(argv)
 
@@ -1649,7 +1683,7 @@ def main(argv=None, now=None):
         try:
             out.append(audit_repo(repo, since, now, window_days, inter, tz,
                                   log=lambda m, repo=repo: print("    %s: %s" % (repo, m), file=sys.stderr),
-                                  history_dir=args.history_dir or HISTORY_DIR))
+                                  history_dir=args.history_dir or HISTORY_DIR, cost=args.cost))
         except Exception as e:  # never crash the whole audit for one repo
             out.append({"repo": repo, "error": "%s: %s" % (type(e).__name__, e)})
     report = {"generated_at": iso(now), "since": iso(since), "window_days": window_days, "repos": out,
