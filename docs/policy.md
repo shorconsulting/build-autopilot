@@ -29,6 +29,7 @@ A repo without the file behaves as `manual` with questions `ask-now`: exactly as
       "mobile": { "on_pr": "when-touched", "paths": ["apps/mobile/**", "packages/db/**", "**/migrations/**"] }
     }
   },
+  "ci_cost": { "rules": "standard", "off": [], "budget_usd_month": 300 },
   "always_ask": ["delete-data", "spend-money", "message-people", "credentials", "legal-pricing", "ai-flags-it"],
   "source": "https://claude.ai/artifact/...",
   "applied_at": "2026-10-15T21:00:00Z"
@@ -155,6 +156,40 @@ suite, so skipping on a pull request is a saving, never a gap. `scripts/lanes.py
 set of files runs; `scripts/lanes.py render POLICY SUITE WORKFLOW` rewrites the workflow's `on.pull_request.paths` list
 from the suite's `paths`, so the two cannot disagree (`apply` does this).
 
+### `ci_cost`: the standard CI cost rules
+
+On for every repo, every phase and every `pipeline` (including `own`): a file without `ci_cost` gets
+`{"rules": "standard", "off": []}` (`scripts/lanes.py effective`). They exist because one prelaunch repo spent about
+$3k of Actions minutes in a month, 90% of it one CI workflow, while its policy already said `tests.lane: wave` -- but
+`pipeline: own` meant nothing applied it.
+
+| Field | Values |
+|---|---|
+| `rules` | `standard` (default): every rule below is on. `none`: measure and report, change nothing. |
+| `off` | Rule ids to leave alone in this repo, e.g. `["ci-skip-docs-only"]`. Say why in the pull request that sets it. |
+| `budget_usd_month` | Optional. A 7-day cost (per month) over it raises a proposal and is shown in red on the page. |
+
+| Rule | Checked in the workflow files | Measured |
+|---|---|---|
+| `ci-main-batched` | A workflow with 2+ jobs that runs on push to the default branch with no concurrency group, or one that falls back to `github.sha` | Push minutes, and what GitHub's one-running-one-waiting queue would have run instead, replayed over the real push times |
+| `ci-pr-cancel-superseded` | A pull-request workflow with no `cancel-in-progress` | Cancelled minutes |
+| `ci-fail-fast` | A matrix job with no `needs:` in a workflow of 3+ jobs | ~60% of failed-run minutes (the shards a red lint would have stopped) |
+| `ci-skip-docs-only` | A pull-request workflow of 3+ jobs with no `paths` filter and no changed-files job | Not priced |
+| `ci-poll-frequency` | A `schedule` more often than every 15 minutes | That schedule's minutes above a 15-minute cadence |
+| `ci-shard-balance` | -- | Matrix legs whose average differs by 1.8x or more (the slowest is above 5 min) |
+| `ci-waste` | -- | Over 20% of minutes on cancelled or failed runs |
+
+A lint finding is reported only for a workflow that costs at least 5% of the repo's minutes (and at least 100) in the
+window, so a cheap workflow never produces noise; `ci-poll-frequency` is always reported. Every finding carries the
+fix (`STANDARD_RULES` in `scripts/ci_cost.py`) and, where measurable, the minutes and dollars it saves in that window.
+
+**Cost of each CI decision.** `audit.py --cost` (or `ci_cost.py` alone) prices the last 7, 14 and 30 days: billed
+minutes and dollars by workflow, by workflow and trigger (`ci.yml push` is the decision to test every merge), by job
+(each job is a decision to have it), by runner OS, and the cancelled and failed minutes. Each job is billed rounded up
+to the minute, as GitHub bills it. The method -- every run listed, a stratified sample of their jobs read -- is in
+`ci_cost.py`'s docstring; the price is the billing API's when it answers (needs the `admin:org` scope), else list price.
+The 7-day number per month next to the 30-day one shows whether a change is working.
+
 ### `read_cap`: stop whole-file Reads of long files
 
 `true` makes the plugin's `PreToolUse` hook (`scripts/read_cap.py`) refuse a `Read` that has no `limit` on a file over 300
@@ -164,12 +199,14 @@ from the session's working directory. Off by default; turn it on per repo.
 
 ## Proposals
 
-Each audit is recorded (one line per run in `~/.build-autopilot/history/`), compared with the run before it (`since_last` on the page), and run through four fixed rules. A rule that fires adds a proposal to the repo's page with its evidence; nothing is tuned by a model and nothing adapts.
+Each audit is recorded (one line per run in `~/.build-autopilot/history/`), compared with the run before it (`since_last` on the page), and run through five fixed rules. A rule that fires adds a proposal to the repo's page with its evidence; nothing is tuned by a model and nothing adapts.
 
 1. **Revert a loosening that made things worse.** A setting (`level`, `questions`, `sensitive.rule`, `tests.lane`, `read_cap`) was made less strict between two audits, and reverts or hotfixes, failed runs on `main` after a merge, or CHANGES verdicts are higher now than in the audit before the loosening: propose putting that one setting back.
 2. **Loosen a quiet level.** `level` is `manual` or `ai-review` (stricter than `auto-merge`) for three audits in a row with no reverts, no failed runs on `main` and no CHANGES verdicts: propose the next level up (`manual` → `ai-review` → `auto-merge` → `autopilot`).
 3. **Protect the directory that keeps breaking.** Three or more reverted, hotfixed or main-breaking changes touched one top-level directory in the window and `sensitive.paths` does not cover it: propose adding `<dir>/**`.
 4. **Keep Claude's results small.** More than 25% of Read results over 20k characters, or more than 100 Bash results over 20k, in two audits in a row: propose a line for the repo's `CLAUDE.md` (grep first and Read with offset/limit; pipe Bash output through head, tail or grep).
+
+5. **Turn the CI cost rules back on when cost climbs.** The 7-day CI cost (per month) is 25% above the last audit's, or over `ci_cost.budget_usd_month`, while `ci_cost.rules` is `none` or `off` lists a rule: propose `{"rules": "standard", "off": []}`. Needs `--cost`.
 
 Turning a proposal on only saves it as a choice on the page. It reaches the repo when you run `/build-autopilot:apply`, which puts settings in `.github/autopilot.json` and any `CLAUDE.md` line in the same pull request. **Nothing changes a repo without a merged pull request**, and that pull request is never auto-merged.
 
@@ -184,6 +221,7 @@ Turning a proposal on only saves it as a choice on the page. It reaches the repo
 | `tests.suites` | `apply` writes each suite's `paths` into its workflow's `on.pull_request.paths` in the same reviewed pull request | Same |
 | `tests.lane: wave` | `apply` adds `templates/github/workflows/test-lanes.yml` to a repo with no test workflow of its own, or tells you which two blocks to merge into the one it has | Same |
 | `tests.skip_duplicate_main` | Recorded only; `drafts/` has a reviewed example for one repo | Applied to the repo's test workflow by a reviewed pull request |
+| `ci_cost` | `apply` makes each finding's fix in the repo's workflow files, in the same reviewed pull request, for every `pipeline`; `audit --cost` measures it | Same |
 | `read_cap` | The `PreToolUse` hook in `hooks/hooks.json` (`scripts/read_cap.py`) | Same |
 | `sensitive` | Claude sessions run the second, adversarial review | The GitHub workflow requires both reviews |
 

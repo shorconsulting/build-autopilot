@@ -225,6 +225,12 @@ details > summary { cursor: pointer; color: var(--muted) }
           <div class="panel-head"><h2>Context efficiency</h2><span class="note" id="effNote"></span></div>
           <div class="facts" id="effFacts"></div>
         </div>
+        <div class="panel" id="costPanel" hidden>
+          <div class="panel-head"><h2>CI cost</h2><span class="note" id="costNote"></span>
+            <select id="costWin" aria-label="Window"><option value="7">Last 7 days</option><option value="14">Last 14 days</option><option value="30">Last 30 days</option></select></div>
+          <div class="facts" id="costFacts"></div>
+          <div id="costRows"></div>
+        </div>
         <div class="panel">
           <div class="panel-head"><h2>What would speed this up</h2><span class="note">Biggest saving first</span></div>
           <div class="recs" id="recs"></div>
@@ -479,7 +485,7 @@ function renderSelected() {
   $("defaults").hidden = s !== "_defaults";
   if (!s) return;
   if (s === "_defaults") { renderSettings($("defaultsPanel"), "_defaults"); return; }
-  renderSteps(s); renderTime(s); renderEfficiency(s); renderRecs(s); renderSettings($("settingsPanel"), s);
+  renderSteps(s); renderTime(s); renderEfficiency(s); renderCost(s); renderRecs(s); renderSettings($("settingsPanel"), s);
 }
 
 function renderTime(slug) {
@@ -532,6 +538,39 @@ function renderEfficiency(slug) {
   fact(`${e.subagent_weighted_pct}%`, "of weighted token spend is subagents", "efficiency.subagent_weighted_pct");
   fact(`${e.tool_error_pct}%`, `of tool results were errors (${e.tool_errors} of ${e.tool_results})`, "efficiency.tool_error_pct");
   fact(String(e.sessions_over_300k_context), "sessions grew past 300k context", "efficiency.sessions_over_300k_context");
+}
+
+// What each CI decision costs: windows from the audit's `cost` (scripts/ci_cost.py), findings priced by the same run.
+function renderCost(slug) {
+  const c = g(state.audits[slug] || {}, "cost", null);
+  $("costPanel").hidden = !c || !c.windows;
+  if (!c || !c.windows) return;
+  const a = state.audits[slug], usd = n => `$${Math.round(n || 0).toLocaleString()}`;
+  const f = $("costFacts"); f.textContent = "";
+  for (const w of ["7", "14", "30"]) {
+    const x = c.windows[w] || {};
+    f.append(el("div", {}, el("b", { class: "num", text: usd(x.usd) }), delta(a, `cost.windows.${w}.usd`),
+      el("span", { text: `last ${w} days · ${usd(x.usd_per_month)} a month · ${(x.billed_minutes || 0).toLocaleString()} billed min` })));
+  }
+  $("costNote").textContent = `${c.price_source} · ${(c.runs_listed || 0).toLocaleString()} runs`;
+  const draw = () => {
+    const x = c.windows[$("costWin").value] || {}, rows = $("costRows"); rows.textContent = "";
+    const table = (title, list) => {
+      rows.append(el("h3", { text: title }));
+      const ul = el("ul", { class: "note" });
+      for (const r of (list || []).slice(0, 8)) ul.append(el("li", { text: `${r.name}: ${usd(r.minutes * x.price_per_minute)} (${r.minutes.toLocaleString()} min)` }));
+      rows.append(ul);
+    };
+    table("By workflow and trigger", x.by_event);
+    table("By job", x.by_job);
+    table("Cancelled and failed runs", x.waste);
+    rows.append(el("h3", { text: "Standard rules this repo breaks" }));
+    const ul = el("ul", {});
+    for (const fd of x.findings || []) ul.append(el("li", { text: `${fd.title} (${fd.workflow}): ${fd.evidence}.${fd.saves_usd != null ? ` Saves about ${usd(fd.saves_usd)} in this window.` : ""}` }));
+    if (!(x.findings || []).length) ul.append(el("li", { text: "None." }));
+    rows.append(ul);
+  };
+  $("costWin").onchange = draw; draw();
 }
 
 // A proposal from the audit's rules table, shaped like a recommendation so it renders and turns on the same way.
