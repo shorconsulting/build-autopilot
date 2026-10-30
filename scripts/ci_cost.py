@@ -53,9 +53,15 @@ STANDARD_RULES = {  # id -> (title, the fix). Order is the order findings are sh
         "before the shards start. Costs that job's duration in wall-clock time on green runs."),
     "ci-skip-docs-only": (
         "Do not run the full suite for changes that touch only docs",
-        "Add a first `changes` job (`git diff --name-only` against the base) and `if:` the heavy jobs on its output; "
-        "keep the aggregate required check reporting so the merge is not blocked. A `paths-ignore` on a workflow "
-        "that holds a required check would leave the check missing and block docs-only pull requests."),
+        "Add a first `changes` job (`git diff --no-renames --name-only` against the base: without `--no-renames` a "
+        "code file renamed to `.md` lists only the `.md`) and `if:` the heavy jobs on its output. Before calling a "
+        "`.md` file docs, check whether a test reads it; if one does, that path is code. Do not skip a matrix job with "
+        "a job-level `if:`: it reports one check under its unexpanded name, so a required `test shard 1/6` never "
+        "reports and the pull request blocks. Let those jobs run with `if: ${{ !cancelled() }}`, put the condition on "
+        "every step, and make each service image empty when skipping (`image: ${{ <condition> && 'postgres:16' || '' "
+        "}}`), since an empty image starts no service. Keep the aggregate required check reporting so the merge is "
+        "not blocked. A `paths-ignore` on a workflow that holds a required check would leave the check missing and "
+        "block docs-only pull requests."),
     "ci-poll-frequency": (
         "Poll on a schedule no more often than every %d minutes" % POLL_MIN,
         "Every scheduled run is at least one billed minute per job; prefer an event trigger, else `*/%d`." % POLL_MIN),
@@ -152,7 +158,7 @@ def lint(path, text, default_branch):
     if on_pr and len(jobs) >= 3:
         pr_block = _code(top_block(text, "on"))
         filtered = re.search(r"^\s*paths(-ignore)?\s*:", pr_block, re.M)
-        detects = re.search(r"paths-filter|changed-files|diff\s+--name-only|dorny/", text)
+        detects = re.search(r"paths-filter|changed-files|diff\b[^\n]*--name-only|needs\.changes\.outputs|dorny/", text)
         if not filtered and not detects:
             out.append(("ci-skip-docs-only", "every pull request runs every job, whatever it changed"))
     for c in crons(text):
