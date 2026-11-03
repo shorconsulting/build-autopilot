@@ -133,6 +133,17 @@ class CiCostTest(unittest.TestCase):
         self.assertEqual([f["rule"] for f in ci_cost.lint("s.yml", SWEEP, "main")], ["ci-poll-frequency"])
         self.assertEqual(ci_cost.lint(".github/workflows/ci.yml", GOOD, "main"), [])
 
+    def test_docs_only_counts_the_fix_as_made(self):
+        def rules(text):
+            return {f["rule"] for f in ci_cost.lint(".github/workflows/ci.yml", text, "main")}
+        plain = "git diff --name-only origin/main...HEAD"
+        self.assertIn(plain, GOOD)
+        self.assertNotIn("ci-skip-docs-only", rules(GOOD.replace(plain, plain.replace("diff", "diff --no-renames"))))
+        script = GOOD.replace(plain, "bash scripts/ci-docs-only.sh").replace(
+            "    needs: static\n", "    needs: static\n    if: needs.changes.outputs.code != 'false'\n")
+        self.assertNotIn("ci-skip-docs-only", rules(script))  # the diff lives in a script the workflow only calls
+        self.assertIn("ci-skip-docs-only", rules(GOOD.replace(plain, "bash scripts/ci-docs-only.sh")))
+
     def test_batching_runs_the_newest_waiting_push_only(self):
         t = [NOW + dt.timedelta(minutes=m) for m in (0, 5, 10, 15, 100, 200)]
         self.assertEqual(ci_cost.batched_runs(t, 30), 4)  # 0 runs; 5,10,15 collapse into one at 30; 100; 200

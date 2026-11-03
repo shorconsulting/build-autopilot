@@ -156,9 +156,17 @@ Turns the page's choices into the repo's `.github/autopilot.json`.
      `rules` is `none`, read the latest audit's `cost.windows.7.findings` (run `ci_cost.py` if the audit has no `cost`)
      and, for each finding whose rule is not in `off`, make its `fix` in the named workflow, in this pull request. Keep
      every required check reporting (a skipped heavy job still lets the aggregate check pass; never a workflow-level
-     `paths-ignore` on a workflow that holds a required check). Leave anything the repo's own rules protect (a
-     CODEOWNERS or "gate" path that needs its own review) to that review: say so in the body. List each finding with
-     its evidence and `saves_usd` in the body, and the total. `ci-shard-balance` and `ci-waste` are reported, not edited.
+     `paths-ignore` on a workflow that holds a required check). For `ci-skip-docs-only`, check three things (the
+     worked example is `ShorConsultingInc/ranch-rides#1570`):
+     - A matrix job skipped by a job-level `if:` reports one check under its unexpanded name, so a required
+       `test shard 1/6` never reports and the pull request blocks. Such a job runs with `if: ${{ !cancelled() }}` and
+       skips step by step, with an empty service image when skipping, since an empty image starts no service.
+     - The `changes` job diffs with `--no-renames`, or a code file renamed to `.md` counts as docs.
+     - Before calling a `.md` file docs, check whether a test reads it. If one does, that path is code.
+
+     Leave anything the repo's own rules protect (a CODEOWNERS or "gate" path that needs its own review) to that
+     review: say so in the body. List each finding with its evidence and `saves_usd` in the body, and the total.
+     `ci-shard-balance` and `ci-waste` are reported, not edited.
    - `claude_md` (accepted proposals, a list of lines): append each line the repo's `CLAUDE.md` does not already
      contain, under a `## Context habits` heading, in the same pull request. List each accepted proposal and its
      evidence (from the audit's `proposals`) in the body.
