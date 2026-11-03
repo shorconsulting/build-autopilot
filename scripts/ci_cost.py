@@ -52,10 +52,14 @@ STANDARD_RULES = {  # id -> (title, the fix). Order is the order findings are sh
         "Give each matrix or long job `needs: [<lint/typecheck job>]`, so a red lint or typecheck stops the run "
         "before the shards start. Costs that job's duration in wall-clock time on green runs."),
     "ci-skip-docs-only": (
-        "Do not run the full suite for changes that touch only docs",
+        "Do not run the full suite for changes that touch only docs or reference files",
         "Add a first `changes` job (`git diff --no-renames --name-only` against the base: without `--no-renames` a "
         "code file renamed to `.md` lists only the `.md`) and `if:` the heavy jobs on its output. Before calling a "
-        "`.md` file docs, check whether a test reads it; if one does, that path is code. Do not skip a matrix job with "
+        "`.md` file docs, check whether a test reads it; if one does, that path is code. Wireframes, static HTML "
+        "prototypes and reference folders count as docs when nothing builds, imports or reads them: name those paths "
+        "rather than matching every `.html` file, and treat anything a gate or test reads (requirements, rules, test "
+        "cases) as code. Keep the secret scan and any conflict-marker or naming check running on these changes, since "
+        "a prototype can carry a leaked key or an old name. Do not skip a matrix job with "
         "a job-level `if:`: it reports one check under its unexpanded name, so a required `test shard 1/6` never "
         "reports and the pull request blocks. Let those jobs run with `if: ${{ !cancelled() }}`, put the condition on "
         "every step, and make each service image empty when skipping (`image: ${{ <condition> && 'postgres:16' || '' "
