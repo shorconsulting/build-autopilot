@@ -1,7 +1,7 @@
 {
   "name": "build-autopilot",
   "displayName": "Build Autopilot",
-  "version": "0.7.2",
+  "version": "0.8.0",
   "description": "Read-only audit of where a project's build time goes: pull requests that sit after tests pass, merges and deploys that wait for a human click, duplicate test runs, and Claude sessions that stop to ask. Produces per-repo numbers and plain-language suggestions a settings page can turn into opt-in automation.",
   "author": {
     "name": "David Shor",

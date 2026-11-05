@@ -13,6 +13,10 @@ Two halves, both in the repo's test workflow:
       3. that pull request changed nothing under .github/ (so its runs used the default branch's test workflow);
       4. a passing pull_request run of this test workflow for the pull request's head says it tested a commit
          whose files are exactly the pushed commit's (the same git tree).
+    A repo with a merge queue has a shorter path (CI cost rule ci-queue-then-main): the queue tests a candidate
+    commit and that exact commit is what lands, so when a passing `merge_group` run of this workflow exists for the
+    pushed commit itself (same sha, same workflow file), the push run skips on that alone -- no tree to compare, no
+    pull request to inspect, and a batch of several pull requests that landed as one push skips too.
 
 A skip is a step automation drops on a person's behalf, so it is never silent: the run's summary and a comment on the
 merged pull request say "Decided without you", why, and how to undo it (run the tests anyway, or turn the setting off).
@@ -40,6 +44,21 @@ def wants_skip(checkout):
         return False
 
 
+def queue_passed(gh, repo, workflow_file, sha):
+    """The passing merge_group run of this workflow for exactly this commit, or None. An unreadable queue history is
+    no queue run: the pull-request path still applies."""
+    try:
+        runs = (gh.get("/repos/%s/actions/workflows/%s/runs?event=merge_group&head_sha=%s&status=success"
+                       % (repo, workflow_file, sha)) or {}).get("workflow_runs") or []
+    except Exception:
+        return None
+    for r in runs:
+        if (r.get("conclusion") == "success" and r.get("head_sha") == sha and r.get("event") == "merge_group"
+                and r.get("path") == ".github/workflows/%s" % workflow_file):
+            return r
+    return None
+
+
 def check(gh, repo, event, workflow_file, checkout):
     """-> (skip, reason, pr_number or None). Pure apart from `gh` reads; tests drive it with a fake."""
     default = event["repository"]["default_branch"]
@@ -50,6 +69,11 @@ def check(gh, repo, event, workflow_file, checkout):
         return False, "new or force-pushed branch", None
     if not wants_skip(checkout):
         return False, "tests.skip_duplicate_main is off", None
+    queue = queue_passed(gh, repo, workflow_file, sha)
+    if queue:
+        prs = [p for p in gh.get("/repos/%s/commits/%s/pulls" % (repo, sha)) if p.get("merged_at")]
+        return True, "the merge queue already passed %s on this exact commit (%s, run %s)" % (
+            workflow_file, sha[:7], queue.get("html_url") or queue.get("id")), prs[0]["number"] if len(prs) == 1 else None
     merged = [p for p in gh.get("/repos/%s/commits/%s/pulls" % (repo, sha))
               if p.get("merged_at") and p.get("merge_commit_sha") == sha and p["base"]["ref"] == default]
     if len(merged) != 1:

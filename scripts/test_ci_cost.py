@@ -66,6 +66,22 @@ jobs:
       - run: npm test
 """
 
+QUEUE = CI.replace("  pull_request:\n", "  pull_request:\n  merge_group:\n")
+DEDUPED = QUEUE.replace("jobs:\n", """jobs:
+  dedupe:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    steps:
+      - run: python3 .github/autopilot/skip_duplicate_main.py ci.yml
+""")
+INLINE = QUEUE.replace("jobs:\n", """jobs:
+  dedupe:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    steps:
+      - run: gh api "repos/$R/actions/workflows/ci.yml/runs?event=merge_group&head_sha=$GITHUB_SHA&status=success"
+""")
+
 SWEEP = """on:
   schedule:
     - cron: '*/5 * * * *'
@@ -88,7 +104,9 @@ def job(name, minutes, labels=("ubuntu-24.04",), conclusion="success"):
 
 
 class FakeGh:
-    """Read-only answers: 10 CI pushes and 10 CI pull requests a day for 30 days; each run bills 1 + 2x10 minutes."""
+    """Read-only answers, 30 days of CI: every 20 minutes a pull request, a push, then the merge-queue run that
+    passed the pushed commit (same sha); and four cancelled pull-request runs a day, each superseded two minutes
+    later on its branch. Each run bills 1 + 2x10 + 1 + 1 minutes (static, two shards, contract, build)."""
 
     def __init__(self):
         self.calls = []
@@ -103,15 +121,26 @@ class FakeGh:
                 return json.dumps({"total_count": 0, "workflow_runs": []})
             day = dt.datetime.strptime(q, "%Y-%m-%d").replace(tzinfo=dt.timezone.utc) + dt.timedelta(hours=1)
             runs = []
-            for i in range(20):
-                c = day + dt.timedelta(minutes=30 * i)
-                runs.append({"id": int(c.timestamp()) * 100 + i, "path": ".github/workflows/ci.yml@main",
-                             "event": "push" if i % 2 else "pull_request", "conclusion": "success",
-                             "created_at": ts(c), "run_started_at": ts(c), "updated_at": ts(c + dt.timedelta(minutes=90)),
-                             "run_attempt": 1})
+
+            def run(c, i, event, conclusion, sha, branch):
+                return {"id": int(c.timestamp()) * 100 + i, "path": ".github/workflows/ci.yml@main", "event": event,
+                        "conclusion": conclusion, "created_at": ts(c), "run_started_at": ts(c),
+                        "updated_at": ts(c + dt.timedelta(minutes=90)), "run_attempt": 1, "head_sha": sha,
+                        "head_branch": branch}
+            for i in range(30):
+                c = day + dt.timedelta(minutes=20 * i)
+                ev = ("pull_request", "push", "merge_group")[i % 3]
+                sha = "%040x" % (int(day.timestamp()) + i // 3)  # the push and the queue run share the commit
+                runs.append(run(c, i, ev, "success", sha, "main" if ev != "pull_request" else "feature-%d" % i))
+            for i in range(4):
+                c = day + dt.timedelta(hours=12, minutes=10 * i)
+                runs.append(run(c, 50 + i, "pull_request", "cancelled", "%040x" % i, "quick-%d" % i))
+                runs.append(run(c + dt.timedelta(minutes=2), 60 + i, "pull_request", "success", "%040x" % (10 + i),
+                                "quick-%d" % i))
             return json.dumps({"total_count": len(runs), "workflow_runs": runs})
         if "/jobs?" in path:
             return json.dumps({"jobs": [job("static", 0.5), job("test (1)", 9.2), job("test (2)", 10),
+                                        job("contract", 0.4), job("build", 0.3),
                                         job("gates", 0, conclusion="skipped"),
                                         job("mac", 3, labels=("self-hosted", "macOS"))]})
         if "billing" in path:
@@ -132,6 +161,14 @@ class CiCostTest(unittest.TestCase):
         self.assertEqual(rules, {"ci-main-batched", "ci-fail-fast", "ci-skip-docs-only"})
         self.assertEqual([f["rule"] for f in ci_cost.lint("s.yml", SWEEP, "main")], ["ci-poll-frequency"])
         self.assertEqual(ci_cost.lint(".github/workflows/ci.yml", GOOD, "main"), [])
+
+    def test_queue_then_main_is_flagged_until_the_dedupe_is_made(self):
+        def rules(text):
+            return {f["rule"] for f in ci_cost.lint(".github/workflows/ci.yml", text, "main")}
+        self.assertIn("ci-queue-then-main", rules(QUEUE))
+        self.assertNotIn("ci-queue-then-main", rules(CI))  # no merge queue: the push run is the only full run
+        self.assertNotIn("ci-queue-then-main", rules(DEDUPED))  # the gate's script
+        self.assertNotIn("ci-queue-then-main", rules(INLINE))  # the inline check of a pipeline: own repo
 
     def test_docs_only_counts_the_fix_as_made(self):
         def rules(text):
@@ -168,7 +205,7 @@ class CiCostTest(unittest.TestCase):
         c = ci_cost.cost_repo("acme/widgets", NOW, samples=3, wf_text={".github/workflows/ci.yml": CI},
                               default_branch="main")
         w7, w30 = c["windows"]["7"], c["windows"]["30"]
-        per_run = 1 + 10 + 10  # static rounds up to 1, shards to 10 each; gates skipped, self-hosted free
+        per_run = 1 + 10 + 10 + 1 + 1  # static, contract and build round up to 1, shards to 10; gates skipped, mac free
         self.assertEqual(w7["billed_minutes"], w7["runs"] * per_run)
         self.assertEqual(w30["billed_minutes"], w30["runs"] * per_run)
         self.assertGreater(w30["runs"], w7["runs"] * 3)
@@ -180,10 +217,53 @@ class CiCostTest(unittest.TestCase):
         jobs = {r["name"]: r["minutes"] for r in w7["by_job"]}
         self.assertEqual(jobs["ci.yml :: test"], w7["runs"] * 20)
 
+    def cost(self, text=None):
+        return ci_cost.cost_repo("acme/widgets", NOW, samples=3, default_branch="main",
+                                 wf_text={".github/workflows/ci.yml": text or QUEUE})["windows"]["7"]
+
+    def test_queue_then_main_is_priced_by_the_pushes_the_queue_already_tested(self):
+        w7 = self.cost()
+        f = {x["rule"]: x for x in w7["findings"]}["ci-queue-then-main"]
+        pushes = {r["name"]: r["minutes"] for r in w7["by_event"]}["ci.yml push"]
+        self.assertGreater(pushes, 0)
+        self.assertEqual(f["saves_minutes"], pushes)  # every push's commit had passed as a merge-queue candidate
+        self.assertNotIn("ci-queue-then-main", {x["rule"] for x in self.cost(DEDUPED)["findings"]})
+
+    def test_pull_request_as_costly_as_the_queue_run_is_flagged(self):
+        w7 = self.cost()
+        f = {x["rule"]: x for x in w7["findings"]}["ci-pr-selection-queue-full"]
+        self.assertIn("bills 23 min and a merge-queue run 23", f["evidence"])
+        self.assertGreater(f["saves_minutes"], 0)
+        t = {"by_workflow": {"ci.yml": 1}, "by_event_con": {"ci.yml pull_request success": 100.0,
+                                                           "ci.yml merge_group success": 500.0},
+             "runs_by": {"ci.yml pull_request success": 10, "ci.yml merge_group success": 10}}
+        self.assertEqual(ci_cost.pr_vs_queue(t), [])  # the pull request already runs a fifth of the queue's suite
+
+    def test_small_jobs_are_folded(self):
+        w7 = self.cost()
+        f = {x["rule"]: x for x in w7["findings"]}["ci-fold-small-jobs"]
+        self.assertIn("(build, contract, static)", f["evidence"])
+        self.assertAlmostEqual(f["saves_minutes"], 2 * w7["runs"], delta=1)  # three 1-minute jobs become one
+
+    def test_hold_pays_only_when_the_superseding_push_is_quick(self):
+        w7 = self.cost()
+        f = {x["rule"]: x for x in w7["findings"]}["ci-pr-hold-superseded"]
+        self.assertIn("superseded within 5 minutes", f["evidence"])
+        self.assertGreater(f["saves_minutes"], 0)
+        t = {"by_event_con": {"ci.yml pull_request cancelled": 230.0}, "runs_by": {"ci.yml pull_request cancelled": 10}}
+        mk = lambda m, con, branch: (1, "ci.yml", "pull_request", con, NOW - dt.timedelta(minutes=m), 0, 1, "", branch)
+        late = {("ci.yml", "pull_request", "cancelled", 0): [mk(60, "cancelled", "b")],
+                ("ci.yml", "pull_request", "success", 0): [mk(30, "success", "b")]}  # superseded after 30 minutes
+        self.assertEqual(ci_cost.hold_net(t, late, NOW, 7), [])
+        quick = {("ci.yml", "pull_request", "cancelled", 0): [mk(60, "cancelled", "b")],
+                 ("ci.yml", "pull_request", "success", 0): [mk(58, "success", "b")]}
+        # 18 saved on the cancelled run (23 billed, less the hold), less the hold the other run pays
+        self.assertEqual(ci_cost.hold_net(t, quick, NOW, 7)[0]["_minutes"], (23 - 5) - 5)
+
     def test_reads_only_a_sample_of_jobs(self):
         ci_cost.cost_repo("acme/widgets", NOW, samples=3, wf_text={}, default_branch="main")
         job_calls = [a for a in audit.gh.calls if "/jobs?" in a[1]]
-        self.assertLessEqual(len(job_calls), 2 * 3 * 3)  # 2 events x 3 buckets x 3 samples
+        self.assertLessEqual(len(job_calls), 4 * 3 * 3)  # 4 strata (event x conclusion) x 3 buckets x 3 samples
 
     def test_policy_default_turns_the_rules_on(self):
         self.assertEqual(lanes.effective({})["ci_cost"], {"rules": "standard", "off": []})

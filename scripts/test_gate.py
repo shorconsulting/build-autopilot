@@ -664,7 +664,7 @@ class SkipDuplicateMain(unittest.TestCase):
     TESTED = "e" * 40
 
     def gh(self, tested_tree=None, title=None, path=".github/workflows/test.yml", event="pull_request",
-           github_files=False, merged=1):
+           github_files=False, merged=1, queue=None):
         gh = h.FakeGitHub({"number": 7})
         r = h.REPO
         pulls = [{"number": 7 + i, "merged_at": "2026-10-15T00:00:00Z", "merge_commit_sha": self.SHA,
@@ -680,7 +680,16 @@ class SkipDuplicateMain(unittest.TestCase):
                 "conclusion": "success", "head_sha": self.HEAD, "event": event, "path": path,
                 "display_title": title if title is not None else "[tested %s] Change things" % self.TESTED}]},
         })
+        if queue is not None:
+            gh.extra["/repos/%s/actions/workflows/test.yml/runs?event=merge_group&head_sha=%s&status=success"
+                     % (r, self.SHA)] = {"workflow_runs": queue}
         return gh
+
+    def queue_run(self, **kw):
+        run = {"conclusion": "success", "head_sha": self.SHA, "event": "merge_group",
+               "path": ".github/workflows/test.yml", "html_url": "https://github.test/run/1"}
+        run.update(kw)
+        return run
 
     def event(self, **kw):
         e = {"ref": "refs/heads/main", "before": self.BEFORE, "after": self.SHA, "forced": False,
@@ -709,6 +718,26 @@ class SkipDuplicateMain(unittest.TestCase):
         for name, kw in cases:
             with self.subTest(name):
                 self.assertEqual(self.check(**kw)[0], False)
+
+    def test_skips_a_commit_the_merge_queue_passed(self):
+        # The pull-request path cannot skip here (different files tested); the queue run alone carries it.
+        skip, reason, number = self.check(gh=self.gh(tested_tree="z" * 40, queue=[self.queue_run()]))
+        self.assertEqual((skip, number), (True, 7))
+        self.assertIn("merge queue already passed test.yml", reason)
+        # a batch of pull requests that landed as one push: skip, with no single pull request to note it on
+        skip, _reason, number = self.check(gh=self.gh(tested_tree="z" * 40, merged=2, queue=[self.queue_run()]))
+        self.assertEqual((skip, number), (True, None))
+
+    def test_queue_run_must_be_this_workflow_commit_and_green(self):
+        for name, run in [("failed", self.queue_run(conclusion="failure")),
+                          ("another commit", self.queue_run(head_sha="f" * 40)),
+                          ("a pull request run", self.queue_run(event="pull_request")),
+                          ("another workflow", self.queue_run(path=".github/workflows/evil.yml"))]:
+            with self.subTest(name):
+                self.assertEqual(self.check(gh=self.gh(tested_tree="z" * 40, queue=[run]))[0], False)
+        self.assertEqual(self.check(gh=self.gh(queue=[self.queue_run(conclusion="failure")]))[0], True)  # PR path
+        self.write_policy(False)
+        self.assertEqual(self.check(gh=self.gh(queue=[self.queue_run()]))[0], False)  # the setting is off
 
     def test_skip_is_reported_with_undo(self):
         skip, reason, number = self.check()
