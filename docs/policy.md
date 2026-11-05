@@ -138,7 +138,7 @@ that `autopilot` needs is not built (`docs/v2-report.md`), so nothing here prete
 | Field | Values |
 |---|---|
 | `lane` | `full`: every test runs before merging. `fast-lane`: quick tests gate the merge; the full suite runs right after and the change is undone automatically if it fails. `wave`: quick tests gate the merge; the full suite runs on `main` in batches (one run going, the newest push waiting, so each run covers whatever merged meanwhile) and on demand at the end of a wave; no automatic undo -- a red run means fix `main` before landing more. No batch-size setting: the batch sizes itself to how long the suite takes. `templates/github/workflows/test-lanes.yml` is the `wave` lane as a workflow. |
-| `skip_duplicate_main` | `true` skips re-running the same tests on `main` after a merge when the pull request already passed them on the same code. |
+| `skip_duplicate_main` | `true` skips re-running the same tests on `main` after a merge when the pull request already passed them on the same code, or when the merge queue passed them on that exact commit (`ci-queue-then-main`). |
 | `suites` | Optional. Per-suite rules for a suite that is expensive or only matters to part of the repo, such as the mobile app's build and emulator tests (macOS minutes cost ten times Linux). A map of suite name to `{ "on_pr", "paths" }`. |
 
 `suites.<name>.on_pr`:
@@ -172,10 +172,14 @@ $3k of Actions minutes in a month, 90% of it one CI workflow, while its policy a
 | Rule | Checked in the workflow files | Measured |
 |---|---|---|
 | `ci-main-batched` | A workflow with 2+ jobs that runs on push to the default branch with no concurrency group, or one that falls back to `github.sha` | Push minutes, and what GitHub's one-running-one-waiting queue would have run instead, replayed over the real push times |
+| `ci-queue-then-main` | A workflow of 2+ jobs that runs on `merge_group` and on push to the default branch, with no dedupe in its code (`skip_duplicate_main.py`, or a check on `event=merge_group`). Not reported where a job is conditioned on the event not being `merge_group`, or on it being `push` (a push-only deploy job included): that queue run is no full suite, so the push run must stay | Pushes to the default branch whose commit a passing merge-queue run of the same workflow had already tested (the candidate commit is the commit that lands), at the push run's average minutes |
+| `ci-pr-selection-queue-full` | -- | A passing pull-request run bills 80% or more of a passing merge-queue run (5+ of each in the window): the queue already runs the full suite. Priced at half the passing pull-request minutes |
 | `ci-pr-cancel-superseded` | A pull-request workflow with no `cancel-in-progress` | Cancelled minutes |
 | `ci-fail-fast` | A matrix job with no `needs:` in a workflow of 3+ jobs | ~60% of failed-run minutes (the shards a red lint would have stopped) |
 | `ci-skip-docs-only` | A pull-request workflow of 3+ jobs with no `paths` filter and no changed-files job | Not priced |
 | `ci-poll-frequency` | A `schedule` more often than every 15 minutes | That schedule's minutes above a 15-minute cadence |
+| `ci-fold-small-jobs` | -- | Three or more jobs of one workflow whose billed minutes average two or less over the sampled runs they ran in, each running in at least half of them (each pays its own checkout and install). The helper jobs the standard fixes add (`changes`, `dedupe`, `hold`) and an aggregate job that `needs` three or more others are left alone. Priced at their minutes less one job's share |
+| `ci-pr-hold-superseded` | -- | Cancelled pull-request runs that a later run on the same branch superseded within 5 minutes, sampled and priced on their own: what a 5-minute hold before the expensive jobs saves on them, net of the hold every pull-request run would pay. Reported only when that is positive |
 | `ci-shard-balance` | -- | Matrix legs whose average differs by 1.8x or more (the slowest is above 5 min) |
 | `ci-waste` | -- | Over 20% of minutes on cancelled or failed runs |
 
@@ -220,7 +224,7 @@ Turning a proposal on only saves it as a choice on the page. It reaches the repo
 | `phase` | Sets the other fields when chosen on the page; read by `scripts/lanes.py` | Same |
 | `tests.suites` | `apply` writes each suite's `paths` into its workflow's `on.pull_request.paths` in the same reviewed pull request | Same |
 | `tests.lane: wave` | `apply` adds `templates/github/workflows/test-lanes.yml` to a repo with no test workflow of its own, or tells you which two blocks to merge into the one it has | Same |
-| `tests.skip_duplicate_main` | Recorded only; `drafts/` has a reviewed example for one repo | Applied to the repo's test workflow by a reviewed pull request |
+| `tests.skip_duplicate_main` | `apply` adds the `dedupe` job (`drafts/chasing-shade/test.yml` is the reviewed example); `templates/github/autopilot/skip_duplicate_main.py` skips a push whose pull request passed on identical files, and one whose commit a passing merge-queue run of the same workflow already tested (`ci-queue-then-main`) | Same |
 | `ci_cost` | `apply` makes each finding's fix in the repo's workflow files, in the same reviewed pull request, for every `pipeline`; `audit --cost` measures it | Same |
 | `read_cap` | The `PreToolUse` hook in `hooks/hooks.json` (`scripts/read_cap.py`) | Same |
 | `sensitive` | Claude sessions run the second, adversarial review | The GitHub workflow requires both reviews |

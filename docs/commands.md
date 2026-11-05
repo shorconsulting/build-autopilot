@@ -168,6 +168,28 @@ Turns the page's choices into the repo's `.github/autopilot.json`.
        (requirements, rules, test cases) as code. Keep the secret scan and any conflict-marker or naming check running
        on these changes, since a prototype can carry a leaked key or an old name.
 
+     For `ci-queue-then-main`: with `pipeline: gate`, add the `dedupe` job from `drafts/chasing-shade/test.yml`
+     (`python3 .github/autopilot/skip_duplicate_main.py <workflow file>`; the gate install ships the script, and it
+     skips on a passing `merge_group` run of the same workflow for the pushed commit as well as on identical files);
+     with `pipeline: own` or `none`, a `dedupe` job of one `gh api` step on
+     `actions/workflows/<file>/runs?event=merge_group&head_sha=$GITHUB_SHA&status=success` that writes `skip` only
+     for a run with conclusion success, that sha, that event and that workflow path (any error: `false`), and never
+     the gate's files. Only where the queue run executes the heavy jobs: a job conditioned on the event not being
+     `merge_group` makes the queue run a false pass, and then the push run must stay (the rule is not reported
+     there). Either way the heavy jobs `need` it and skip when `skip == 'true'`, the aggregate check still
+     reports green on a skip (a release keyed on the push run must still go), and the run summary says what was
+     skipped, why and how to undo it. Where the repo's own policy pins its workflow files (a workflow-policy gate),
+     make the change through that policy in the same pull request rather than around it.
+     For `ci-pr-selection-queue-full`: the fix is the repo's own selection. Narrow what a `pull_request` runs (its
+     changed-files or import-graph selection, or its quick suite) and leave `merge_group`, the push to the default
+     branch and the schedule on the full suite; never by a job-level `if:` on a required matrix job (the
+     `ci-skip-docs-only` notes apply). A selection that falls back to the full suite on any shared path has not been
+     narrowed: say in the body how often it narrows after the change.
+     For `ci-fold-small-jobs`: make the named jobs steps of one job, keeping the required check's name on the job
+     that remains and the order the steps needed.
+     For `ci-pr-hold-superseded` (reported only when it pays): a `hold` job (`sleep 300`) on `pull_request` that the
+     matrix and the other long jobs `need`, with `cancel-in-progress` keyed on the pull request number.
+
      Leave anything the repo's own rules protect (a CODEOWNERS or "gate" path that needs its own review) to that
      review: say so in the body. List each finding with its evidence and `saves_usd` in the body, and the total.
      `ci-shard-balance` and `ci-waste` are reported, not edited.

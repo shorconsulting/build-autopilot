@@ -35,6 +35,7 @@ SAMPLES = 6
 WORKERS = 8
 LIST_CAP = 1000  # GitHub returns at most 1000 results per runs query
 POLL_MIN = 15  # a schedule more often than this is a poller
+HOLD_MIN = 5  # ci-pr-hold-superseded: the hold a pull request run would wait before its expensive jobs
 MATRIX_RE = re.compile(r"\s*\(.*\)$")
 
 STANDARD_RULES = {  # id -> (title, the fix). Order is the order findings are shown in.
@@ -44,6 +45,24 @@ STANDARD_RULES = {  # id -> (title, the fix). Order is the order findings are sh
         "`group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}` with "
         "`cancel-in-progress: ${{ github.event_name == 'pull_request' }}`. GitHub keeps one run going and only the "
         "newest push waiting, so each run covers everything merged meanwhile (the `wave` lane)."),
+    "ci-queue-then-main": (
+        "Do not re-run the suite on the push to the default branch for a commit the merge queue already passed",
+        "A merge queue tests the candidate commit, and that exact commit is what lands on the default branch, so the "
+        "push run tests nothing new. On `push`, skip the heavy jobs when a successful `merge_group` run of this "
+        "workflow exists for `github.sha` (`actions/workflows/<file>/runs?event=merge_group&head_sha=<sha>&status="
+        "success`): `templates/github/autopilot/skip_duplicate_main.py` makes that check for a repo with the gate "
+        "installed, an inline `gh api` step does it for a `pipeline: own` or `none` repo. Only where the queue run "
+        "executes the heavy jobs (a job conditioned on the event not being merge_group makes the queue run a "
+        "false pass, and then the push run must stay). Keep the aggregate check reporting "
+        "green on a skip, so a release keyed on the push run still goes, and say in the run summary that the suite "
+        "was skipped and why."),
+    "ci-pr-selection-queue-full": (
+        "Run the narrowed selection on a pull request and the full suite in the merge queue",
+        "Where a merge queue runs the full suite on every candidate before it lands, the pull request run is not the "
+        "last line of defence: let it run the tests its change reaches (a changed-files or import-graph selection, "
+        "or the quick suite) and keep `merge_group`, the push to the default branch and the nightly on the full "
+        "suite. A selection that falls back to the full suite on any shared path never narrows: measure how often "
+        "it does."),
     "ci-pr-cancel-superseded": (
         "Cancel a pull request's run when a newer push replaces it",
         "Add a top-level `concurrency:` keyed on the pull request number with `cancel-in-progress: true`."),
@@ -69,6 +88,18 @@ STANDARD_RULES = {  # id -> (title, the fix). Order is the order findings are sh
     "ci-poll-frequency": (
         "Poll on a schedule no more often than every %d minutes" % POLL_MIN,
         "Every scheduled run is at least one billed minute per job; prefer an event trigger, else `*/%d`." % POLL_MIN),
+    "ci-fold-small-jobs": (
+        "Fold the jobs that finish in a minute or two into one job",
+        "GitHub bills every job at least one minute, and each job pays its own checkout and install, so three or "
+        "more jobs that bill a minute or two per run cost more in setup than in work. Make them steps of one job; "
+        "keep the required check's name on the job that remains, and the order the steps needed."),
+    "ci-pr-hold-superseded": (
+        "Hold the expensive jobs for a few minutes on a pull request, so a quick follow-up push cancels the run "
+        "before they start",
+        "Add a `hold` job (`sleep 300`) on `pull_request` that the matrix and the other long jobs `need`, with "
+        "`cancel-in-progress` keyed on the pull request number: a push within the hold cancels a run that has spent "
+        "five runner-minutes, not a hundred. The hold is billed on every run, so this is reported only when the "
+        "minutes it saves on runs superseded within the hold exceed what every run pays for it."),
     "ci-shard-balance": (
         "Balance the test shards",
         "Shards are billed for their own time, so balance saves wall-clock time, not minutes -- but the slowest "
@@ -151,6 +182,14 @@ def lint(path, text, default_branch):
         elif "github.sha" in conc:
             out.append(("ci-main-batched", "the concurrency group falls back to github.sha on push, so each merge to "
                         "%s gets its own group and its own full run" % default_branch))
+    queued = re.search(r"\bmerge_group\b", _code(top_block(text, "on")))
+    code = _code(text.splitlines())
+    deduped = re.search(r"skip_duplicate_main\.py|event=merge_group&|-f event=merge_group|--event merge_group", code)
+    # a job the queue run does not execute (only on push, or not on merge_group): that queue run is no full suite
+    partial_queue = re.search(r"""event_name\s*(!=\s*['"]merge_group['"]|==\s*['"]push['"])""", code)
+    if queued and audit.push_to_branch(trig, default_branch) and len(jobs) >= 2 and not deduped and not partial_queue:
+        out.append(("ci-queue-then-main", "runs on merge_group and again on push to %s: the commit the queue passed "
+                    "is tested twice" % default_branch))
     if on_pr and not re.search(r"cancel-in-progress\s*:\s*(true|\$\{\{)", conc + " " + job_conc):
         out.append(("ci-pr-cancel-superseded", "no cancel-in-progress: a new push to a pull request leaves the old "
                     "run going"))
@@ -198,7 +237,8 @@ def billed_jobs(jobs):
 
 
 def list_runs(repo, now, log=lambda m: None):
-    """Every run created in the last 30 days: [(id, workflow path, event, conclusion, created, wall minutes)]."""
+    """Every run created in the last 30 days:
+    [(id, workflow path, event, conclusion, created, wall minutes, attempt, head sha, head branch)]."""
     def page(q, n):
         return audit.gh_api("repos/%s/actions/runs?per_page=100&page=%d&created=%s" % (repo, n, q)) or {}
 
@@ -230,8 +270,25 @@ def list_runs(repo, now, log=lambda m: None):
                 c = audit.parse_ts(r.get("created_at"))
                 if c and now - c <= dt.timedelta(days=30):
                     out.append((r["id"], audit.wf_key(r), r.get("event") or "?", r.get("conclusion") or "running",
-                                c, audit.run_minutes(r), r.get("run_attempt") or 1))
+                                c, audit.run_minutes(r), r.get("run_attempt") or 1, r.get("head_sha") or "",
+                                r.get("head_branch") or ""))
     return list({r[0]: r for r in out}.values())
+
+
+def quick_superseded(runs, hold=HOLD_MIN):
+    """Ids of the cancelled pull-request runs that a later run of the same workflow on the same branch replaced
+    within `hold` minutes: the runs a hold before the expensive jobs would have made cheap."""
+    by_branch = {}
+    for r in runs:
+        if r[2] == "pull_request" and len(r) > 8 and r[8]:
+            by_branch.setdefault((r[1], r[8]), []).append(r)
+    out = set()
+    for rs in by_branch.values():
+        rs.sort(key=lambda r: r[4])
+        for i, r in enumerate(rs[:-1]):
+            if r[3] == "cancelled" and rs[i + 1][4] - r[4] <= dt.timedelta(minutes=hold):
+                out.add(r[0])
+    return out
 
 
 def bucket_of(age_days):
@@ -251,8 +308,11 @@ def evenly(items, k):
 def measure(repo, runs, now, samples=SAMPLES, log=lambda m: None):
     """Billed minutes per stratum, extrapolated. Returns the cost tables for each window."""
     strata = {}
+    quick = quick_superseded(runs)
     for r in runs:
-        _id, wf, ev, con, created, _wall, _att = r
+        _id, wf, ev, con, created = r[:5]
+        if _id in quick:
+            con = "cancelled-quick"  # priced apart: these billed far less than a run cancelled late
         age = (now - created).total_seconds() / 86400.0
         strata.setdefault((wf, ev, con, bucket_of(age)), []).append(r)
     picks = {k: evenly(sorted(v, key=lambda r: r[4]), samples) for k, v in strata.items()}
@@ -274,7 +334,8 @@ def measure(repo, runs, now, samples=SAMPLES, log=lambda m: None):
             per.setdefault(k, []).append(js)
 
     tables = {w: {"by_workflow": {}, "by_event": {}, "by_job": {}, "by_os": {}, "waste": {}, "runs": 0,
-                  "minutes": 0.0, "legs": {}} for w in WINDOWS}
+                  "minutes": 0.0, "legs": {}, "by_event_con": {}, "runs_by": {}, "job_runs": {}, "sampled_runs": {}}
+              for w in WINDOWS}
     for k, rs in strata.items():
         wf, ev, con, b = k
         samp = per.get(k)
@@ -286,18 +347,25 @@ def measure(repo, runs, now, samples=SAMPLES, log=lambda m: None):
                 continue
             t = tables[w]
             t["runs"] += len(rs)
+            _add(t["runs_by"], "%s %s %s" % (wf, ev, con), len(rs))
             for js in samp:
+                _add(t["sampled_runs"], wf, 1)
+                per_job = {}
                 for name, leg, osn, billed, _raw in js:
                     m = billed * weight
                     t["minutes"] += m
                     _add(t["by_workflow"], wf, m)
                     _add(t["by_event"], "%s %s" % (wf, ev), m)
+                    _add(t["by_event_con"], "%s %s %s" % (wf, ev, con), m)
                     _add(t["by_job"], "%s :: %s" % (wf, name), m)
                     _add(t["by_os"], osn, m)
-                    if con in ("cancelled", "failure", "timed_out"):
-                        _add(t["waste"], con, m)
+                    _add(per_job, name, billed)
+                    if con.split("-")[0] in ("cancelled", "failure", "timed_out"):
+                        _add(t["waste"], con.split("-")[0], m)
                     if leg != name:
                         t["legs"].setdefault("%s :: %s" % (wf, name), {}).setdefault(leg, []).append(billed)
+                for name, mins in per_job.items():
+                    t["job_runs"].setdefault("%s :: %s" % (wf, name), []).append(mins)
     return tables, strata
 
 
@@ -341,10 +409,24 @@ def usd(t, linux_price):
     return price
 
 
-def savings(rule, finding, t, strata, window, now):
+def savings(rule, finding, t, strata, window, now, default_branch="main"):
     """Billed minutes in `window` the rule's fix would save, from the measurement. None = not measurable here."""
     wf = finding["workflow"].split("/")[-1]
     ev = t["by_event"]
+    if "_minutes" in finding:  # a measured rule priced itself
+        return finding["_minutes"]
+    if rule == "ci-queue-then-main":
+        # the same runs the window's minutes were built from: strata whose age bucket starts inside the window
+        inside = [(k, rs) for k, rs in strata.items() if k[0] == wf and BUCKETS[k[3]][0] < window]
+        passed = {r[7] for (_w, e, c, _b), rs in inside if e == "merge_group" and c == "success"
+                  for r in rs if len(r) > 7 and r[7]}
+        pushes = [r for (_w, e, _c, _b), rs in inside if e == "push" for r in rs]
+        if not pushes or not passed:
+            return None
+        # only a push to the default branch is skipped; the workflow may also run on pushes to the queue's own
+        # branches, with the candidate's sha, and those stay
+        twice = sum(1 for r in pushes if len(r) > 8 and r[8] == default_branch and r[7] in passed)
+        return ev.get("%s push" % wf, 0.0) / float(len(pushes)) * twice
     if rule == "ci-main-batched":
         cut = now - dt.timedelta(days=window)
         pushes = [r for (w, e, _c, _b), rs in strata.items() if w == wf and e == "push" for r in rs if r[4] >= cut]
@@ -365,7 +447,92 @@ def savings(rule, finding, t, strata, window, now):
     return None
 
 
-def measured_findings(t):
+def per_run(t, wf, ev, con):
+    """(average billed minutes of one such run, how many there were) in the window."""
+    key = "%s %s %s" % (wf, ev, con)
+    n = t["runs_by"].get(key, 0)
+    return (t["by_event_con"].get(key, 0.0) / n if n else 0.0), n
+
+
+def pr_vs_queue(t):
+    """ci-pr-selection-queue-full: a passing pull-request run bills about what a merge-queue run bills."""
+    out = []
+    for wf in t["by_workflow"]:
+        pr, npr = per_run(t, wf, "pull_request", "success")
+        mq, nmq = per_run(t, wf, "merge_group", "success")
+        if npr >= 5 and nmq >= 5 and mq > 0 and pr >= 0.8 * mq:
+            out.append({"rule": "ci-pr-selection-queue-full", "workflow": wf,
+                        "evidence": "a passing pull-request run bills %.0f min and a merge-queue run %.0f: the queue "
+                                    "already runs the full suite and the pull request repeats it" % (pr, mq),
+                        "_minutes": t["by_event_con"].get("%s pull_request success" % wf, 0.0) * 0.5})
+    return out
+
+
+FOLD_EXEMPT = {"changes", "dedupe", "hold"}  # the jobs the standard fixes add: they stay separate by design
+
+
+def fold_exempt(text):
+    """Job ids and names in one workflow that ci-fold-small-jobs leaves alone: the standard fixes' helper jobs and
+    any aggregate job that exists to `need` three or more others."""
+    out = set(FOLD_EXEMPT)
+    for job, lines in jobs_of(text).items():
+        code = _code(lines)
+        name = re.search(r"^[ \t]*name[ \t]*:[ \t]*(.+)$", code, re.M)
+        m = re.search(r"^[ \t]*needs[ \t]*:[ \t]*(.*)$", code, re.M)
+        needed = re.findall(r"[A-Za-z0-9_][A-Za-z0-9_-]*", m.group(1)) if m else []
+        if m and not m.group(1).strip():  # a list on the lines right after `needs:`, and only those
+            for ln in code[m.end():].splitlines()[1:]:
+                item = re.match(r"^[ \t]*-[ \t]*([A-Za-z0-9_][A-Za-z0-9_-]*)[ \t]*$", ln)
+                if not item:
+                    break
+                needed.append(item.group(1))
+        if len(needed) >= 3 or job in FOLD_EXEMPT:
+            out.add(job)
+            if name:
+                out.add(name.group(1).strip().strip("'\""))
+    return out
+
+
+def small_jobs(t, exempt=None):
+    """ci-fold-small-jobs: three or more jobs of one workflow that bill a minute or two per run, each present in
+    at least half the sampled runs; `exempt` maps a workflow to the job names left alone (fold_exempt)."""
+    out = []
+    for wf, n in t["sampled_runs"].items():
+        means = {}
+        skip = (exempt or {}).get(wf, set())
+        for key, vals in t["job_runs"].items():
+            w, name = key.split(" :: ", 1)
+            if w == wf and name not in skip and len(vals) >= 0.5 * n and sum(vals) / float(len(vals)) <= 2.0:
+                means[name] = sum(vals) / float(len(vals))
+        if len(means) >= 3:
+            mins = sum(t["by_job"].get("%s :: %s" % (wf, name), 0.0) for name in means)
+            out.append({"rule": "ci-fold-small-jobs", "workflow": wf,
+                        "evidence": "%d jobs bill a minute or two each per run (%s): each pays its own checkout and "
+                                    "install" % (len(means), ", ".join(sorted(means))),
+                        "_minutes": mins * (len(means) - 1) / float(len(means))})
+    return out
+
+
+def hold_net(t, hold=HOLD_MIN):
+    """ci-pr-hold-superseded: what a hold before the expensive jobs saves on the runs superseded within it (their
+    own sampled minutes, the `cancelled-quick` stratum of quick_superseded), net of the hold every pull-request run
+    pays. Reported only when it pays."""
+    out = []
+    for wf in t["by_workflow"]:
+        avg, quick = per_run(t, wf, "pull_request", "cancelled-quick")
+        _late, late = per_run(t, wf, "pull_request", "cancelled")
+        n_pr = sum(n for key, n in t["runs_by"].items() if key.startswith("%s pull_request " % wf))
+        net = quick * max(0.0, avg - hold) - hold * (n_pr - quick)
+        if quick and net > 0:
+            out.append({"rule": "ci-pr-hold-superseded", "workflow": wf,
+                        "evidence": "%d of %d cancelled pull-request runs were superseded within %d minutes and had "
+                                    "billed %.0f minutes each on average; a %d-minute hold saves about %.0f min net of "
+                                    "what every pull-request run pays for it" % (quick, quick + late, hold, avg, hold, net),
+                        "_minutes": net})
+    return out
+
+
+def measured_findings(t, exempt=None):
     out = []
     for key, legs in t["legs"].items():
         avgs = {leg: sum(v) / float(len(v)) for leg, v in legs.items() if v}
@@ -380,6 +547,7 @@ def measured_findings(t):
         out.append({"rule": "ci-waste", "workflow": "*",
                     "evidence": "%.0f%% of billed minutes went to runs that were cancelled or failed" %
                                 (100 * waste / t["minutes"])})
+    out += pr_vs_queue(t) + small_jobs(t, exempt) + hold_net(t)
     return out
 
 
@@ -403,6 +571,7 @@ def cost_repo(repo, now=None, samples=SAMPLES, wf_text=None, default_branch=None
     tables, strata = measure(repo, runs, now, samples, log)
     lin = billing_price(repo.split("/")[0], now)
     lints = [f for p, txt in sorted(wf_text.items()) for f in lint(p, txt, default_branch)]
+    exempt = {p.split("/")[-1]: fold_exempt(txt) for p, txt in wf_text.items()}
     windows = {}
     for w in WINDOWS:
         t = tables[w]
@@ -411,8 +580,9 @@ def cost_repo(repo, now=None, samples=SAMPLES, wf_text=None, default_branch=None
         floor = max(100.0, 0.05 * t["minutes"])  # a rule on a workflow that costs next to nothing is noise
         keep = [f for f in lints if f["rule"] == "ci-poll-frequency"
                 or t["by_workflow"].get(f["workflow"].split("/")[-1], 0.0) >= floor]
-        for f in keep + measured_findings(t):
-            s = savings(f["rule"], f, t, strata, w, now)
+        for f in keep + measured_findings(t, exempt):
+            s = savings(f["rule"], f, t, strata, w, now, default_branch)
+            f = {k: v for k, v in f.items() if k != "_minutes"}
             findings.append(dict(f, title=STANDARD_RULES[f["rule"]][0], fix=STANDARD_RULES[f["rule"]][1],
                                  saves_minutes=None if s is None else round(s),
                                  saves_usd=None if s is None else round(s * price, 2)))
