@@ -184,8 +184,9 @@ def lint(path, text, default_branch):
                         "%s gets its own group and its own full run" % default_branch))
     queued = re.search(r"\bmerge_group\b", _code(top_block(text, "on")))
     code = _code(text.splitlines())
-    deduped = re.search(r"skip_duplicate_main\.py|event=merge_group|--event merge_group", code)
-    partial_queue = re.search(r"""event_name\s*!=\s*['"]merge_group['"]""", code)  # the queue run skips jobs
+    deduped = re.search(r"skip_duplicate_main\.py|event=merge_group&|-f event=merge_group|--event merge_group", code)
+    # a job the queue run does not execute (only on push, or not on merge_group): that queue run is no full suite
+    partial_queue = re.search(r"""event_name\s*(!=\s*['"]merge_group['"]|==\s*['"]push['"])""", code)
     if queued and audit.push_to_branch(trig, default_branch) and len(jobs) >= 2 and not deduped and not partial_queue:
         out.append(("ci-queue-then-main", "runs on merge_group and again on push to %s: the commit the queue passed "
                     "is tested twice" % default_branch))
@@ -478,11 +479,13 @@ def fold_exempt(text):
         code = _code(lines)
         name = re.search(r"^[ \t]*name[ \t]*:[ \t]*(.+)$", code, re.M)
         m = re.search(r"^[ \t]*needs[ \t]*:[ \t]*(.*)$", code, re.M)
-        if not m:
-            continue
-        needed = re.findall(r"[A-Za-z0-9_][A-Za-z0-9_-]*", m.group(1))
-        if not m.group(1).strip():  # a list on the following lines
-            needed = re.findall(r"^[ \t]*-[ \t]*([A-Za-z0-9_][A-Za-z0-9_-]*)", code[m.end():], re.M)
+        needed = re.findall(r"[A-Za-z0-9_][A-Za-z0-9_-]*", m.group(1)) if m else []
+        if m and not m.group(1).strip():  # a list on the lines right after `needs:`, and only those
+            for ln in code[m.end():].splitlines()[1:]:
+                item = re.match(r"^[ \t]*-[ \t]*([A-Za-z0-9_][A-Za-z0-9_-]*)[ \t]*$", ln)
+                if not item:
+                    break
+                needed.append(item.group(1))
         if len(needed) >= 3 or job in FOLD_EXEMPT:
             out.add(job)
             if name:

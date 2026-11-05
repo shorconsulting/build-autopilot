@@ -186,6 +186,10 @@ class CiCostTest(unittest.TestCase):
         # a job the queue run skips: the queue run is no full suite, so the push run must stay
         self.assertNotIn("ci-queue-then-main", rules(QUEUE.replace(
             "  test:\n", "  test:\n    if: github.event_name != 'merge_group'\n")))
+        self.assertNotIn("ci-queue-then-main", rules(QUEUE.replace(
+            "  test:\n", "  test:\n    if: github.event_name == 'push'\n")))
+        # a mention in a string is no dedupe
+        self.assertIn("ci-queue-then-main", rules(QUEUE.replace("npm test", "echo 'see event=merge_group docs'")))
 
     def test_docs_only_counts_the_fix_as_made(self):
         def rules(text):
@@ -274,8 +278,13 @@ class CiCostTest(unittest.TestCase):
         self.assertEqual(ci_cost.small_jobs(t), [])
         t["job_runs"]["ci.yml :: c"] = [1] * 10
         self.assertEqual(ci_cost.small_jobs(t, {"ci.yml": {"c"}}), [])  # an exempt job (fold_exempt)
-        text = "jobs:\n  changes:\n    steps: []\n  gates:\n    name: every gate\n    needs: [a, b, c]\n  x:\n    needs:\n      - a\n      - b\n      - c\n  y:\n    needs: [a]\n"
-        self.assertEqual(ci_cost.fold_exempt(text), {"changes", "dedupe", "hold", "gates", "every gate", "x"})
+        text = ("jobs:\n  changes:\n    name: Detect changes\n    steps:\n      - run: git diff\n"
+                "  gates:\n    name: every gate\n    needs: [a, b, c]\n"
+                "  x:\n    needs:\n      - a\n      - b\n      - c\n    steps:\n      - run: true\n"
+                "  lint:\n    name: Lint\n    needs:\n      - changes\n    steps:\n      - uses: a\n      - run: b\n      - name: c\n"
+                "  y:\n    needs: [a]\n")
+        self.assertEqual(ci_cost.fold_exempt(text),
+                         {"changes", "Detect changes", "dedupe", "hold", "gates", "every gate", "x"})
 
     def test_hold_pays_only_when_the_superseding_push_is_quick(self):
         w7 = self.cost()
