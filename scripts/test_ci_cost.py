@@ -104,9 +104,11 @@ def job(name, minutes, labels=("ubuntu-24.04",), conclusion="success"):
 
 
 class FakeGh:
-    """Read-only answers, 30 days of CI: every 20 minutes a pull request, a push, then the merge-queue run that
-    passed the pushed commit (same sha); and four cancelled pull-request runs a day, each superseded two minutes
-    later on its branch. Each run bills 1 + 2x10 + 1 + 1 minutes (static, two shards, contract, build)."""
+    """Read-only answers, 30 days of CI: every 20 minutes a pull request, a push to main, then the merge-queue run
+    that passed the pushed commit (same sha; the last queue run of the day passed another commit, so one push a day
+    has no twin); two pushes a day on the queue's own branch with a candidate's sha; six cancelled pull-request runs
+    a day each superseded two minutes later on its branch, and one superseded two minutes later on ANOTHER branch.
+    Each run bills 1 + 2x10 + 1 + 1 minutes (static, two shards, contract, build)."""
 
     def __init__(self):
         self.calls = []
@@ -127,16 +129,24 @@ class FakeGh:
                         "conclusion": conclusion, "created_at": ts(c), "run_started_at": ts(c),
                         "updated_at": ts(c + dt.timedelta(minutes=90)), "run_attempt": 1, "head_sha": sha,
                         "head_branch": branch}
+            def sha_of(i):
+                return "%040x" % (int(day.timestamp()) + i // 3)  # the push and the queue run share the commit
             for i in range(30):
                 c = day + dt.timedelta(minutes=20 * i)
                 ev = ("pull_request", "push", "merge_group")[i % 3]
-                sha = "%040x" % (int(day.timestamp()) + i // 3)  # the push and the queue run share the commit
+                sha = sha_of(i) if i != 29 else "%040x" % 999999  # the day's last queue run: another commit
                 runs.append(run(c, i, ev, "success", sha, "main" if ev != "pull_request" else "feature-%d" % i))
-            for i in range(4):
+            for i in range(2):  # the workflow also runs on pushes to the queue's branch, with the candidate's sha
+                c = day + dt.timedelta(hours=11, minutes=5 * i)
+                runs.append(run(c, 40 + i, "push", "success", sha_of(3 * i), "gh-readonly-queue/main/pr-%d" % i))
+            for i in range(6):
                 c = day + dt.timedelta(hours=12, minutes=10 * i)
                 runs.append(run(c, 50 + i, "pull_request", "cancelled", "%040x" % i, "quick-%d" % i))
                 runs.append(run(c + dt.timedelta(minutes=2), 60 + i, "pull_request", "success", "%040x" % (10 + i),
                                 "quick-%d" % i))
+            c = day + dt.timedelta(hours=14)
+            runs.append(run(c, 70, "pull_request", "cancelled", "%040x" % 70, "lonely"))
+            runs.append(run(c + dt.timedelta(minutes=2), 71, "pull_request", "success", "%040x" % 71, "other"))
             return json.dumps({"total_count": len(runs), "workflow_runs": runs})
         if "/jobs?" in path:
             return json.dumps({"jobs": [job("static", 0.5), job("test (1)", 9.2), job("test (2)", 10),
@@ -169,6 +179,13 @@ class CiCostTest(unittest.TestCase):
         self.assertNotIn("ci-queue-then-main", rules(CI))  # no merge queue: the push run is the only full run
         self.assertNotIn("ci-queue-then-main", rules(DEDUPED))  # the gate's script
         self.assertNotIn("ci-queue-then-main", rules(INLINE))  # the inline check of a pipeline: own repo
+        self.assertNotIn("ci-queue-then-main", rules(INLINE.replace(
+            'gh api "repos/$R/actions/workflows/ci.yml/runs?event=merge_group&head_sha=$GITHUB_SHA&status=success"',
+            "gh run list --event merge_group --commit $GITHUB_SHA")))
+        self.assertIn("ci-queue-then-main", rules(QUEUE.replace("jobs:\n", "# TODO: skip_duplicate_main.py\njobs:\n")))
+        # a job the queue run skips: the queue run is no full suite, so the push run must stay
+        self.assertNotIn("ci-queue-then-main", rules(QUEUE.replace(
+            "  test:\n", "  test:\n    if: github.event_name != 'merge_group'\n")))
 
     def test_docs_only_counts_the_fix_as_made(self):
         def rules(text):
@@ -226,7 +243,9 @@ class CiCostTest(unittest.TestCase):
         f = {x["rule"]: x for x in w7["findings"]}["ci-queue-then-main"]
         pushes = {r["name"]: r["minutes"] for r in w7["by_event"]}["ci.yml push"]
         self.assertGreater(pushes, 0)
-        self.assertEqual(f["saves_minutes"], pushes)  # every push's commit had passed as a merge-queue candidate
+        # of 12 pushes a day, 9 are pushes to main whose commit a queue run had passed; the two on the queue's own
+        # branch and the one main push with no twin are not skipped
+        self.assertAlmostEqual(f["saves_minutes"], pushes * 9 / 12.0, delta=1)
         self.assertNotIn("ci-queue-then-main", {x["rule"] for x in self.cost(DEDUPED)["findings"]})
 
     def test_pull_request_as_costly_as_the_queue_run_is_flagged(self):
@@ -238,32 +257,54 @@ class CiCostTest(unittest.TestCase):
                                                            "ci.yml merge_group success": 500.0},
              "runs_by": {"ci.yml pull_request success": 10, "ci.yml merge_group success": 10}}
         self.assertEqual(ci_cost.pr_vs_queue(t), [])  # the pull request already runs a fifth of the queue's suite
+        t["by_event_con"]["ci.yml pull_request success"] = 500.0
+        self.assertEqual(len(ci_cost.pr_vs_queue(t)), 1)
+        t["runs_by"]["ci.yml merge_group success"] = 3  # too few queue runs to compare against
+        self.assertEqual(ci_cost.pr_vs_queue(t), [])
 
     def test_small_jobs_are_folded(self):
         w7 = self.cost()
         f = {x["rule"]: x for x in w7["findings"]}["ci-fold-small-jobs"]
         self.assertIn("(build, contract, static)", f["evidence"])
         self.assertAlmostEqual(f["saves_minutes"], 2 * w7["runs"], delta=1)  # three 1-minute jobs become one
+        t = {"sampled_runs": {"ci.yml": 10}, "by_job": {"ci.yml :: a": 10, "ci.yml :: b": 10, "ci.yml :: c": 10},
+             "job_runs": {"ci.yml :: a": [1] * 10, "ci.yml :: b": [1] * 10, "ci.yml :: c": [1] * 10}}
+        self.assertEqual(len(ci_cost.small_jobs(t)), 1)
+        t["job_runs"]["ci.yml :: c"] = [1]  # a job that ran once in ten runs is not a job to fold
+        self.assertEqual(ci_cost.small_jobs(t), [])
+        t["job_runs"]["ci.yml :: c"] = [1] * 10
+        self.assertEqual(ci_cost.small_jobs(t, {"ci.yml": {"c"}}), [])  # an exempt job (fold_exempt)
+        text = "jobs:\n  changes:\n    steps: []\n  gates:\n    name: every gate\n    needs: [a, b, c]\n  x:\n    needs:\n      - a\n      - b\n      - c\n  y:\n    needs: [a]\n"
+        self.assertEqual(ci_cost.fold_exempt(text), {"changes", "dedupe", "hold", "gates", "every gate", "x"})
 
     def test_hold_pays_only_when_the_superseding_push_is_quick(self):
         w7 = self.cost()
         f = {x["rule"]: x for x in w7["findings"]}["ci-pr-hold-superseded"]
         self.assertIn("superseded within 5 minutes", f["evidence"])
         self.assertGreater(f["saves_minutes"], 0)
-        t = {"by_event_con": {"ci.yml pull_request cancelled": 230.0}, "runs_by": {"ci.yml pull_request cancelled": 10}}
-        mk = lambda m, con, branch: (1, "ci.yml", "pull_request", con, NOW - dt.timedelta(minutes=m), 0, 1, "", branch)
-        late = {("ci.yml", "pull_request", "cancelled", 0): [mk(60, "cancelled", "b")],
-                ("ci.yml", "pull_request", "success", 0): [mk(30, "success", "b")]}  # superseded after 30 minutes
-        self.assertEqual(ci_cost.hold_net(t, late, NOW, 7), [])
-        quick = {("ci.yml", "pull_request", "cancelled", 0): [mk(60, "cancelled", "b")],
-                 ("ci.yml", "pull_request", "success", 0): [mk(58, "success", "b")]}
-        # 18 saved on the cancelled run (23 billed, less the hold), less the hold the other run pays
-        self.assertEqual(ci_cost.hold_net(t, quick, NOW, 7)[0]["_minutes"], (23 - 5) - 5)
+        # which cancelled runs a hold would have made cheap: superseded on the SAME branch within the hold
+        mk = lambda i, m, con, branch: (i, "ci.yml", "pull_request", con, NOW - dt.timedelta(minutes=m), 0, 1, "", branch)
+        runs = [mk(1, 60, "cancelled", "b"), mk(2, 58, "success", "b"),      # quick
+                mk(3, 50, "cancelled", "c"), mk(4, 48, "success", "d"),      # another branch: not a supersede
+                mk(5, 40, "cancelled", "e"), mk(6, 10, "success", "e"),      # 30 minutes later: the shards had run
+                mk(7, 30, "cancelled", ""), mk(8, 28, "success", "")]        # no branch known
+        self.assertEqual(ci_cost.quick_superseded(runs), {1})
+        # priced from the quick runs' own sample, net of the hold every pull-request run pays
+        t = {"by_workflow": {"ci.yml": 1},
+             "by_event_con": {"ci.yml pull_request cancelled-quick": 4.0, "ci.yml pull_request cancelled": 900.0,
+                              "ci.yml pull_request success": 23.0},
+             "runs_by": {"ci.yml pull_request cancelled-quick": 1, "ci.yml pull_request cancelled": 9,
+                         "ci.yml pull_request success": 1}}
+        self.assertEqual(ci_cost.hold_net(t), [])  # one quick run that billed 4; nine late ones at 100 do not count
+        t["by_event_con"]["ci.yml pull_request cancelled-quick"] = 5 * 23.0
+        t["runs_by"]["ci.yml pull_request cancelled-quick"] = 5
+        self.assertEqual(ci_cost.hold_net(t)[0]["_minutes"], 5 * (23 - 5) - 5 * (1 + 9))
 
     def test_reads_only_a_sample_of_jobs(self):
         ci_cost.cost_repo("acme/widgets", NOW, samples=3, wf_text={}, default_branch="main")
         job_calls = [a for a in audit.gh.calls if "/jobs?" in a[1]]
-        self.assertLessEqual(len(job_calls), 4 * 3 * 3)  # 4 strata (event x conclusion) x 3 buckets x 3 samples
+        # 5 strata (pull_request success / cancelled-quick / cancelled, push, merge_group) x 3 buckets x 3 samples
+        self.assertLessEqual(len(job_calls), 5 * 3 * 3)
 
     def test_policy_default_turns_the_rules_on(self):
         self.assertEqual(lanes.effective({})["ci_cost"], {"rules": "standard", "off": []})

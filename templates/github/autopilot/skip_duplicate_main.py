@@ -18,8 +18,9 @@ Two halves, both in the repo's test workflow:
     pushed commit itself (same sha, same workflow file), the push run skips on that alone -- no tree to compare, no
     pull request to inspect, and a batch of several pull requests that landed as one push skips too.
 
-A skip is a step automation drops on a person's behalf, so it is never silent: the run's summary and a comment on the
-merged pull request say "Decided without you", why, and how to undo it (run the tests anyway, or turn the setting off).
+A skip is a step automation drops on a person's behalf, so it is never silent: the run's summary says "Decided without
+you", why, and how to undo it (run the tests anyway, or turn the setting off), and so does a comment on the merged pull
+request when the push merged exactly one (a batch the queue landed as one push has only the summary).
 
 Needs GITHUB_TOKEN with contents: read, pull-requests: write (the comment), actions: read. Standard library only.
 """
@@ -117,7 +118,7 @@ def report(gh, repo, pr_number, text):
         gh.send("POST", "/repos/%s/issues/%d/comments" % (repo, pr_number),
                 {"body": "<!-- build-autopilot:skip-duplicate-main -->\n" + text})
     except Exception as e:  # the run summary has the note either way
-        print("Could not comment on pull request #%d: %s" % (pr_number, e))
+        print("Could not comment on pull request #%s: %s" % (pr_number, e))
 
 
 def main(argv):
@@ -139,7 +140,7 @@ def main(argv):
     if summary:
         with open(summary, "a", encoding="utf-8") as f:
             f.write(text)
-    if skip:
+    if skip and pr_number is not None:  # a batched queue push has no single pull request to note it on
         report(gh, repo, pr_number, text)
     out = os.environ.get("GITHUB_OUTPUT")
     if out:

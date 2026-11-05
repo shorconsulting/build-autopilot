@@ -5,11 +5,13 @@ Real git repos in temp folders, a fake GitHub and a fake Claude; no network. Run
 """
 import base64
 import json
+import os
 import re
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import gate_harness as h  # noqa: E402
@@ -727,6 +729,19 @@ class SkipDuplicateMain(unittest.TestCase):
         # a batch of pull requests that landed as one push: skip, with no single pull request to note it on
         skip, _reason, number = self.check(gh=self.gh(tested_tree="z" * 40, merged=2, queue=[self.queue_run()]))
         self.assertEqual((skip, number), (True, None))
+
+    def test_a_batched_queue_push_skips_from_main_with_the_summary_only(self):
+        gh = self.gh(tested_tree="z" * 40, merged=2, queue=[self.queue_run()])
+        tmp = Path(self._tmp.name)
+        (tmp / "event.json").write_text(json.dumps(self.event()))
+        out, summary = tmp / "out.txt", tmp / "summary.md"
+        env = {"GITHUB_EVENT_PATH": str(tmp / "event.json"), "GITHUB_REPOSITORY": h.REPO, "GITHUB_WORKSPACE": str(tmp),
+               "GITHUB_OUTPUT": str(out), "GITHUB_STEP_SUMMARY": str(summary), "GITHUB_TOKEN": "t"}
+        with mock.patch.dict(os.environ, env), mock.patch.object(dedupe, "GitHub", lambda *a, **k: gh):
+            self.assertEqual(dedupe.main(["skip_duplicate_main.py", "test.yml"]), 0)
+        self.assertEqual(out.read_text().strip(), "skip=true")
+        self.assertIn("### Decided without you", summary.read_text())
+        self.assertEqual(gh.comments, [])  # no single pull request to note it on
 
     def test_queue_run_must_be_this_workflow_commit_and_green(self):
         for name, run in [("failed", self.queue_run(conclusion="failure")),

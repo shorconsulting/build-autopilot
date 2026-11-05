@@ -174,7 +174,9 @@ Turns the page's choices into the repo's `.github/autopilot.json`.
      with `pipeline: own` or `none`, a `dedupe` job of one `gh api` step on
      `actions/workflows/<file>/runs?event=merge_group&head_sha=$GITHUB_SHA&status=success` that writes `skip` only
      for a run with conclusion success, that sha, that event and that workflow path (any error: `false`), and never
-     the gate's files. Either way the heavy jobs `need` it and skip when `skip == 'true'`, the aggregate check still
+     the gate's files. Only where the queue run executes the heavy jobs: a job conditioned on the event not being
+     `merge_group` makes the queue run a false pass, and then the push run must stay (the rule is not reported
+     there). Either way the heavy jobs `need` it and skip when `skip == 'true'`, the aggregate check still
      reports green on a skip (a release keyed on the push run must still go), and the run summary says what was
      skipped, why and how to undo it. Where the repo's own policy pins its workflow files (a workflow-policy gate),
      make the change through that policy in the same pull request rather than around it.
