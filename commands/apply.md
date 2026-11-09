@@ -1,5 +1,5 @@
 ---
-description: Put a repo's settings from the page into the repo with one pull request (--me: your own preferences)
+description: "Put a repo's settings from the page into the repo with one pull request (--me: your own preferences)"
 argument-hint: "[owner/repo ...] | --me"
 ---
 
