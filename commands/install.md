@@ -1,5 +1,5 @@
 ---
-description: Take one repo from chosen settings to working: GitHub setup, the install pull request, branch rules
+description: "Take one repo from chosen settings to working: GitHub setup, the install pull request, branch rules"
 argument-hint: "[owner/repo]"
 ---
 
