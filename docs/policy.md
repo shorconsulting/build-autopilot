@@ -14,6 +14,7 @@ A repo without the file behaves as `manual` with questions `ask-now`: exactly as
   "repo": "your-org/your-repo",
   "phase": "prelaunch",
   "pipeline": "gate",
+  "runner": ["self-hosted", "your-ci"],
   "required_checks": ["API · unit + integration", "lint"],
   "level": "auto-merge",
   "sensitive": {
@@ -73,6 +74,17 @@ setting here.
 | `autopilot` | Changes merge and go live on their own once tests pass and the AI approves. A health check runs after each release and undoes it if it fails. | Nothing routine. You get a daily summary. |
 
 Each level includes everything in the levels above it.
+
+### `runner`: where the gate's jobs run
+
+Optional, `pipeline: gate` only. The GitHub Actions runner for the gate's four jobs (mark, review, decide, approve):
+a label (`"ubuntu-24.04"`) or a list of labels (`["self-hosted", "your-ci"]`). Left out, the gate runs on GitHub's
+`ubuntu-24.04`, as the template does. Set it when the repo's GitHub-hosted Actions is off (billing) or the repo keeps
+its own runners: a gate on a runner that never starts blocks every merge.
+
+`apply` writes the workflow through `scripts/render_gate.py`, which changes only the `runs-on` lines. When the page
+leaves `runner` out, `apply` keeps whatever runner the repo's current gate workflow already uses, so an apply never
+moves a repo back to GitHub's runners by accident. The review job's pinned wheels need Python 3.12 on the runner.
 
 ### `sensitive`: stricter handling for risky areas
 

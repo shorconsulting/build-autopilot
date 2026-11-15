@@ -730,6 +730,14 @@ function renderSettings(panel, slug) {
       onchange: e => save(s => s.tests.skip_duplicate_main = e.target.checked, e.target.checked ? "Skip the repeat test run after merging" : "Run tests again after merging") }),
       el("span", {}, "Skip the repeat test run after merging", el("small", { text: "When the change already passed the same tests on the same code." })))));
 
+  if (pipe === "gate") { const rid = `runner-${slug}`, cur = Array.isArray(st.runner) ? st.runner.join(", ") : (st.runner || "");
+    panel.append(el("div", { class: "field" }, el("label", { class: "lbl", for: rid, text: "Where the gate runs" }),
+      el("p", { class: "note", text: "Leave empty for GitHub's own runners (ubuntu-24.04). For your own runner, give its labels, such as: self-hosted, my-ci. Use this when GitHub-hosted Actions is off, or the gate never starts and nothing can merge." }),
+      el("input", { id: rid, type: "text", disabled: !state.canEdit, placeholder: "ubuntu-24.04", value: cur, autocomplete: "off",
+        onchange: e => { const v = e.target.value.split(",").map(x => x.trim()).filter(Boolean);
+          if (v.some(x => !/^[A-Za-z0-9._-]+$/.test(x))) return toast("A runner label has only letters, digits, dots, dashes and underscores");
+          save(s => { if (v.length) s.runner = v; else delete s.runner; }, v.length ? `Gate runs on: ${v.join(", ")}` : "Gate runs on GitHub's runners"); } }))); }
+
   panel.append(renderSuites(slug, st, save));
 
   if (!isDef) {

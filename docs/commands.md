@@ -130,9 +130,15 @@ Turns the page's choices into the repo's `.github/autopilot.json`.
 1. For each repo (default: the current checkout's), read `settings/<owner>__<name>`, falling back to
    `settings/_defaults`. If neither exists, say so and stop for that repo.
 2. Build the policy file exactly as `docs/policy.md` describes: `version: 1`, `repo`, `phase` (leave it out when the page has none: the repo's settings were saved before phases existed), `pipeline` (default `gate`),
+   `runner` (only when the page has one, or the repo's current `.github/autopilot.json` does: keep that value),
    `required_checks`, `level`, `sensitive`, `questions`, `tests` (with `suites` when the page has any), `always_ask`, `source` (the page link) and
    `applied_at` (now, UTC). Drop page-only fields (`dismissed`, `updated_by`, `updated_at`, `claude_md`).
    - `pipeline: gate`: the pull request also adds the gate's files (`docs/v2-install.md`, "What gets installed").
+     Write `.github/workflows/autopilot.yml` with `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/render_gate.py
+     ${CLAUDE_PLUGIN_ROOT}/templates/github/workflows/autopilot.yml .github/autopilot.json --existing
+     .github/workflows/autopilot.yml`, never by copying the template: the template runs on GitHub's `ubuntu-24.04`, and
+     a repo on its own runners would then block every merge. Say in the body which runner the gate uses and why
+     (the page's `runner`, or kept from the repo's workflow).
      Afterwards, tell the person to run `scripts/setup-github-gate.sh OWNER/REPO --ruleset` once it's merged.
    - `pipeline: own` or `none`: the pull request changes only `.github/autopilot.json`, the CLAUDE.md section, and
      the workflow edits for `tests.suites` and `ci_cost` below.

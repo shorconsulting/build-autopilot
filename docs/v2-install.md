@@ -18,7 +18,7 @@ What the gate does, and why it is built this way: [v2-report.md](v2-report.md). 
 | `.github/autopilot/skip_duplicate_main.py` | `templates/github/autopilot/skip_duplicate_main.py` | Only used if `tests.skip_duplicate_main` is on |
 | `.github/autopilot.json` | the settings page | The settings (v1 already writes this) |
 
-Copy the files byte for byte. Don't edit the workflow per repo except the two places marked below (required check
+Copy the files byte for byte, except the workflow: write it with `python3 scripts/render_gate.py templates/github/workflows/autopilot.yml .github/autopilot.json --existing .github/workflows/autopilot.yml`, which puts every job on the repo's `runner` (policy.md) and changes nothing else. Don't edit the workflow per repo except the two places marked below (required check
 names live in the ruleset, not the workflow).
 
 ## The quick way: one script (admin)
