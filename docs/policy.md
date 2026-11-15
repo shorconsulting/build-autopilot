@@ -214,6 +214,15 @@ Each audit is recorded (one line per run in `~/.build-autopilot/history/`), comp
 
 Turning a proposal on only saves it as a choice on the page. It reaches the repo when you run `/build-autopilot:apply`, which puts settings in `.github/autopilot.json` and any `CLAUDE.md` line in the same pull request. **Nothing changes a repo without a merged pull request**, and that pull request is never auto-merged.
 
+## Global build rules (not in this file)
+
+Some rules are the same for every build and are not chosen per repo, so they are not fields here: where questions go
+and when the person hears about them, that a lane is not done until its pull requests are merged and green,
+restarting stalled CI and lanes, a lane asking the steward for more work, and the hourly steward sweep for red and
+unfinished work. They are in `skills/build-rules/SKILL.md`, with their times and limits in `rules/build-rules.json`;
+`/build-autopilot:steward` runs the sweep and `--install` sets up its schedules. They work inside this file's
+settings: `always_ask`, `level`, `pipeline` and `sensitive` still decide what may merge or must go to a person.
+
 ## What enforces it
 
 | Setting | v1 (now) | v2 |
@@ -228,6 +237,7 @@ Turning a proposal on only saves it as a choice on the page. It reaches the repo
 | `ci_cost` | `apply` makes each finding's fix in the repo's workflow files, in the same reviewed pull request, for every `pipeline`; `audit --cost` measures it | Same |
 | `read_cap` | The `PreToolUse` hook in `hooks/hooks.json` (`scripts/read_cap.py`) | Same |
 | `sensitive` | Claude sessions run the second, adversarial review | The GitHub workflow requires both reviews |
+| Global build rules | The `build-rules` skill; the `SessionStart` note and the `Stop` hook (`scripts/finish_guard.py`) in `hooks/hooks.json`; the hourly `/build-autopilot:steward` routine | Same |
 
 The v2 column is built (not yet installed anywhere): `templates/github/`, installed per [v2-install.md](v2-install.md), design and threat model in [v2-report.md](v2-report.md). Release-with-health-check for `autopilot` and the `fast-lane` test lane are not built yet; the `wave` lane and `tests.suites` are.
 

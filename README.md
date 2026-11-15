@@ -20,6 +20,8 @@ Nothing about any particular person's repos is built in.
 | The Build Autopilot page | Shows each repo's audit, lets you turn recommendations on, and holds each repo's settings, plus each builder's own interruption preferences. One page per person or team; its link is kept in `~/.build-autopilot/config.json`. Pick a repo from the list; copy its settings to other repos in one step. |
 | `/build-autopilot:setup`, `:install`, `:audit`, `:apply`, `:settings` | `setup` makes or connects your page and picks your repos; `install` takes a repo through every remaining step; `audit` fills the page; `apply` writes a repo's settings into `.github/autopilot.json` with one pull request; `apply --me` saves your own preferences on this computer. |
 | `autopilot-policy` skill | Makes every Claude session in a repo follow that repo's settings. |
+| `build-rules` skill and `rules/build-rules.json` | The rules every build follows in every repo, with no per-repo switch: questions go in the build-questions list and reach the person's phone once a day (4:52 pm Central); a lane is not done until its pull requests are merged and green; stalled CI and lanes are restarted; a lane that runs out of work asks the steward for the next batch. A `SessionStart` note reminds every session, and a `Stop` hook (`scripts/finish_guard.py`) holds a session whose branch's PR is still red or running. |
+| `scripts/steward.py` and `/build-autopilot:steward` | The always-on steward. Every hour it sweeps the tracked repos for red pull requests (machine failures apart from real ones), stalled checks, conflicts, green PRs nobody is landing, idle drafts, `fast-builder/wip/*` branches with no PR, broken self-hosted runners and a red default branch, then re-runs, restarts, hands back or resumes them. Each sweep also records a CI health line, and what keeps coming back (a check failing on many PRs, a flaky job, a runner still broken, merges slowing) becomes a fix rather than another re-run. `--install` sets up the hourly sweep and the daily questions digest. |
 | `scripts/lanes.py` | Phases and test lanes: what each phase sets, which `tests.suites` a set of changed files runs (so the mobile suite runs when the app or the database changes, and not otherwise), and rewriting a workflow's `paths:` list from the policy. Waves (`phase: prelaunch`, the `wave` test lane) are the default. |
 | Context efficiency (in `scripts/audit.py` and the page) | Per repo, from the same transcripts: Read and Bash results over 20k characters, the Opus / Sonnet / Haiku mix, weighted token spend and the subagent share, tool-error rate, with fixed recommendations (counts only). |
 | History and deltas (in `scripts/audit.py`) | Every audit appends one line per repo to `~/.build-autopilot/history/` (`--history-dir` to move it); the next audit shows what changed since, next to each number on the page, and which settings were changed. |
@@ -57,6 +59,8 @@ one, then lists the repos you've pushed to lately and asks which to track.
 /build-autopilot:settings                      # open the page
 /build-autopilot:apply                         # put the page's choices into the current repo
 /build-autopilot:apply --me                    # your own preferences, on this computer
+/build-autopilot:steward                       # sweep for red and unfinished work and resume it
+/build-autopilot:steward --install             # the hourly sweep and the daily 5 pm questions digest
 ```
 
 ### Without Claude
@@ -70,7 +74,7 @@ python3 scripts/ci_cost.py --repo owner/repo --out cost.json
 ## Safe by default
 
 - A repo with no settings behaves exactly as it does today.
-- The audit never changes anything.
+- The audit and the steward's sweep never change anything; the steward acts only within each repo's settings.
 - Settings reach a repo only through a pull request that a person merges. That pull request is never auto-merged.
 - Claude sessions never edit `.github/autopilot.json`.
 - Sign-in, payments, health data, database changes and the automation rules themselves get two independent AI

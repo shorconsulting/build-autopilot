@@ -233,3 +233,66 @@ Turns the page's choices into the repo's `.github/autopilot.json`.
 ## settings
 
 Open the page with the Artifact tool (`action: "open"`, `url` from `~/.build-autopilot/config.json`).
+
+## steward
+
+The always-on steward of the global build rules (`skills/build-rules/SKILL.md`, values in `rules/build-rules.json`).
+It finds unfinished build work in every tracked repo and gets it moving again. It runs unattended: no questions to
+the person, nothing on the `always_ask` list, no merging or releasing beyond what each repo's
+`.github/autopilot.json` allows, and never around branch rules. Arguments: repos (`owner/repo ...`; default: every
+repo with an `audits` document on the page, else the current checkout), `--dry-run` (sweep and report, act on
+nothing), or `--install`.
+
+**`--install`** sets up the two schedules the rules need, once per person (not per repo), in a cloud environment
+with this plugin and build-questions installed and GitHub access to the tracked repos:
+
+1. The hourly sweep: `create_trigger` with `create_new_session_on_fire: true`, the cron in `steward.cron`, and the
+   prompt `/build-autopilot:steward`. Replace an existing steward trigger with `update_trigger` instead of adding a
+   second one.
+2. The daily questions digest, from `questions.digest`: a trigger with that cron (it carries its own `CRON_TZ`) and
+   the prompt `/build-questions:run all-linked --steps organize,sync,check,digest`. If `bq.py schedule show` names
+   an older schedule, replace that task (`update_trigger`, or for a desktop task say it can be turned off in the
+   desktop app's scheduled tasks), then `bq.py schedule set` with the new cron, `--tz`, `--label`, `--repos
+   all-linked`, `--steps`, `--task-id` and `--where cloud`. The run ends with `PushNotification`, which reaches the
+   person's phone through the Claude app; say in one line that notifications must be allowed for the Claude app on
+   the phone, and that the digest also goes by the build-questions `email_method` if one is set.
+3. Reply with both schedules in the person's local time and how to stop them (`delete_trigger`).
+
+**A sweep:**
+
+1. `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/steward.py" sweep --repo A --repo B ... --out <scratchpad>/sweep.json`.
+   It is read-only and prints one line per repo; the file holds each repo's `main`, `runners`, `pull_requests` and
+   `actions` (most urgent first). Read each repo's `.github/autopilot.json` from its default branch.
+2. Work the `actions`, at most `steward.max_resumes_per_sweep` across all repos, skipping any a lane already holds
+   (a fast-builder claim on the bus, or a PR updated in the last `stall.quiet_minutes`):
+   - `fix-runner`: the steward's own job. Runner admin is refused in cloud sessions, so do it through a Remote
+     Control session on the person's computer (it has their `gh` login and reaches their runner machines):
+     remove the runner's custom label (`gh api -X DELETE .../actions/runners/<id>/labels/<label>`) so it takes no
+     jobs, never delete its registration; then on its machine compare it with a healthy sibling, clean its work
+     folder, fix the mount or ownership, and restart it; add the label back only after a re-run passes on it, then
+     re-run its failures. Tell the person only if the machine can't be reached or the fix needs a credential.
+   - `fix-main`: the steward lane's first job. In fast-builder, check `main.json` and that the steward lane is
+     working on it (`$FB send --to <steward lane> --kind request` if not); otherwise start the fix (a session on a
+     new branch, by the repo's policy).
+   - `rerun`: `gh api -X POST repos/<repo>/actions/jobs/<job>/rerun` for each failed machine job (or `gh run rerun
+     <run> --failed`), at most `lanes.infra_reruns_per_pr` times per PR (count earlier attempts from the run's
+     `run_attempt`).
+   - `restart-checks`: cancel the stalled run (`gh api -X POST repos/<repo>/actions/runs/<run>/cancel`) and re-run it.
+   - `fix` and `rebase`: hand it to its lane. In fast-builder, `$FB send --to <lane> --kind request --body "PR #n is
+     red: <checks>"`, or `$FB reopen --lane <lane> --body ...` if the lane is done; a PR labelled `fb:stuck` goes to
+     the fixer lane. Without a lane, start a session for it (Remote Control on the person's computer if that is
+     where the repo's builds run, else a cloud session) with the PR, its failing checks and the build rules.
+   - `land`: green and still open. Follow the repo's policy: `pipeline: own` or the GitHub gate land it themselves,
+     so check why they haven't (a required check that never ran, a hold) and report that; otherwise merge as the
+     autopilot-policy skill allows.
+   - `improve` (build rule 6): something that keeps coming back. File it once as an issue titled
+     `Steward: <kind> <check or runner>` (link an open one with that title instead), with the `evidence` and the
+     last few sweeps' numbers, then build the fix like `fix-main`: the steward lane's next item in fast-builder,
+     otherwise a session on a new branch by the repo's policy. Never skip, quarantine or delete a test to clear it.
+   - `resume` (an idle draft) and `resume-branch` (a `fast-builder/wip/*` branch with no PR): hand it to the lane
+     whose paths it touches, as for `fix`, with its handoff if there is one.
+3. A lane that asked for more work (fast-builder `requests_for_conductor`, or a lane done while its repo still has
+   items in the sweep) gets the next batch by build rule 4.
+4. Reply (or `PushNotification` in a scheduled run) with one line per repo: open PRs by state, what was re-run,
+   handed back and landed, the improvements started, how the health line moved since the day before (open PRs, red
+   PRs, main red hours, median hours to merge), and only the items that need a person. Say nothing more when nothing needs one.
