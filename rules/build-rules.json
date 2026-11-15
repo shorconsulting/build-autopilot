@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "applies_to": "Every build, in every repo, for everyone with this plugin installed. There is no per-repo switch: change a value here and every build follows it.",
+  "questions": {
+    "store": "build-questions",
+    "digest": {
+      "cron": "CRON_TZ=America/Chicago 52 16 * * *",
+      "tz": "America/Chicago",
+      "label": "Every day at 4:52 pm Central",
+      "repos": "all-linked",
+      "steps": "organize,sync,check,digest",
+      "phone": "PushNotification",
+      "where": "cloud"
+    }
+  },
+  "lanes": {
+    "done_means": "Every pull request the lane opened is merged or deliberately closed, its CI is green, and nothing it started is left on a branch without a pull request.",
+    "max_fix_rounds_per_pr": 5,
+    "infra_reruns_per_pr": 3
+  },
+  "stall": {
+    "quiet_minutes": 30,
+    "check_queued_minutes": 30,
+    "check_running_minutes": 90,
+    "broken_runner_failures": 3,
+    "main_red_hours": 2
+  },
+  "refill": {
+    "on_lane_done": "ask-steward",
+    "steward_answers_within_minutes": 60
+  },
+  "steward": {
+    "cron": "17 * * * *",
+    "idle_hours": 6,
+    "max_resumes_per_sweep": 10,
+    "max_prs_classified": 150
+  }
+}

@@ -7,6 +7,20 @@
           { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/read_cap.py\"" }
         ]
       }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/steward.py\" session-note", "timeout": 10 }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/finish_guard.py\"", "timeout": 30 }
+        ]
+      }
     ]
   }
 }

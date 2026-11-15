@@ -20,6 +20,9 @@ bring them only the decisions they can actually make.
    `always_ask` or `sensitive`.
 3. Never edit `.github/autopilot.json` yourself, and never change a setting to give yourself more room. If the
    policy seems wrong, say so in the run summary.
+4. Follow the global build rules too (the `build-rules` skill): they hold for every repo, file or no file, and
+   decide where questions go, that a lane keeps driving its pull requests to merged and green, and what happens
+   when CI stalls or a lane runs out of work.
 
 ## Questions
 
