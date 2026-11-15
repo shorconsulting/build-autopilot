@@ -107,7 +107,7 @@ class Sweep(unittest.TestCase):
         rep, acts = self.sweep(fake)
         self.assertEqual([r["runner"] for r in rep["runners"]], ["mini-2"])
         self.assertEqual(acts[0]["do"], "fix-runner")
-        self.assertTrue(acts[0]["needs_person"])
+        self.assertFalse(acts[0]["needs_person"])  # the steward repairs runners itself
 
     def test_a_runner_that_also_passes_is_not_broken(self):
         runs = [({"id": 1, "name": "CI"}, [job(1, "mini-1", "failure", step="Checkout"), job(2, "mini-1"),

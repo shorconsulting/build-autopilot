@@ -259,9 +259,10 @@ def actions_for(report, rules):
     acts = []
     repo = report["repo"]
     for r in report["runners"]:
-        acts.append({"do": "fix-runner", "repo": repo, "runner": r["runner"], "needs_person": True,
+        acts.append({"do": "fix-runner", "repo": repo, "runner": r["runner"], "needs_person": False,
                      "why": "%d jobs failed at '%s' on this runner and none passed: every PR it picks up goes red. "
-                            "Take it offline (or wipe its work folder) and re-run what it failed."
+                            "Pull it from the pool (remove its custom label), repair it, put it back once a job "
+                            "passes, and re-run what it failed."
                             % (r["infra_failures"], r.get("sample_step", "setup"))})
     main = report["main"]
     if main["state"] == "red":

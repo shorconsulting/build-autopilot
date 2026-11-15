@@ -265,8 +265,12 @@ with this plugin and build-questions installed and GitHub access to the tracked 
    `actions` (most urgent first). Read each repo's `.github/autopilot.json` from its default branch.
 2. Work the `actions`, at most `steward.max_resumes_per_sweep` across all repos, skipping any a lane already holds
    (a fast-builder claim on the bus, or a PR updated in the last `stall.quiet_minutes`):
-   - `fix-runner`: needs a person. Say it once (runner name, the failing step, how many jobs it failed, and "take it
-     offline or clean its work folder, then the steward re-runs what it failed"). Don't re-run jobs onto it.
+   - `fix-runner`: the steward's own job. Runner admin is refused in cloud sessions, so do it through a Remote
+     Control session on the person's computer (it has their `gh` login and reaches their runner machines):
+     remove the runner's custom label (`gh api -X DELETE .../actions/runners/<id>/labels/<label>`) so it takes no
+     jobs, never delete its registration; then on its machine compare it with a healthy sibling, clean its work
+     folder, fix the mount or ownership, and restart it; add the label back only after a re-run passes on it, then
+     re-run its failures. Tell the person only if the machine can't be reached or the fix needs a credential.
    - `fix-main`: the steward lane's first job. In fast-builder, check `main.json` and that the steward lane is
      working on it (`$FB send --to <steward lane> --kind request` if not); otherwise start the fix (a session on a
      new branch, by the repo's policy).

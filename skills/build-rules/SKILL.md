@@ -55,8 +55,10 @@ stalled: in fast-builder the conductor frees it and a listener restarts it from 
 sweep picks its work up (rule 5).
 
 - A self-hosted runner whose jobs fail at checkout or setup `broken_runner_failures` times with none passing is
-  broken. Every PR it picks up goes red, so re-running onto it only adds red. Report it once as a person's job (take
-  it offline or clean its work folder; credentials and machines are theirs), and re-run its failures once it is out.
+  broken. Every PR it picks up goes red, so re-running onto it only adds red. Fixing it is the steward's job, not the
+  person's: pull it from the pool at once (remove its custom label, which is undone by adding it back), repair it on
+  its machine (clean its work folder, fix the mount or ownership, restart it), put the label back once a job passes,
+  and re-run what it failed. The person hears only if the machine can't be reached or a repair needs a credential.
 - The default branch red for over `main_red_hours`: fixing it comes before any other work for the steward lane, and
   the person hears once.
 
