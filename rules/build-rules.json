@@ -34,5 +34,12 @@
     "idle_hours": 6,
     "max_resumes_per_sweep": 10,
     "max_prs_classified": 150
+  },
+  "improve": {
+    "sweeps": 24,
+    "recurring_check_prs": 5,
+    "recurring_sweeps": 3,
+    "flaky_reruns": 2,
+    "slower_merge_pct": 25
   }
 }

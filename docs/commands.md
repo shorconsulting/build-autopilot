@@ -285,9 +285,14 @@ with this plugin and build-questions installed and GitHub access to the tracked 
    - `land`: green and still open. Follow the repo's policy: `pipeline: own` or the GitHub gate land it themselves,
      so check why they haven't (a required check that never ran, a hold) and report that; otherwise merge as the
      autopilot-policy skill allows.
+   - `improve` (build rule 6): something that keeps coming back. File it once as an issue titled
+     `Steward: <kind> <check or runner>` (link an open one with that title instead), with the `evidence` and the
+     last few sweeps' numbers, then build the fix like `fix-main`: the steward lane's next item in fast-builder,
+     otherwise a session on a new branch by the repo's policy. Never skip, quarantine or delete a test to clear it.
    - `resume` (an idle draft) and `resume-branch` (a `fast-builder/wip/*` branch with no PR): hand it to the lane
      whose paths it touches, as for `fix`, with its handoff if there is one.
 3. A lane that asked for more work (fast-builder `requests_for_conductor`, or a lane done while its repo still has
    items in the sweep) gets the next batch by build rule 4.
 4. Reply (or `PushNotification` in a scheduled run) with one line per repo: open PRs by state, what was re-run,
-   handed back and landed, and only the items that need a person. Say nothing more when nothing needs one.
+   handed back and landed, the improvements started, how the health line moved since the day before (open PRs, red
+   PRs, main red hours, median hours to merge), and only the items that need a person. Say nothing more when nothing needs one.

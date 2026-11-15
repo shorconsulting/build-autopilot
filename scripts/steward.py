@@ -19,7 +19,12 @@ What a sweep finds, per repo:
         pending     checks still running normally
         draft       a draft nobody has touched for `idle_hours`
         stacked     based on another open pull request's branch (lands after its base)
-  - leftover work: fast-builder/wip/* branches with no pull request.
+  - leftover work: fast-builder/wip/* branches with no pull request;
+  - CI health (one line per sweep in ~/.build-autopilot/steward-history/): open PRs by state, main's red hours,
+    broken runners, the checks failing most, jobs that passed only on a re-run, merges in the last day and the median
+    hours from open to merge. Fixed rules over that history (`improvements`) turn what keeps coming back (a check
+    failing on many PRs sweep after sweep, a flaky job, a runner still broken, main red, merges getting slower) into
+    a fix for the steward to make, so the same red does not come back every hour.
 
 GitHub is read through REST only (`gh api`, pages fetched by hand), so it works in cloud sessions, which refuse GraphQL.
 """
@@ -220,6 +225,48 @@ class Sweeper:
         return {"branch": branch, "state": state, "failed": failed, "red_since": red_since,
                 "red_hours": hours(self.now, parse_time(red_since))}
 
+    def flaky(self, repo):
+        """Jobs that failed and then passed on a re-run of the same commit: the test or the machine is unreliable."""
+        out = {}
+        for run in self.recent_runs(repo):
+            if (run.get("run_attempt") or 1) < 2 or run.get("conclusion") != "success":
+                continue
+            try:
+                prev = api("repos/%s/actions/runs/%s/attempts/%d/jobs?per_page=100"
+                           % (repo, run["id"], run["run_attempt"] - 1)) or {}
+            except GhError:
+                continue
+            for job in prev.get("jobs", []):
+                if job.get("conclusion") in FAILED:
+                    key = "%s / %s" % (run.get("name"), job.get("name"))
+                    out[key] = {"step": self.failed_step(job), "count": out.get(key, {}).get("count", 0) + 1}
+        return out
+
+    def merged_hours(self, repo, since_hours=24):
+        """Hours from open to merge for pull requests merged in the last day (newest 100 closed)."""
+        closed = api("repos/%s/pulls?state=closed&sort=updated&direction=desc&per_page=100" % repo) or []
+        out = []
+        for p in closed:
+            merged = parse_time(p.get("merged_at"))
+            if merged and (self.now - merged).total_seconds() <= since_hours * 3600:
+                out.append(hours(merged, parse_time(p["created_at"])))
+        return sorted(out)
+
+    def health(self, repo, report):
+        """One line of CI health for the history: what the steward compares sweep to sweep."""
+        failing = {}
+        for pr in report["pull_requests"]:
+            for name in pr["failed"]:
+                failing[name] = failing.get(name, 0) + 1
+        merged = self.merged_hours(repo)
+        return {"at": self.now.strftime("%Y-%m-%dT%H:%M:%SZ"), "repo": repo,
+                "open_prs": len(report["pull_requests"]), "counts": report["counts"],
+                "main_state": report["main"]["state"], "main_red_hours": report["main"]["red_hours"],
+                "broken_runners": [r["runner"] for r in report["runners"]],
+                "failing_checks": dict(sorted(failing.items(), key=lambda kv: -kv[1])[:15]),
+                "flaky": self.flaky(repo), "merged_24h": len(merged),
+                "median_hours_to_merge": merged[len(merged) // 2] if merged else None}
+
     def sweep_repo(self, repo):
         info = api("repos/%s" % repo) or {}
         branch = info.get("default_branch") or "main"
@@ -250,8 +297,76 @@ class Sweeper:
             wip = []
         wip_heads = [w["ref"][len("refs/heads/"):] for w in wip]
         leftover = [b for b in wip_heads if b not in open_heads]
-        return {"repo": repo, "main": self.main_state(repo, branch), "runners": self.runners(repo),
-                "counts": counts, "pull_requests": prs, "leftover_branches": leftover}
+        report = {"repo": repo, "main": self.main_state(repo, branch), "runners": self.runners(repo),
+                  "counts": counts, "pull_requests": prs, "leftover_branches": leftover}
+        report["health"] = self.health(repo, report)
+        return report
+
+
+HISTORY_DIR = os.path.expanduser("~/.build-autopilot/steward-history")
+
+
+def history_path(repo, history_dir):
+    return os.path.join(history_dir, repo.replace("/", "__") + ".jsonl")
+
+
+def read_history(repo, history_dir, keep=200):
+    try:
+        with open(history_path(repo, history_dir), encoding="utf-8") as fh:
+            return [json.loads(l) for l in fh if l.strip()][-keep:]
+    except (OSError, ValueError):
+        return []
+
+
+def append_history(health, history_dir):
+    os.makedirs(history_dir, exist_ok=True)
+    with open(history_path(health["repo"], history_dir), "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(health) + "\n")
+
+
+def improvements(history, rules):
+    """Fixed rules over the sweep history: problems that keep coming back become fixes, not more re-runs.
+
+    `history` is oldest first and ends with this sweep."""
+    imp = rules["improve"]
+    window = history[-imp["sweeps"]:]
+    if not window:
+        return []
+    out, now = [], window[-1]
+    n = len(window)
+    # A check failing on many PRs, sweep after sweep, is broken in a shared way (a slow test, a bad fixture).
+    for name, count in now.get("failing_checks", {}).items():
+        seen = sum(1 for h in window if h.get("failing_checks", {}).get(name, 0) >= imp["recurring_check_prs"])
+        if count >= imp["recurring_check_prs"] and seen >= min(n, imp["recurring_sweeps"]):
+            out.append({"kind": "harden-check", "check": name, "evidence":
+                        "fails on %d open PRs now, and on %d+ PRs in %d of the last %d sweeps"
+                        % (count, imp["recurring_check_prs"], seen, n)})
+    # A job that only passes on a re-run is flaky: fix the cause (timing, shared state, a slow machine).
+    flaky = {}
+    for h in window:
+        for key, f in (h.get("flaky") or {}).items():
+            flaky.setdefault(key, {"count": 0, "step": f.get("step")})["count"] += f.get("count", 1)
+    for key, f in sorted(flaky.items()):
+        if f["count"] >= imp["flaky_reruns"]:
+            out.append({"kind": "fix-flaky", "check": key, "step": f["step"], "evidence":
+                        "passed only on a re-run %d times in the last %d sweeps" % (f["count"], n)})
+    # A runner still broken after a sweep has tried to repair it.
+    for r in now.get("broken_runners", []):
+        seen = sum(1 for h in window if r in h.get("broken_runners", []))
+        if seen >= 2:
+            out.append({"kind": "repair-runner", "runner": r, "evidence": "broken in %d of the last %d sweeps"
+                        % (seen, n)})
+    # Main red across sweeps, or getting slower to merge: make it the steward lane's first item.
+    if (now.get("main_red_hours") or 0) > rules["stall"]["main_red_hours"]:
+        out.append({"kind": "fix-main-first", "evidence": "main red for %.0f hours" % now["main_red_hours"]})
+    meds = [h["median_hours_to_merge"] for h in window[:-1] if h.get("median_hours_to_merge") is not None]
+    cur = now.get("median_hours_to_merge")
+    if meds and cur is not None:
+        base = sorted(meds)[len(meds) // 2]
+        if base and cur > base * (1 + imp["slower_merge_pct"] / 100.0):
+            out.append({"kind": "merge-slowing", "evidence": "median open-to-merge %.1f h now vs %.1f h over the "
+                        "last %d sweeps" % (cur, base, len(meds))})
+    return out
 
 
 def actions_for(report, rules):
@@ -281,7 +396,10 @@ def actions_for(report, rules):
                              "checks": pr["failed"] or pr["infra"] or [s["name"] for s in pr["stalled"]]})
     for b in report["leftover_branches"]:
         acts.append({"do": "resume-branch", "repo": repo, "branch": b})
-    return acts
+    # Improvements go right after the repairs: they stop the same red from coming back next hour.
+    imps = [dict(i, do="improve", repo=repo) for i in report.get("improvements", [])]
+    head = [a for a in acts if a["do"] in ("fix-runner", "fix-main")]
+    return head + imps + [a for a in acts if a not in head]
 
 
 def cmd_sweep(args):
@@ -292,6 +410,10 @@ def cmd_sweep(args):
     for repo in repos:
         try:
             rep = sw.sweep_repo(repo)
+            if not args.no_history:
+                append_history(rep["health"], args.history_dir)
+            rep["improvements"] = improvements(read_history(repo, args.history_dir) if not args.no_history
+                                               else [rep["health"]], rules)
             rep["actions"] = actions_for(rep, rules)
             out["repos"].append(rep)
         except GhError as exc:
@@ -310,9 +432,11 @@ def summary(out):
     lines = []
     for rep in out["repos"]:
         c = rep["counts"]
-        lines.append("%s: %d open PRs (%s); main %s; %d broken runner(s); %d leftover branch(es); %d actions" % (
-            rep["repo"], len(rep["pull_requests"]), ", ".join("%s %d" % kv for kv in sorted(c.items())),
-            rep["main"]["state"], len(rep["runners"]), len(rep["leftover_branches"]), len(rep["actions"])))
+        lines.append("%s: %d open PRs (%s); main %s; %d broken runner(s); %d leftover branch(es); "
+                     "%d improvement(s); %d actions" % (
+                         rep["repo"], len(rep["pull_requests"]), ", ".join("%s %d" % kv for kv in sorted(c.items())),
+                         rep["main"]["state"], len(rep["runners"]), len(rep["leftover_branches"]),
+                         len(rep.get("improvements", [])), len(rep["actions"])))
     for e in out["errors"]:
         lines.append("%s: skipped (%s)" % (e["repo"], e["error"]))
     return "\n".join(lines)
@@ -342,11 +466,21 @@ def main(argv=None):
     s = sub.add_parser("sweep")
     s.add_argument("--repo", action="append")
     s.add_argument("--out")
+    s.add_argument("--history-dir", default=HISTORY_DIR)
+    s.add_argument("--no-history", action="store_true", help="don't record this sweep")
+    h = sub.add_parser("health", help="the CI health history for a repo, and what it says to improve")
+    h.add_argument("--repo", required=True)
+    h.add_argument("--history-dir", default=HISTORY_DIR)
     sub.add_parser("rules")
     sub.add_parser("session-note")
     args = ap.parse_args(argv)
     if args.cmd == "sweep":
         return cmd_sweep(args)
+    if args.cmd == "health":
+        hist = read_history(args.repo, args.history_dir)
+        print(json.dumps({"sweeps": len(hist), "latest": hist[-1] if hist else None,
+                          "improvements": improvements(hist, load_rules(args.rules))}, indent=2))
+        return 0
     if args.cmd == "rules":
         print(json.dumps(load_rules(args.rules), indent=2))
         return 0

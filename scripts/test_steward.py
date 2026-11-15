@@ -41,7 +41,7 @@ class FakeGitHub:
     def __init__(self, pulls, checks, jobs=None, mergeable=None, main_runs=(), wip=(), runs=()):
         self.pulls, self.checks, self.jobs = pulls, checks, jobs or {}
         self.mergeable, self.main_runs, self.wip, self.runs = mergeable or {}, list(main_runs), list(wip), list(runs)
-        self.calls = []
+        self.calls, self.closed, self.attempts = [], [], {}
 
     def __call__(self, path):
         self.calls.append(path)
@@ -49,6 +49,8 @@ class FakeGitHub:
         if base == "repos/%s" % REPO:
             return {"default_branch": "main"}
         if base == "repos/%s/pulls" % REPO:
+            if "state=closed" in path:
+                return self.closed
             return self.pulls if path.endswith("&page=1") else []
         if base.startswith("repos/%s/pulls/" % REPO):
             n = int(base.rsplit("/", 1)[1])
@@ -61,6 +63,8 @@ class FakeGitHub:
             if "event=push" in path:
                 return {"workflow_runs": self.main_runs}
             return {"workflow_runs": [r for r, _ in self.runs]}
+        if "/attempts/" in base:
+            return {"jobs": self.attempts.get(int(base.split("/")[-4]), [])}
         if base.endswith("/jobs"):
             rid = int(base.split("/")[-2])
             return {"jobs": next(j for r, j in self.runs if r["id"] == rid)}
@@ -130,6 +134,20 @@ class Sweep(unittest.TestCase):
         self.assertEqual(acts[0]["do"], "fix-main")
         self.assertTrue(acts[0]["needs_person"])  # over main_red_hours
 
+    def test_health_line_counts_flaky_jobs_and_merges(self):
+        runs = [({"id": 5, "name": "CI", "run_attempt": 2, "conclusion": "success"}, [job(50, "hph-ci-1")])]
+        fake = FakeGitHub(pulls=[pr(1, "a")], checks={"a": [run(11, "contract", conclusion="failure")]},
+                          jobs={11: job(11, "x", "failure", step="Contract tests")}, runs=runs)
+        fake.attempts = {5: [job(49, "hph-ci-1", "failure", step="Contract tests") | {"name": "contract"}]}
+        fake.closed = [{"merged_at": "2026-11-15T20:00:00Z", "created_at": "2026-11-15T10:00:00Z"},
+                       {"merged_at": None, "created_at": "2026-11-15T10:00:00Z"},
+                       {"merged_at": "2026-11-10T20:00:00Z", "created_at": "2026-11-10T10:00:00Z"}]
+        rep, _ = self.sweep(fake)
+        health = rep["health"]
+        self.assertEqual(health["failing_checks"], {"contract": 1})
+        self.assertEqual(health["flaky"], {"CI / contract": {"step": "Contract tests", "count": 1}})
+        self.assertEqual((health["merged_24h"], health["median_hours_to_merge"]), (1, 10.0))
+
     def test_leftover_wip_branches_without_a_pr(self):
         fake = FakeGitHub(pulls=[pr(1, "a", head="fast-builder/wip/core-1")], checks={"a": [run(1, "t")]},
                           wip=["fast-builder/wip/core-1", "fast-builder/wip/core-2"])
@@ -162,6 +180,56 @@ class Sweep(unittest.TestCase):
             self.assertEqual(len(steward.paged("repos/x/pulls?state=open")), 101)
         self.assertEqual(calls, ["repos/x/pulls?state=open&per_page=100&page=1",
                                  "repos/x/pulls?state=open&per_page=100&page=2"])
+
+
+def h(**kw):
+    base = {"repo": REPO, "failing_checks": {}, "flaky": {}, "broken_runners": [], "main_red_hours": None,
+            "median_hours_to_merge": None}
+    base.update(kw)
+    return base
+
+
+class Improvements(unittest.TestCase):
+    def setUp(self):
+        self.rules = steward.load_rules()
+
+    def kinds(self, history):
+        return [i["kind"] for i in steward.improvements(history, self.rules)]
+
+    def test_a_check_failing_on_many_prs_sweep_after_sweep_gets_hardened(self):
+        hist = [h(failing_checks={"contract": 8}) for _ in range(3)]
+        imps = steward.improvements(hist, self.rules)
+        self.assertEqual([(i["kind"], i["check"]) for i in imps], [("harden-check", "contract")])
+        self.assertEqual(self.kinds(hist[:1] + [h(failing_checks={"contract": 2})]), [])  # few PRs: not shared
+
+    def test_one_bad_sweep_is_not_a_pattern(self):
+        hist = [h(), h(), h(), h(failing_checks={"contract": 8})]
+        self.assertEqual(self.kinds(hist), [])
+
+    def test_flaky_jobs_runner_still_broken_and_red_main(self):
+        hist = [h(flaky={"CI / contract": {"step": "Contract tests", "count": 1}}, broken_runners=["mini-2"]),
+                h(flaky={"CI / contract": {"step": "Contract tests", "count": 1}}, broken_runners=["mini-2"],
+                  main_red_hours=45)]
+        self.assertEqual(self.kinds(hist), ["fix-flaky", "repair-runner", "fix-main-first"])
+
+    def test_merges_getting_slower(self):
+        hist = [h(median_hours_to_merge=10) for _ in range(5)] + [h(median_hours_to_merge=20)]
+        self.assertEqual(self.kinds(hist), ["merge-slowing"])
+        self.assertEqual(self.kinds(hist[:-1] + [h(median_hours_to_merge=11)]), [])
+
+    def test_improvements_come_right_after_repairs(self):
+        report = {"repo": REPO, "runners": [], "main": {"state": "red", "failed": ["CI"], "red_hours": 1},
+                  "pull_requests": [{"number": 1, "state": "red", "lane": None, "failed": ["t"], "infra": [],
+                                     "stalled": []}], "leftover_branches": [],
+                  "improvements": [{"kind": "fix-flaky", "check": "CI / t"}]}
+        self.assertEqual([a["do"] for a in steward.actions_for(report, self.rules)], ["fix-main", "improve", "fix"])
+
+    def test_history_is_appended_and_read_back(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for i in range(3):
+                steward.append_history(h(open_prs=i), tmp)
+            self.assertEqual([x["open_prs"] for x in steward.read_history(REPO, tmp)], [0, 1, 2])
+            self.assertEqual(steward.read_history("other/repo", tmp), [])
 
 
 class Cli(unittest.TestCase):

@@ -84,6 +84,28 @@ restarts stalled checks, hands red and conflicting PRs back to their lane (the `
 lands green ones the policy allows, and resumes drafts and leftover branches. It tells the person only about what
 needs a person.
 
+## 6. CI gets better, not just back to green
+
+Re-running the same failure every hour keeps CI up but never better. Every sweep records one line of CI health per
+repo (`~/.build-autopilot/steward-history/`): open PRs by state, hours main has been red, broken runners, the checks
+failing most, jobs that passed only on a re-run, merges in the last day and the median hours from open to merge.
+Fixed rules over the last `improve.sweeps` sweeps turn what keeps coming back into an `improve` item, worked right
+after the repairs and before the PR queue:
+
+- `harden-check`: one check fails on `improve.recurring_check_prs`+ PRs in `improve.recurring_sweeps` sweeps. Find
+  the shared cause (a slow or order-dependent test, a stale fixture, a timeout too tight for the runners) and fix it
+  in one PR, so every PR it blocked can go green on a re-run.
+- `fix-flaky`: a job passed only on a re-run `improve.flaky_reruns` times. Fix the cause (fixed clock, isolated
+  state, a realistic timeout); never skip, quarantine or delete the test.
+- `repair-runner`: a runner still broken a sweep after it was pulled. Repair it, as in rule 3.
+- `fix-main-first`: main red over `stall.main_red_hours`: the steward lane does nothing else first.
+- `merge-slowing`: the median open-to-merge time is `improve.slower_merge_pct`% above its recent median. Find the
+  stage that grew (review, CI time, queue, rebases) from the sweep and say it in the summary, with the fix.
+
+Each one is filed once as a GitHub issue in that repo (look for an open one with the same title first) and built as
+a normal change by the repo's policy. `steward.py health --repo owner/name` prints the history's latest line and what
+it says to improve.
+
 ## Before you finish
 
 Check rule 2 for every PR you opened, rule 4 if your list is empty, and that every question you raised is in the
