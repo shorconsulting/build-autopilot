@@ -5,7 +5,8 @@
 #
 #   - pull_request: the quick tests only. The job is named `test`, so a branch rule that requires `test` still works.
 #     The `changes` job first works out the change type (.github/autopilot/lanes.py, docs/policy.md "Change types"):
-#     a policy-only or CI-only change runs no tests, a draft runs nothing until it is marked ready, and with
+#     a policy-only or CI-only change runs no tests, a draft runs nothing until it is marked ready when
+#     `tests.drafts` is `skip` (off by default; see docs/policy.md), and with
 #     `tests.suites` set a job runs only when its suite is touched. Copy the `changes` job and the `if:` on `test`
 #     into every workflow that runs tests on pull requests. A job that runs only one suite adds
 #     `&& (needs.changes.outputs.class != 'light' || contains(needs.changes.outputs.suites, '"<suite>"'))`.

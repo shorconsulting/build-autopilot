@@ -127,8 +127,10 @@ def classify(policy, changed_files, event="pull_request", draft=False):
       normal  a code file no suite claims, an empty change, or any event but a pull request: everything.
 
     `skip` is true only for policy, ci and a parked draft: a workflow's general tests run on light and normal, and a
-    job for one suite runs unless the type is light and `suites` leaves it out. `run_all` is true for normal. `parked` is true for a draft unless `tests.drafts` is "run": nothing runs until it
-    is marked ready. A repo with no suites never gets `light`, so it behaves as before apart from policy and ci.
+    job for one suite runs unless the type is light and `suites` leaves it out. `run_all` is true for normal. `parked` is true for a draft only when `tests.drafts` is "skip": nothing runs until it
+    is marked ready. That is off by default: a parked draft leaves a passing "skipped" result on its commit, and
+    after it is marked ready that result can be the newest one until the new run's jobs start (docs/policy.md).
+    A repo with no suites never gets `light`, so it behaves as before apart from policy and ci.
     """
     eff = effective(policy)["tests"]
     suites = eff["suites"]
@@ -155,7 +157,7 @@ def classify(policy, changed_files, event="pull_request", draft=False):
         out = {"class": "ci", "run_all": False, "suites": [], "why": "only workflow or gate files"}
     else:
         out = {"class": "policy", "run_all": False, "suites": [], "why": "only settings or no-code files"}
-    out["parked"] = bool(draft) and eff.get("drafts", "skip") != "run"
+    out["parked"] = bool(draft) and eff.get("drafts", "run") == "skip"
     if out["parked"]:
         out.update(run_all=False, suites=[], why="draft: nothing runs until it is marked ready (" + out["why"] + ")")
     # The one thing that lets a workflow skip its general tests; anything else, or no answer at all, runs them.
@@ -167,7 +169,7 @@ def validate(policy):
     """Problems with the suite rules, as plain sentences; an empty list means fine."""
     problems = []
     tests = policy.get("tests") or {}
-    if tests.get("drafts", "skip") not in DRAFTS:
+    if tests.get("drafts", "run") not in DRAFTS:
         problems.append(f"tests.drafts must be one of {', '.join(DRAFTS)}")
     ncp = tests.get("no_code_paths", [])
     if not isinstance(ncp, list) or not all(isinstance(p, str) and p.strip() for p in ncp):

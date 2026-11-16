@@ -142,7 +142,7 @@ that `autopilot` needs is not built (`docs/v2-report.md`), so nothing here prete
 | `suites` | Optional. Per-suite rules for a suite that is expensive or only matters to part of the repo, such as the mobile app's build and emulator tests (macOS minutes cost ten times Linux). A map of suite name to `{ "on_pr", "paths" }`. |
 
 | `no_code_paths` | Optional. Globs for files nothing builds, imports or tests (docs, wireframes). A change to only these is a `policy` change and runs no tests. A path a suite's `paths` names stays code. |
-| `drafts` | `skip` (default): a draft pull request runs no tests and gets no review until it is marked ready. `run`: drafts are tested like any other. |
+| `drafts` | `run` (default): drafts are tested like any other pull request. `skip`: a draft runs no tests until it is marked ready. Not yet safe with a merge bot: a parked draft leaves a passing "skipped" result on its commit, and after it is marked ready that result can be the newest one until the new run's jobs start, so something that merges on green could act on it. Turn it on only where the thing that merges also waits for the new run (not yet checked on a real repository). |
 
 #### Change types
 

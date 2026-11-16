@@ -139,7 +139,7 @@ class Render(unittest.TestCase):
 
 
 class ChangeTypes(unittest.TestCase):
-    POL = {"tests": {"no_code_paths": ["*.md"], "suites": {
+    POL = {"tests": {"drafts": "skip", "no_code_paths": ["*.md"], "suites": {
         "app": {"paths": ["app/**", ".github/workflows/app-ci.yml", "docs/spec.md"]},
         "server": {"paths": ["backend/**"]},
         "lint": {"on_pr": "always"},
@@ -186,11 +186,11 @@ class ChangeTypes(unittest.TestCase):
         self.assertEqual(self.kind([])[::2], ("normal", True))
         self.assertEqual(self.kind(["CLAUDE.md"], event="push"), ("normal", ["app", "lint", "mobile", "server"], True))
 
-    def test_a_draft_is_parked_unless_the_repo_says_run(self):
+    def test_a_draft_is_parked_only_when_the_repo_says_skip(self):
         r = lanes.classify(self.POL, ["app/x.ts"], draft=True)
         self.assertEqual((r["parked"], r["suites"], r["run_all"], r["class"]), (True, [], False, "light"))
-        pol = {"tests": {"drafts": "run"}}
-        self.assertEqual(lanes.classify(pol, ["a.py"], draft=True)["parked"], False)
+        for pol in ({}, {"tests": {"drafts": "run"}}):
+            self.assertEqual(lanes.classify(pol, ["a.py"], draft=True)["parked"], False)
         self.assertTrue(lanes.validate({"tests": {"drafts": "maybe", "no_code_paths": "x"}}))
 
 
