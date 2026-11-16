@@ -104,6 +104,18 @@ class Sweep(unittest.TestCase):
         self.assertEqual(rep["pull_requests"][0]["failed"], ["test"])
         self.assertEqual([a["do"] for a in acts], ["rerun", "restart-checks", "fix", "rebase", "land", "resume"])
 
+    def test_a_gate_waiting_for_a_person_is_not_a_red_check(self):
+        gate = dict(run(91, "autopilot/gate", conclusion="failure"),
+                    output={"title": "Needs a person: read the review, then /autopilot approve."})
+        broken_gate = dict(run(92, "autopilot/gate", conclusion="failure"), output={"title": "Gate crashed"})
+        fake = FakeGitHub(pulls=[pr(1, "a"), pr(2, "b")], checks={"a": [run(11, "test"), gate], "b": [broken_gate]},
+                          jobs={92: job(92, "hph-ci-1", "failure", step="Run gate")})
+        rep, acts = self.sweep(fake)
+        self.assertEqual(self.states(rep), {1: "needs-person", 2: "red"})
+        self.assertEqual(rep["pull_requests"][0]["failed"], [])
+        self.assertEqual(rep["pull_requests"][0]["needs_person"], ["autopilot/gate"])
+        self.assertEqual([a.get("pr") for a in acts if a.get("pr")], [2])
+
     def test_broken_runner_is_found_and_needs_a_person(self):
         bad = [({"id": 100 + i, "name": "CI"}, [job(200 + i, "mini-2", "failure", step="Checkout"),
                                                  job(300 + i, "hph-ci-%d" % i)]) for i in range(3)]

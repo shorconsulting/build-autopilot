@@ -96,6 +96,16 @@ def job_id(run):
     return run.get("id") if "/actions/" in (run.get("details_url") or "") else None
 
 
+def waits_for_person(run):
+    """True for the autopilot gate's "Needs a person" result: a review or an always_ask item, not a red check.
+
+    Counting it as a failure made every PR waiting on a person look like a recurring broken check
+    (a harden-check for `autopilot/gate`), which no fix can clear.
+    """
+    title = ((run.get("output") or {}).get("title") or "")
+    return run.get("conclusion") == "failure" and title.startswith("Needs a person")
+
+
 class Sweeper:
     def __init__(self, rules, now=None):
         self.rules = rules
@@ -131,7 +141,7 @@ class Sweeper:
     def checks(self, repo, sha, classify=True):
         runs = (api("repos/%s/commits/%s/check-runs?per_page=100" % (repo, sha)) or {}).get("check_runs", [])
         stall = self.rules["stall"]
-        out = {"total": len(runs), "failed": [], "infra": [], "stalled": [], "pending": 0}
+        out = {"total": len(runs), "failed": [], "infra": [], "stalled": [], "pending": 0, "needs_person": []}
         for r in runs:
             if r.get("status") != "completed":
                 started = parse_time(r.get("started_at"))
@@ -144,7 +154,9 @@ class Sweeper:
                 continue
             if r.get("conclusion") in FAILED or r.get("conclusion") == "cancelled":
                 entry = {"name": r.get("name"), "conclusion": r.get("conclusion"), "job": job_id(r)}
-                if classify and self.is_infra(repo, r):
+                if waits_for_person(r):
+                    out["needs_person"].append(entry)  # the gate working as designed, not a broken check
+                elif classify and self.is_infra(repo, r):
                     out["infra"].append(entry)
                 elif r.get("conclusion") != "cancelled":
                     out["failed"].append(entry)
@@ -161,6 +173,8 @@ class Sweeper:
             return "red"
         if chk["stalled"]:
             return "stalled"
+        if chk.get("needs_person"):
+            return "needs-person"
         if pr.get("mergeable_state") == "dirty":
             return "conflict"
         if chk["pending"]:
@@ -290,6 +304,7 @@ class Sweeper:
                         "lane": next((l["name"][5:] for l in p.get("labels") or [] if l["name"].startswith("lane:")),
                                      None),
                         "failed": [f["name"] for f in chk["failed"]], "infra": [f["name"] for f in chk["infra"]],
+                        "needs_person": [f["name"] for f in chk.get("needs_person", [])],
                         "stalled": chk["stalled"], "classified": i < cap})
         try:
             wip = api("repos/%s/git/matching-refs/heads/fast-builder/wip/" % repo) or []
