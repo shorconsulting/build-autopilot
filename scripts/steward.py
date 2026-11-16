@@ -289,20 +289,16 @@ class Sweeper:
         # Past the cap, read nothing more per PR: a sweep must not spend the account's API allowance, which every
         # session on the account shares (one sweep of 400 PRs used to cost ~1,000 calls).
         cap = min(cap, self.budget_prs())
-        empty = {"total": 0, "failed": [], "infra": [], "stalled": [], "pending": 0}
+        empty = {"failed": [], "infra": [], "stalled": []}
         for i, p in enumerate(sorted(pulls, key=lambda p: p["created_at"])):
-            if i >= cap:
+            if i < cap:
+                detail = api("repos/%s/pulls/%s" % (repo, p["number"]))
+                chk = self.checks(repo, p["head"]["sha"])
+                state = self.pr_state(dict(p, mergeable_state=(detail or {}).get("mergeable_state")), chk, open_heads)
+            else:
+                # Unswept PRs are reached once the older ones ahead of them land; their own lanes still watch them.
+                chk = empty
                 state = "draft" if p.get("draft") else ("stacked" if p["base"]["ref"] in open_heads else "unswept")
-                counts[state] = counts.get(state, 0) + 1
-                prs.append({"number": p["number"], "title": p.get("title"), "branch": p["head"]["ref"],
-                            "base": p["base"]["ref"], "state": state,
-                            "idle_hours": hours(self.now, parse_time(p.get("updated_at"))),
-                            "labels": [l["name"] for l in p.get("labels") or []], "lane": None,
-                            "failed": [], "infra": [], "stalled": [], "classified": False})
-                continue
-            detail = api("repos/%s/pulls/%s" % (repo, p["number"]))
-            chk = self.checks(repo, p["head"]["sha"])
-            state = self.pr_state(dict(p, mergeable_state=(detail or {}).get("mergeable_state")), chk, open_heads)
             idle = hours(self.now, parse_time(p.get("updated_at")))
             if state == "draft" and (idle or 0) < idle_limit:
                 state = "draft-active"

@@ -172,6 +172,13 @@ class Sweep(unittest.TestCase):
         self.assertEqual(self.states(rep), {1: "red-infra", 2: "unswept"})
         self.assertFalse(any("/b/check-runs" in c or "pulls/2" in c for c in fake.calls))
 
+    def test_active_draft_past_the_cap_stays_active(self):
+        fake = FakeGitHub(pulls=[pr(1, "a"), pr(2, "b", draft=True, created="2026-11-11T00:00:00Z"),
+                                 pr(3, "c", draft=True, created="2026-11-12T00:00:00Z", updated="2026-11-01T00:00:00Z")],
+                          checks={"a": [run(11, "t")]})
+        rep, _ = self.sweep(fake, max_prs_classified=1)
+        self.assertEqual(self.states(rep), {1: "green", 2: "draft-active", 3: "draft"})
+
     def test_low_api_allowance_shrinks_the_sweep(self):
         fake = FakeGitHub(pulls=[pr(1, "a")], checks={"a": [run(11, "t")]})
         fake.remaining = 2600  # 100 spare over the reserve: 25 PRs
