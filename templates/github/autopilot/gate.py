@@ -393,6 +393,7 @@ class Classification:
     blockers: list        # plain-English reasons a person must look, found without any AI
     errors: list = dataclasses.field(default_factory=list)   # the gate couldn't read or check the change
     unread: list = dataclasses.field(default_factory=list)   # binary files allowed through that nobody can read
+    only_hard: bool = False   # every file is under the hard paths: a CI-only or settings-only change
 
 
 def unsafe_name(path):
@@ -460,15 +461,18 @@ def classify(policy, change, extra_hard=(), extra_sensitive=()):
     if len(change.patch) > MAX_PATCH_CHARS:
         blockers.append("The change is too big to review in one pass (%d characters of diff). Split it up, or have a "
                         "person review it." % len(change.patch))
-    return Classification(hard=hard, sensitive=sensitive, blockers=blockers, unread=unread)
+    return Classification(hard=hard, sensitive=sensitive, blockers=blockers, unread=unread,
+                          only_hard=bool(change.files) and all(  # old and new path both: a rename out is code
+                              path_matches(p, hard_patterns) for f in change.files for p in f.paths()))
 
 
 def reviews_needed(policy, cls):
-    """Which AI reviews this change gets: 'general' always; 'security' for sensitive files under two-ai, and for
-    any change to the automation rules (a person decides those, and the security read helps them)."""
+    """Which AI reviews this change gets: 'general', except for a change to the automation rules alone (settings
+    or CI only: no application code to review, and it never merges on its own); 'security' for sensitive files
+    under two-ai, and for any change to the automation rules (a person decides those, and the security read helps)."""
     if policy.level == "manual":
         return []
-    needed = ["general"]
+    needed = [] if cls.only_hard else ["general"]
     if cls.hard or (cls.sensitive and policy.rule == "two-ai"):
         needed.append("security")
     return needed
