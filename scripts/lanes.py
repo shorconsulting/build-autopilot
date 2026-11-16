@@ -16,7 +16,7 @@ Command line:
     lanes.py effective  .github/autopilot.json
     lanes.py suites     .github/autopilot.json  path/one path/two ...
     git diff --name-only BASE...HEAD | lanes.py classify .github/autopilot.json [--event E] [--draft true]
-                                                         (prints class=, run_all=, suites=, parked=, why=)
+                                                         (prints class=, skip=, run_all=, suites=, parked=, why=)
     lanes.py render     .github/autopilot.json  SUITE  .github/workflows/mobile-apps.yml   (prints the new file)
 """
 import json
@@ -119,23 +119,24 @@ def suites_to_run(policy, changed_files, event="pull_request"):
 
 
 def classify(policy, changed_files, event="pull_request", draft=False):
-    """The change type, and what it runs: {"class", "run_all", "suites", "parked", "why"}.
+    """The change type, and what it runs: {"class", "skip", "run_all", "suites", "parked", "why"}.
 
       policy  only the settings file, CLAUDE.md or `tests.no_code_paths`: no tests;
       ci      only workflow or gate files that no suite claims: no application tests;
       light   every code file is inside some suite's `paths`: only the suites touched (and `always` ones);
       normal  a code file no suite claims, an empty change, or any event but a pull request: everything.
 
-    `run_all` is true for normal. `parked` is true for a draft unless `tests.drafts` is "run": nothing runs until it
+    `skip` is true only for policy, ci and a parked draft: a workflow's general tests run on light and normal, and a
+    job for one suite runs unless the type is light and `suites` leaves it out. `run_all` is true for normal. `parked` is true for a draft unless `tests.drafts` is "run": nothing runs until it
     is marked ready. A repo with no suites never gets `light`, so it behaves as before apart from policy and ci.
     """
     eff = effective(policy)["tests"]
     suites = eff["suites"]
     every = sorted(n for n, s in suites.items() if s.get("on_pr", "when-touched") != "never")
-    files = [f.removeprefix("./") for f in changed_files if f.strip()]
+    files = [f.removeprefix("./") for f in changed_files if f]  # not strip(): a file can be named " "
     if event != "pull_request" or not files:
         return {"class": "normal", "run_all": True, "suites": sorted(suites) if event != "pull_request" else every,
-                "parked": False, "why": f"{event}: everything runs" if files else "no changed files to judge by"}
+                "parked": False, "skip": False, "why": f"{event}: everything runs" if files else "no changed files to judge by"}
     claimed = [p for s in suites.values() for p in s.get("paths", [])]
     no_code = list(POLICY_FILES) + list(eff.get("no_code_paths", []))
     kinds = {"suite": [], "policy": [], "ci": [], "code": []}
@@ -157,6 +158,8 @@ def classify(policy, changed_files, event="pull_request", draft=False):
     out["parked"] = bool(draft) and eff.get("drafts", "skip") != "run"
     if out["parked"]:
         out.update(run_all=False, suites=[], why="draft: nothing runs until it is marked ready (" + out["why"] + ")")
+    # The one thing that lets a workflow skip its general tests; anything else, or no answer at all, runs them.
+    out["skip"] = out["parked"] or out["class"] in ("policy", "ci")
     return out
 
 
@@ -265,7 +268,7 @@ def main(argv):
         opts = dict(zip(argv[3::2], argv[4::2]))
         res = classify(pol, sys.stdin.read().split("\n"), opts.get("--event", "pull_request"),
                        opts.get("--draft", "false") == "true")
-        for key in ("class", "run_all", "suites", "parked", "why"):
+        for key in ("class", "skip", "run_all", "suites", "parked", "why"):
             v = res[key]
             print(f"{key}={v if isinstance(v, str) else json.dumps(v)}".replace("\r", " "))  # one line each: a file name is in `why`
         return 0

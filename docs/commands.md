@@ -153,8 +153,9 @@ Turns the page's choices into the repo's `.github/autopilot.json`.
      - add `types: [opened, reopened, synchronize, ready_for_review]` to `pull_request` (keep any `paths`/`branches`);
      - replace the repo's own changed-files or docs-only job with the `changes` job from
        `templates/github/workflows/test-lanes.yml`, keeping the repo's runner and pinned action versions;
-     - give each test job `needs: changes` and the template's `if:`; a job that runs one suite also gets
-       `|| contains(needs.changes.outputs.suites, '"<suite>"')`. The `ci-skip-docs-only` notes below on required
+     - give each test job `needs: changes` and the template's `if:`; a job that runs only one suite adds
+       `&& (needs.changes.outputs.class != 'light' || contains(needs.changes.outputs.suites, '"<suite>"'))`. The
+       repo's general tests keep running on `light`: only `policy`, `ci` and a parked draft skip them. The `ci-skip-docs-only` notes below on required
        matrix jobs apply to every such `if:`.
      If the settings have no `suites` and the repo's own job selected by path, turn those paths into `suites` (and its
      docs patterns into `tests.no_code_paths`) on the page first, listing each workflow file in its own suite's

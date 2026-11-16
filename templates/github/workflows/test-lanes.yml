@@ -7,8 +7,9 @@
 #     The `changes` job first works out the change type (.github/autopilot/lanes.py, docs/policy.md "Change types"):
 #     a policy-only or CI-only change runs no tests, a draft runs nothing until it is marked ready, and with
 #     `tests.suites` set a job runs only when its suite is touched. Copy the `changes` job and the `if:` on `test`
-#     into every workflow that runs tests on pull requests. A job that runs one suite also runs when
-#     `contains(needs.changes.outputs.suites, '"<suite>"')`.
+#     into every workflow that runs tests on pull requests. A job that runs only one suite adds
+#     `&& (needs.changes.outputs.class != 'light' || contains(needs.changes.outputs.suites, '"<suite>"'))`.
+#     Both skip only on an explicit answer: a missing or failed `changes` runs the tests.
 #   - push to main: the full suite. The `full` job's concurrency group never cancels a run in progress, and GitHub
 #     keeps at most one run waiting behind it and replaces an older waiting run with the newest. So one run is going
 #     and the newest push is waiting: each run covers whatever merged while the one before it ran. There is no
@@ -46,7 +47,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       class: ${{ steps.classify.outputs.class }}
-      run_all: ${{ steps.classify.outputs.run_all }}
+      skip: ${{ steps.classify.outputs.skip }}
       suites: ${{ steps.classify.outputs.suites }}
     steps:
       - uses: actions/checkout@v4
@@ -56,24 +57,29 @@ jobs:
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
           DRAFT: ${{ github.event.pull_request.draft }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          DEFAULT: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
           # The rules and the settings are read from the base branch, so a pull request cannot reclassify itself.
-          # If either is missing there, or anything fails, everything runs.
-          if git show "$BASE:.github/autopilot/lanes.py" > "$RUNNER_TEMP/lanes.py" 2>/dev/null &&
+          # If either is missing there, or anything fails, everything runs. So does a pull request into any other
+          # branch: its result stays on the commit if it is later pointed at the default branch, and a diff against
+          # another branch hides that branch's own changes.
+          if [ "$BASE_REF" = "$DEFAULT" ] &&
+             git show "$BASE:.github/autopilot/lanes.py" > "$RUNNER_TEMP/lanes.py" 2>/dev/null &&
              git show "$BASE:.github/autopilot.json" > "$RUNNER_TEMP/policy.json" 2>/dev/null &&
              git diff --no-renames --name-only "$BASE"...HEAD |
                python3 "$RUNNER_TEMP/lanes.py" classify "$RUNNER_TEMP/policy.json" --draft "$DRAFT" > "$RUNNER_TEMP/out"; then
             cat "$RUNNER_TEMP/out" | tee -a "$GITHUB_OUTPUT" >> "$GITHUB_STEP_SUMMARY"
           else
-            printf 'class=normal\nrun_all=true\nsuites=[]\n' | tee -a "$GITHUB_OUTPUT"
+            printf 'class=normal\nskip=false\nsuites=[]\n' | tee -a "$GITHUB_OUTPUT"
           fi
 
   test:
     name: test
     needs: changes
     # A skipped job still satisfies a rule that requires `test`. For a matrix job, skip step by step instead.
-    if: ${{ !cancelled() && github.event_name == 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.run_all == 'true') }}
+    if: ${{ !cancelled() && github.event_name == 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.skip != 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     concurrency:

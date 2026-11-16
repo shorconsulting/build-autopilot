@@ -170,6 +170,14 @@ class ChangeTypes(unittest.TestCase):
     def test_a_shared_action_is_not_ci_only(self):
         self.assertEqual(self.kind([".github/actions/setup/action.yml"])[0], "normal")
 
+    def test_only_policy_ci_and_parked_skip_the_general_tests(self):
+        skip = lambda files, **kw: lanes.classify(self.POL, files, **kw)["skip"]  # noqa: E731
+        self.assertEqual([skip(["CLAUDE.md"]), skip([".github/workflows/deploy.yml"]), skip(["a.py"], draft=True)], [True] * 3)
+        self.assertEqual([skip(["backend/a.py"]), skip(["mobile/App.tsx"]), skip(["a.py"]), skip([])], [False] * 4)
+
+    def test_a_file_named_with_spaces_is_still_judged(self):
+        self.assertEqual(self.kind([" ", "docs/x.md", ""])[0], "normal")
+
     def test_no_suites_means_code_is_always_normal(self):
         self.assertEqual(lanes.classify({}, ["src/a.py"])["class"], "normal")
         self.assertEqual(lanes.classify({}, [".github/autopilot.json"])["class"], "policy")
@@ -191,7 +199,8 @@ class Templates(unittest.TestCase):
         text = (ROOT / "templates/github/workflows/test-lanes.yml").read_text(encoding="utf-8")
         self.assertIn('git show "$BASE:.github/autopilot/lanes.py"', text)
         self.assertIn("ready_for_review", text)
-        self.assertIn("needs.changes.result != 'success'", text)
+        self.assertIn("needs.changes.result != 'success' || needs.changes.outputs.skip != 'true'", text)
+        self.assertIn('[ "$BASE_REF" = "$DEFAULT" ] &&', text)
         self.assertEqual((ROOT / "templates/github/autopilot/lanes.py").read_text(encoding="utf-8"),
                          (ROOT / "scripts/lanes.py").read_text(encoding="utf-8"))
 

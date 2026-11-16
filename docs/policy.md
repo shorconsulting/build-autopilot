@@ -154,13 +154,14 @@ rules and this file from the base branch so a pull request cannot reclassify its
 |---|---|---|---|
 | `policy` | only `.github/autopilot.json`, `CLAUDE.md` or `no_code_paths` | none | settings: security only, and a person merges; docs: general |
 | `ci` | only `.github/workflows/**` or `.github/autopilot/**` that no suite claims | none | security only, and a person merges |
-| `light` | code, every file inside some suite's `paths` | only the suites touched, plus `always` suites | as the settings say |
+| `light` | code, every file inside some suite's `paths` | the general (quick) tests, and only the suites touched, plus `always` suites | as the settings say |
 | `normal` | code with a file no suite claims | everything | as the settings say |
 
 A file a suite's `paths` names is code whatever else it looks like: list a workflow in its own suite's `paths` and a
 change to it runs that suite; list a `.md` file a test reads and it is never treated as docs. `.github/actions/**` is
 never `ci`, since any workflow may use a shared action. A repo with no `suites` never gets `light`. Pushes to the
-default branch and the schedule are always `normal`. A draft is `parked` on top of its type (see `drafts`).
+default branch and the schedule are always `normal`. A draft is `parked` on top of its type (see `drafts`). A pull request into any
+branch but the default one runs everything, so a stacked pull request never carries a skipped result onto `main`.
 
 `suites.<name>.on_pr`:
 
