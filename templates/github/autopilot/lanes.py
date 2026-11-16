@@ -8,15 +8,17 @@ Three things, all standard library:
                     resolves to something definite;
   suites_to_run     which of the policy's `tests.suites` a set of changed files should run;
   classify          the change type of a set of changed files (policy, ci, light, normal) and the suites it runs;
-                    the standard `changes` job in templates/github/workflows/test-lanes.yml calls it;
+                    the standard `What changed` step in templates/github/workflows/test-lanes.yml calls it;
   render_paths      rewrite a workflow's `on.pull_request.paths:` list from a suite's `paths`, so the workflow
                     and the policy cannot drift apart. /build-autopilot:apply uses it.
 
 Command line:
     lanes.py effective  .github/autopilot.json
     lanes.py suites     .github/autopilot.json  path/one path/two ...
-    git diff --name-only BASE...HEAD | lanes.py classify .github/autopilot.json [--event E] [--draft true]
-                                                         (prints class=, skip=, run_all=, suites=, parked=, why=)
+    git diff --name-only BASE...HEAD | lanes.py classify .github/autopilot.json [--event E] [--draft true] [--suite S]
+                                                         (prints run=, class=, skip=, run_all=, suites=, parked=, why=; `run` is whether
+                                                         the job should run: not skipped and, with --suite on a light
+                                                         change, only when that suite is touched)
     lanes.py render     .github/autopilot.json  SUITE  .github/workflows/mobile-apps.yml   (prints the new file)
 """
 import json
@@ -270,7 +272,9 @@ def main(argv):
         opts = dict(zip(argv[3::2], argv[4::2]))
         res = classify(pol, sys.stdin.read().split("\n"), opts.get("--event", "pull_request"),
                        opts.get("--draft", "false") == "true")
-        for key in ("class", "skip", "run_all", "suites", "parked", "why"):
+        suite = opts.get("--suite")
+        res["run"] = not res["skip"] and (res["class"] != "light" or suite is None or suite in res["suites"])
+        for key in ("run", "class", "skip", "run_all", "suites", "parked", "why"):
             v = res[key]
             print(f"{key}={v if isinstance(v, str) else json.dumps(v)}".replace("\r", " "))  # one line each: a file name is in `why`
         return 0

@@ -147,7 +147,7 @@ that `autopilot` needs is not built (`docs/v2-report.md`), so nothing here prete
 #### Change types
 
 Every pull request is one of four types, worked out by `scripts/lanes.py classify` (installed as
-`.github/autopilot/lanes.py`) from the files it changes. The `changes` job in a test workflow runs it, reading the
+`.github/autopilot/lanes.py`) from the files it changes. The `What changed` step at the top of each test job runs it, reading the
 rules and this file from the base branch so a pull request cannot reclassify itself; if it cannot, everything runs.
 
 | Type | The change is | Tests | AI review (with the gate) |
@@ -254,7 +254,7 @@ settings: `always_ask`, `level`, `pipeline` and `sensitive` still decide what ma
 | `level` = `autopilot` | Claude sessions release after merging, where they can | A release workflow with a health check and automatic undo |
 | `phase` | Sets the other fields when chosen on the page; read by `scripts/lanes.py` | Same |
 | `tests.suites` | `apply` writes each suite's `paths` into its workflow's `on.pull_request.paths` in the same reviewed pull request | Same |
-| Change types, `tests.drafts`, `tests.no_code_paths` | `apply` installs `.github/autopilot/lanes.py` and writes the `changes` job into every workflow that runs tests on pull requests; with the gate, a change to the automation rules alone gets the security review only | Same |
+| Change types, `tests.drafts`, `tests.no_code_paths` | `apply` installs `.github/autopilot/lanes.py` and writes the `What changed` step into every job that runs tests on pull requests; with the gate, a change to the automation rules alone gets the security review only | Same |
 | `tests.lane: wave` | `apply` adds `templates/github/workflows/test-lanes.yml` to a repo with no test workflow of its own, or tells you which two blocks to merge into the one it has | Same |
 | `tests.skip_duplicate_main` | `apply` adds the `dedupe` job (`drafts/chasing-shade/test.yml` is the reviewed example); `templates/github/autopilot/skip_duplicate_main.py` skips a push whose pull request passed on identical files, and one whose commit a passing merge-queue run of the same workflow already tested (`ci-queue-then-main`) | Same |
 | `ci_cost` | `apply` makes each finding's fix in the repo's workflow files, in the same reviewed pull request, for every `pipeline`; `audit --cost` measures it | Same |
