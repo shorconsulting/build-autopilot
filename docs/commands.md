@@ -162,6 +162,9 @@ Turns the page's choices into the repo's `.github/autopilot.json`.
      - give every later step of that job `if: steps.what.outputs.run != 'false'` (joined with `&&` to an `if:` it
        already has; a service container takes an empty image when skipping, as in the `ci-skip-docs-only` notes).
        The repo's general tests keep running on `light`: only `policy`, `ci` and a parked draft skip them.
+     Name every test workflow in a suite's `paths` (a repo with one test job gets one suite, `on_pr: always`, whose
+     `paths` is that workflow file): a workflow no suite names is `ci`, and a pull request that changes only it would
+     skip the very tests it changes.
      Never make the decision a separate job that the test job `needs`: GitHub creates a job's check only when the
      jobs it needs have finished, so until then an older result on the same commit is the newest one (measured:
      80 seconds with a waiting job, 3 seconds with a step). The same holds for an aggregate `result` job.

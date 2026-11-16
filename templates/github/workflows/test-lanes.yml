@@ -9,6 +9,8 @@
 #     `--suite <name>` runs only when that suite is touched. Every later step carries
 #     `if: steps.what.outputs.run != 'false'`, so the tests skip only on an explicit answer. Copy the checkout depth,
 #     the step and that `if:` into every job that runs tests on pull requests.
+#     Name this file in a suite's `paths` in .github/autopilot.json, or a pull request that changes only this
+#     workflow counts as CI-only and skips the tests it changes.
 #     The decision is a step, not a separate job, on purpose: GitHub creates a job's check only once the jobs it
 #     `needs` have finished, so a job that waits leaves an older result on the same commit as the newest one. A step
 #     makes the check pending as soon as the run exists. That matters when a parked draft (`tests.drafts: skip`) is
