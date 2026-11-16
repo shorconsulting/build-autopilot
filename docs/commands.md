@@ -157,6 +157,12 @@ Turns the page's choices into the repo's `.github/autopilot.json`.
        `&& (needs.changes.outputs.class != 'light' || contains(needs.changes.outputs.suites, '"<suite>"'))`. The
        repo's general tests keep running on `light`: only `policy`, `ci` and a parked draft skip them. The `ci-skip-docs-only` notes below on required
        matrix jobs apply to every such `if:`.
+     Where the repo already has a changed-files step that other jobs read (an output such as `code`, or an
+     aggregate job that checks it), change that step, not the jobs: ask the classifier first, write the step's
+     existing output from the answer, and keep the old rule as the branch that runs when the classifier cannot
+     answer. Nothing that reads the output changes, and an open pull request whose base predates the rollout behaves
+     as it did. `SConsInc/tidyhaus#1588` and `SConsInc/ranch-rides#2690` are worked examples; `SConsInc/knock#66`
+     replaces the job outright. Give every job that can now be skipped a runner the repo's jobs actually start on.
      If the settings have no `suites` and the repo's own job selected by path, turn those paths into `suites` (and its
      docs patterns into `tests.no_code_paths`) on the page first, listing each workflow file in its own suite's
      `paths`, so nothing that was selective becomes run-everything. Say in the body what each type runs after the change.
