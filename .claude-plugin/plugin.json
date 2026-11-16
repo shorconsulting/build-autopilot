@@ -1,7 +1,7 @@
 {
   "name": "build-autopilot",
   "displayName": "Build Autopilot",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "description": "Where a project's build time goes, and the build rules every build follows: an audit of pull-request waits, CI, deploys and Claude interruptions; per-repo autopilot settings; and global rules with an always-on steward that drives lanes to green, restarts stalled CI and resumes unfinished work.",
   "author": {
     "name": "David Shor",

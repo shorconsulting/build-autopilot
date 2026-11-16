@@ -138,7 +138,63 @@ class Render(unittest.TestCase):
         self.assertNotIn("y/**", out)
 
 
+class ChangeTypes(unittest.TestCase):
+    POL = {"tests": {"no_code_paths": ["*.md"], "suites": {
+        "app": {"paths": ["app/**", ".github/workflows/app-ci.yml", "docs/spec.md"]},
+        "server": {"paths": ["backend/**"]},
+        "lint": {"on_pr": "always"},
+        "mobile": {"on_pr": "never", "paths": ["mobile/**"]}}}}
+
+    def kind(self, files, **kw):
+        r = lanes.classify(self.POL, files, **kw)
+        return r["class"], r["suites"], r["run_all"]
+
+    def test_policy_only_runs_nothing(self):
+        self.assertEqual(self.kind([".github/autopilot.json", "CLAUDE.md", "docs/notes.md"]), ("policy", [], False))
+
+    def test_ci_only_runs_no_application_tests(self):
+        self.assertEqual(self.kind([".github/workflows/deploy.yml", ".github/autopilot/gate.py"]), ("ci", [], False))
+
+    def test_a_workflow_in_its_own_suites_paths_runs_that_suite(self):
+        self.assertEqual(self.kind([".github/workflows/app-ci.yml"]), ("light", ["app", "lint"], False))
+
+    def test_light_runs_only_the_suites_touched(self):
+        self.assertEqual(self.kind(["backend/api.py", "README.md"]), ("light", ["lint", "server"], False))
+
+    def test_a_doc_a_suite_claims_is_code(self):
+        self.assertEqual(self.kind(["docs/spec.md"]), ("light", ["app", "lint"], False))
+
+    def test_a_file_no_suite_claims_runs_everything_but_never_suites(self):
+        self.assertEqual(self.kind(["app/x.ts", "scripts/release.sh"]), ("normal", ["app", "lint", "server"], True))
+
+    def test_a_shared_action_is_not_ci_only(self):
+        self.assertEqual(self.kind([".github/actions/setup/action.yml"])[0], "normal")
+
+    def test_no_suites_means_code_is_always_normal(self):
+        self.assertEqual(lanes.classify({}, ["src/a.py"])["class"], "normal")
+        self.assertEqual(lanes.classify({}, [".github/autopilot.json"])["class"], "policy")
+
+    def test_nothing_to_judge_by_and_other_events_run_everything(self):
+        self.assertEqual(self.kind([])[::2], ("normal", True))
+        self.assertEqual(self.kind(["CLAUDE.md"], event="push"), ("normal", ["app", "lint", "mobile", "server"], True))
+
+    def test_a_draft_is_parked_unless_the_repo_says_run(self):
+        r = lanes.classify(self.POL, ["app/x.ts"], draft=True)
+        self.assertEqual((r["parked"], r["suites"], r["run_all"], r["class"]), (True, [], False, "light"))
+        pol = {"tests": {"drafts": "run"}}
+        self.assertEqual(lanes.classify(pol, ["a.py"], draft=True)["parked"], False)
+        self.assertTrue(lanes.validate({"tests": {"drafts": "maybe", "no_code_paths": "x"}}))
+
+
 class Templates(unittest.TestCase):
+    def test_the_changes_job_reads_rules_from_the_base_and_runs_everything_when_it_cannot(self):
+        text = (ROOT / "templates/github/workflows/test-lanes.yml").read_text(encoding="utf-8")
+        self.assertIn('git show "$BASE:.github/autopilot/lanes.py"', text)
+        self.assertIn("ready_for_review", text)
+        self.assertIn("needs.changes.result != 'success'", text)
+        self.assertEqual((ROOT / "templates/github/autopilot/lanes.py").read_text(encoding="utf-8"),
+                         (ROOT / "scripts/lanes.py").read_text(encoding="utf-8"))
+
     def test_the_wave_workflow_template_keeps_one_run_and_one_waiting(self):
         t = (ROOT / "templates" / "github" / "workflows" / "test-lanes.yml").read_text(encoding="utf-8")
         self.assertIn("cancel-in-progress: false", t)

@@ -146,6 +146,19 @@ Turns the page's choices into the repo's `.github/autopilot.json`.
      filter; for `never`, remove its `pull_request:` trigger and leave `schedule` and `push`. If `render` says it
      cannot (a `paths-ignore`, or no `pull_request.paths`), say so in the pull request body and leave that workflow alone.
      Run `lanes.py suites` over the last merged pull request's files for one example in the body: which suites it would have run.
+   - Change types (any `pipeline`, `own` included; `docs/policy.md`, "Change types"): copy
+     `templates/github/autopilot/lanes.py` to `.github/autopilot/lanes.py` byte for byte (for `own` and `none` this is
+     the one file kept under `.github/autopilot/`). In every workflow that runs tests on `pull_request`, do this
+     rather than describe it:
+     - add `types: [opened, reopened, synchronize, ready_for_review]` to `pull_request` (keep any `paths`/`branches`);
+     - replace the repo's own changed-files or docs-only job with the `changes` job from
+       `templates/github/workflows/test-lanes.yml`, keeping the repo's runner and pinned action versions;
+     - give each test job `needs: changes` and the template's `if:`; a job that runs one suite also gets
+       `|| contains(needs.changes.outputs.suites, '"<suite>"')`. The `ci-skip-docs-only` notes below on required
+       matrix jobs apply to every such `if:`.
+     If the settings have no `suites` and the repo's own job selected by path, turn those paths into `suites` (and its
+     docs patterns into `tests.no_code_paths`) on the page first, listing each workflow file in its own suite's
+     `paths`, so nothing that was selective becomes run-everything. Say in the body what each type runs after the change.
    - `tests.lane: wave`: if the repo has no workflow that runs its tests on pull requests and on pushes to the
      default branch, add `templates/github/workflows/test-lanes.yml` (set its two commands from the repo's `package.json`
      scripts and ask nothing); if it has one, list in the body the two changes that make it the wave lane (a quick-tests
@@ -220,7 +233,14 @@ Turns the page's choices into the repo's `.github/autopilot.json`.
    under any policy. Tell the person it is ready to merge.
 6. After it merges (or right away if they ask you to merge it), set `applied_at` on the settings document with
    `ArtifactData` `update`.
-7. If `level` is `auto-merge` or `autopilot` and the repo's `allow_auto_merge` is false, or `main` has no rule
+7. Once it has merged, bring the open pull requests under the new rules; they still carry results from the old
+   ones. For each open, non-draft pull request into the default branch: get its files
+   (`gh api repos/OWNER/REPO/pulls/N/files --paginate --jq '.[].filename'`), run them through
+   `lanes.py classify .github/autopilot.json`, and update its branch from the default branch
+   (`gh api -X PUT repos/OWNER/REPO/pulls/N/update-branch`) so its checks run again under the merged workflows. Skip
+   one that conflicts or is held, and say so. Report a table: pull request, type, suites it now runs. Do them
+   oldest first, at most 10 at a time, so the runners are not flooded. Leave drafts alone: they run when marked ready.
+8. If `level` is `auto-merge` or `autopilot` and the repo's `allow_auto_merge` is false, or `main` has no rule
    requiring the tests to pass, say that GitHub's auto-merge needs those two repo settings, and ask before changing
    them. Changing a repo's settings is the person's call.
 

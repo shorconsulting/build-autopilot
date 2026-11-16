@@ -141,6 +141,27 @@ that `autopilot` needs is not built (`docs/v2-report.md`), so nothing here prete
 | `skip_duplicate_main` | `true` skips re-running the same tests on `main` after a merge when the pull request already passed them on the same code, or when the merge queue passed them on that exact commit (`ci-queue-then-main`). |
 | `suites` | Optional. Per-suite rules for a suite that is expensive or only matters to part of the repo, such as the mobile app's build and emulator tests (macOS minutes cost ten times Linux). A map of suite name to `{ "on_pr", "paths" }`. |
 
+| `no_code_paths` | Optional. Globs for files nothing builds, imports or tests (docs, wireframes). A change to only these is a `policy` change and runs no tests. A path a suite's `paths` names stays code. |
+| `drafts` | `skip` (default): a draft pull request runs no tests and gets no review until it is marked ready. `run`: drafts are tested like any other. |
+
+#### Change types
+
+Every pull request is one of four types, worked out by `scripts/lanes.py classify` (installed as
+`.github/autopilot/lanes.py`) from the files it changes. The `changes` job in a test workflow runs it, reading the
+rules and this file from the base branch so a pull request cannot reclassify itself; if it cannot, everything runs.
+
+| Type | The change is | Tests | AI review (with the gate) |
+|---|---|---|---|
+| `policy` | only `.github/autopilot.json`, `CLAUDE.md` or `no_code_paths` | none | settings: security only, and a person merges; docs: general |
+| `ci` | only `.github/workflows/**` or `.github/autopilot/**` that no suite claims | none | security only, and a person merges |
+| `light` | code, every file inside some suite's `paths` | only the suites touched, plus `always` suites | as the settings say |
+| `normal` | code with a file no suite claims | everything | as the settings say |
+
+A file a suite's `paths` names is code whatever else it looks like: list a workflow in its own suite's `paths` and a
+change to it runs that suite; list a `.md` file a test reads and it is never treated as docs. `.github/actions/**` is
+never `ci`, since any workflow may use a shared action. A repo with no `suites` never gets `light`. Pushes to the
+default branch and the schedule are always `normal`. A draft is `parked` on top of its type (see `drafts`).
+
 `suites.<name>.on_pr`:
 
 | Value | A pull request runs the suite |
@@ -232,6 +253,7 @@ settings: `always_ask`, `level`, `pipeline` and `sensitive` still decide what ma
 | `level` = `autopilot` | Claude sessions release after merging, where they can | A release workflow with a health check and automatic undo |
 | `phase` | Sets the other fields when chosen on the page; read by `scripts/lanes.py` | Same |
 | `tests.suites` | `apply` writes each suite's `paths` into its workflow's `on.pull_request.paths` in the same reviewed pull request | Same |
+| Change types, `tests.drafts`, `tests.no_code_paths` | `apply` installs `.github/autopilot/lanes.py` and writes the `changes` job into every workflow that runs tests on pull requests; with the gate, a change to the automation rules alone gets the security review only | Same |
 | `tests.lane: wave` | `apply` adds `templates/github/workflows/test-lanes.yml` to a repo with no test workflow of its own, or tells you which two blocks to merge into the one it has | Same |
 | `tests.skip_duplicate_main` | `apply` adds the `dedupe` job (`drafts/chasing-shade/test.yml` is the reviewed example); `templates/github/autopilot/skip_duplicate_main.py` skips a push whose pull request passed on identical files, and one whose commit a passing merge-queue run of the same workflow already tested (`ci-queue-then-main`) | Same |
 | `ci_cost` | `apply` makes each finding's fix in the repo's workflow files, in the same reviewed pull request, for every `pipeline`; `audit --cost` measures it | Same |
