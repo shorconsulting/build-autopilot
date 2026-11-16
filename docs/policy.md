@@ -84,7 +84,7 @@ its own runners: a gate on a runner that never starts blocks every merge.
 
 `apply` writes the workflow through `scripts/render_gate.py`, which changes only the `runs-on` lines. When the page
 leaves `runner` out, `apply` keeps whatever runner the repo's current gate workflow already uses, so an apply never
-moves a repo back to GitHub's runners by accident. The review job's pinned wheels need Python 3.12 on the runner.
+moves a repo back to GitHub's runners by accident. The review job's pinned wheels need Python 3.12 on the runner. The gate's jobs hold secrets (the Claude key and the app's key) and run on every pull request, so a self-hosted runner for the gate should be private to the org: not shared with other orgs, and not used for a public repo or pull requests from forks.
 
 ### `sensitive`: stricter handling for risky areas
 

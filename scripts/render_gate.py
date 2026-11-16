@@ -8,8 +8,9 @@ template changes.
 
 Which runner, first that is set:
   1. `runner` in the policy (from the page): a label, or a list of labels such as ["self-hosted", "my-ci"].
-  2. With --existing: the `runs-on` the repo's current gate workflow already uses, when every gate job agrees and it
-     is not the template's. So an apply never moves a repo back to GitHub's runners by accident.
+  2. With --existing: the `runs-on` the repo's current gate workflow already uses, when it is not the template's. So
+     an apply never moves a repo back to GitHub's runners by accident. If the current jobs disagree, or one's runs-on
+     can't be read (an expression, a block list, a runner group), the script stops (exit 2) and asks for `runner`.
   3. The template's own `ubuntu-24.04`.
 
 Usage:
@@ -47,22 +48,31 @@ def normalize(value):
 def existing_runner(workflow_text):
     """The runner every job of a current gate workflow uses, when they all agree; None when there is none to keep.
 
-    Raises ValueError when the current jobs use a runs-on this script can't read, or disagree and none is the
-    template's: falling back to ubuntu-24.04 there could move the repo onto runners that never start."""
+    Raises ValueError when a job's runs-on can't be read (an expression, or a block list or runner group on the
+    following lines) or the jobs disagree: falling back to ubuntu-24.04 there could move the repo onto runners that
+    never start, so the person sets `runner` on the page instead."""
     if not workflow_text:
         return None
-    try:
-        found = {tuple(normalize(m.group("val")) or ()) for m in RUNS_ON.finditer(workflow_text)}
-    except ValueError as e:
-        raise ValueError("can't read runs-on in the current gate workflow (%s); set `runner` for this repo on the "
-                         "Build Autopilot page" % e)
-    if len(found) > 1 and (DEFAULT,) not in found:
+    found = set()
+    for m in RUNS_ON.finditer(workflow_text):
+        try:
+            labels = normalize(m.group("val"))
+        except ValueError as e:
+            labels = None
+            why = str(e)
+        else:
+            why = "runs-on with nothing on its line (a block list or runner group)"
+        if not labels:
+            raise ValueError("can't read runs-on in the current gate workflow (%s); set `runner` for this repo on "
+                             "the Build Autopilot page" % why)
+        found.add(tuple(labels))
+    if len(found) > 1:
         raise ValueError("the current gate workflow's jobs use different runners (%s); set `runner` for this repo "
                          "on the Build Autopilot page" % ", ".join(as_yaml(list(f)) for f in sorted(found)))
-    if len(found) != 1:
+    if not found:
         return None
     labels = list(found.pop())
-    return None if not labels or labels == [DEFAULT] else labels
+    return None if labels == [DEFAULT] else labels
 
 
 def choose(policy, existing_text=None):

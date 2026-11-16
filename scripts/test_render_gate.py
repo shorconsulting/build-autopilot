@@ -3,6 +3,7 @@
 No network. Run:
     python3 -m unittest scripts/test_render_gate.py -v
 """
+import contextlib
 import io
 import json
 import re
@@ -47,9 +48,30 @@ class Choose(unittest.TestCase):
         current = render_gate.render(TEMPLATE, SELF)
         self.assertEqual(render_gate.choose({"runner": "ubuntu-24.04"}, current), ["ubuntu-24.04"])
 
-    def test_mixed_existing_with_the_template_runner_falls_back(self):
+    def test_mixed_existing_with_the_template_runner_stops(self):
         mixed = TEMPLATE.replace("runs-on: ubuntu-24.04", "runs-on: [self-hosted, x]", 1)
-        self.assertEqual(render_gate.choose({}, mixed), ["ubuntu-24.04"])
+        with self.assertRaisesRegex(ValueError, "different runners"):
+            render_gate.choose({}, mixed)
+        self.assertEqual(render_gate.choose({"runner": "x"}, mixed), ["x"])
+
+    def test_block_list_existing_stops(self):
+        current = TEMPLATE.replace("runs-on: ubuntu-24.04", "runs-on:\n      - self-hosted\n      - my-ci")
+        with self.assertRaisesRegex(ValueError, "set `runner`"):
+            render_gate.choose({}, current)
+
+    def test_runner_group_existing_stops(self):
+        current = TEMPLATE.replace("runs-on: ubuntu-24.04", "runs-on:\n      group: my-group\n      labels: my-ci")
+        with self.assertRaisesRegex(ValueError, "set `runner`"):
+            render_gate.choose({}, current)
+
+    def test_cli_stops_with_exit_2(self):
+        with tempfile.TemporaryDirectory() as d:
+            pol = Path(d) / "autopilot.json"
+            pol.write_text("{}")
+            cur = Path(d) / "cur.yml"
+            cur.write_text(TEMPLATE.replace("runs-on: ubuntu-24.04", "runs-on:\n      group: g"))
+            with redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(render_gate.main(["--which", str(pol), "--existing", str(cur)]), 2)
 
     def test_mixed_existing_without_the_template_runner_stops(self):
         current = render_gate.render(TEMPLATE, SELF).replace("runs-on: [self-hosted, shorconsulting-ci]",
