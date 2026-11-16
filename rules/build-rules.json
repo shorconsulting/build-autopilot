@@ -33,7 +33,8 @@
     "cron": "17 * * * *",
     "idle_hours": 6,
     "max_resumes_per_sweep": 10,
-    "max_prs_classified": 150
+    "max_prs_classified": 60,
+    "api_reserve": 2500
   },
   "improve": {
     "sweeps": 24,

@@ -225,6 +225,16 @@ class Sweeper:
         return {"branch": branch, "state": state, "failed": failed, "red_since": red_since,
                 "red_hours": hours(self.now, parse_time(red_since))}
 
+    def budget_prs(self):
+        """How many PRs this sweep may read in full, from the API calls left this hour (about 4 calls a PR),
+        keeping `steward.api_reserve` for everyone else on the account."""
+        try:
+            core = (api("rate_limit") or {}).get("resources", {}).get("core", {})
+            spare = core.get("remaining", 5000) - self.rules["steward"].get("api_reserve", 2500)
+        except GhError:
+            return self.rules["steward"]["max_prs_classified"]
+        return max(0, spare // 4)
+
     def flaky(self, repo):
         """Jobs that failed and then passed on a re-run of the same commit: the test or the machine is unreliable."""
         out = {}
@@ -276,9 +286,22 @@ class Sweeper:
         idle_limit = self.rules["steward"]["idle_hours"]
         prs, counts = [], {}
         # Oldest first: the work that has waited longest is the work most likely to be forgotten.
+        # Past the cap, read nothing more per PR: a sweep must not spend the account's API allowance, which every
+        # session on the account shares (one sweep of 400 PRs used to cost ~1,000 calls).
+        cap = min(cap, self.budget_prs())
+        empty = {"total": 0, "failed": [], "infra": [], "stalled": [], "pending": 0}
         for i, p in enumerate(sorted(pulls, key=lambda p: p["created_at"])):
-            detail = api("repos/%s/pulls/%s" % (repo, p["number"])) if i < cap else p
-            chk = self.checks(repo, p["head"]["sha"], classify=i < cap)
+            if i >= cap:
+                state = "draft" if p.get("draft") else ("stacked" if p["base"]["ref"] in open_heads else "unswept")
+                counts[state] = counts.get(state, 0) + 1
+                prs.append({"number": p["number"], "title": p.get("title"), "branch": p["head"]["ref"],
+                            "base": p["base"]["ref"], "state": state,
+                            "idle_hours": hours(self.now, parse_time(p.get("updated_at"))),
+                            "labels": [l["name"] for l in p.get("labels") or []], "lane": None,
+                            "failed": [], "infra": [], "stalled": [], "classified": False})
+                continue
+            detail = api("repos/%s/pulls/%s" % (repo, p["number"]))
+            chk = self.checks(repo, p["head"]["sha"])
             state = self.pr_state(dict(p, mergeable_state=(detail or {}).get("mergeable_state")), chk, open_heads)
             idle = hours(self.now, parse_time(p.get("updated_at")))
             if state == "draft" and (idle or 0) < idle_limit:
