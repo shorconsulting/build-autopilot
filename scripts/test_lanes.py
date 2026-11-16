@@ -175,6 +175,26 @@ class ChangeTypes(unittest.TestCase):
         self.assertEqual([skip(["CLAUDE.md"]), skip([".github/workflows/deploy.yml"]), skip(["a.py"], draft=True)], [True] * 3)
         self.assertEqual([skip(["backend/a.py"]), skip(["mobile/App.tsx"]), skip(["a.py"]), skip([])], [False] * 4)
 
+    def test_the_command_line_says_whether_a_suites_job_runs(self):
+        import io, json as j, tempfile, contextlib
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+            j.dump(self.POL, f)
+        def run(files, *args):
+            old, out = sys.stdin, io.StringIO()
+            sys.stdin = io.StringIO("\n".join(files))
+            try:
+                with contextlib.redirect_stdout(out):
+                    lanes.main(["lanes.py", "classify", f.name, *args])
+            finally:
+                sys.stdin = old
+            return out.getvalue().split("\n")[0]
+        self.assertEqual(run(["backend/a.py"], "--suite", "server"), "run=true")
+        self.assertEqual(run(["backend/a.py"], "--suite", "app"), "run=false")
+        self.assertEqual(run(["backend/a.py"]), "run=true")                       # the general tests
+        self.assertEqual(run(["scripts/x.sh"], "--suite", "app"), "run=true")     # normal: everything
+        self.assertEqual(run(["CLAUDE.md"], "--suite", "app"), "run=false")
+        self.assertEqual(run(["backend/a.py"], "--suite", "server", "--draft", "true"), "run=false")
+
     def test_a_file_named_with_spaces_is_still_judged(self):
         self.assertEqual(self.kind([" ", "docs/x.md", ""])[0], "normal")
 
@@ -195,11 +215,13 @@ class ChangeTypes(unittest.TestCase):
 
 
 class Templates(unittest.TestCase):
-    def test_the_changes_job_reads_rules_from_the_base_and_runs_everything_when_it_cannot(self):
+    def test_the_what_changed_step_reads_rules_from_the_base_and_runs_the_tests_when_it_cannot(self):
         text = (ROOT / "templates/github/workflows/test-lanes.yml").read_text(encoding="utf-8")
-        self.assertIn('git show "$BASE:.github/autopilot/lanes.py"', text)
+        self.assertIn("git show HEAD^1:.github/autopilot/lanes.py", text)
+        self.assertNotIn("needs: changes", text)  # a job that waits leaves a stale result as the newest one
+        self.assertEqual(text.count("      - if: steps.what.outputs.run != 'false'"), 3)  # every step after it
         self.assertIn("ready_for_review", text)
-        self.assertIn("needs.changes.result != 'success' || needs.changes.outputs.skip != 'true'", text)
+        self.assertIn('echo "run=true" | tee -a "$GITHUB_OUTPUT"', text)
         self.assertIn('[ "$BASE_REF" = "$DEFAULT" ] &&', text)
         self.assertEqual((ROOT / "templates/github/autopilot/lanes.py").read_text(encoding="utf-8"),
                          (ROOT / "scripts/lanes.py").read_text(encoding="utf-8"))

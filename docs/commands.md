@@ -155,18 +155,22 @@ Turns the page's choices into the repo's `.github/autopilot.json`.
      the one file kept under `.github/autopilot/`). In every workflow that runs tests on `pull_request`, do this
      rather than describe it:
      - add `types: [opened, reopened, synchronize, ready_for_review]` to `pull_request` (keep any `paths`/`branches`);
-     - replace the repo's own changed-files or docs-only job with the `changes` job from
-       `templates/github/workflows/test-lanes.yml`, keeping the repo's runner and pinned action versions;
-     - give each test job `needs: changes` and the template's `if:`; a job that runs only one suite adds
-       `&& (needs.changes.outputs.class != 'light' || contains(needs.changes.outputs.suites, '"<suite>"'))`. The
-       repo's general tests keep running on `light`: only `policy`, `ci` and a parked draft skip them. The `ci-skip-docs-only` notes below on required
-       matrix jobs apply to every such `if:`.
+     - replace the repo's own changed-files or docs-only job with the `What changed` step from
+       `templates/github/workflows/test-lanes.yml`, as the first step after checkout (`fetch-depth: 2`) of each
+       test job, keeping the repo's runner and pinned action versions; a job that runs only one suite passes
+       `--suite <suite>`;
+     - give every later step of that job `if: steps.what.outputs.run != 'false'` (joined with `&&` to an `if:` it
+       already has; a service container takes an empty image when skipping, as in the `ci-skip-docs-only` notes).
+       The repo's general tests keep running on `light`: only `policy`, `ci` and a parked draft skip them.
+     Never make the decision a separate job that the test job `needs`: GitHub creates a job's check only when the
+     jobs it needs have finished, so until then an older result on the same commit is the newest one (measured:
+     80 seconds with a waiting job, 3 seconds with a step). The same holds for an aggregate `result` job.
      Where the repo already has a changed-files step that other jobs read (an output such as `code`, or an
      aggregate job that checks it), change that step, not the jobs: ask the classifier first, write the step's
      existing output from the answer, and keep the old rule as the branch that runs when the classifier cannot
      answer. Nothing that reads the output changes, and an open pull request whose base predates the rollout behaves
-     as it did. `SConsInc/tidyhaus#1588` and `SConsInc/ranch-rides#2690` are worked examples; `SConsInc/knock#66`
-     replaces the job outright. Give every job that can now be skipped a runner the repo's jobs actually start on.
+     as it did. `SConsInc/tidyhaus#1588` and `SConsInc/ranch-rides#2690` are worked examples (both keep a waiting job, so both
+     keep `tests.drafts: run`); `SConsInc/knock#66` uses the step. Give every job that can now be skipped a runner the repo's jobs actually start on.
      If the settings have no `suites` and the repo's own job selected by path, turn those paths into `suites` (and its
      docs patterns into `tests.no_code_paths`) on the page first, listing each workflow file in its own suite's
      `paths`, so nothing that was selective becomes run-everything. Say in the body what each type runs after the change.
