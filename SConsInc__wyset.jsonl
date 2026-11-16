@@ -1,0 +1,1 @@
+{"at": "2026-11-16T08:00:07Z", "repo": "SConsInc/wyset", "open_prs": 12, "counts": {"green": 4, "red": 8}, "main_state": "red", "main_red_hours": 156.9, "broken_runners": [], "failing_checks": {"build": 8, "deploy-scripts": 3, "autopilot gate": 3, "AI review": 3, "autopilot mark": 3}, "flaky": {}, "merged_24h": 2, "median_hours_to_merge": 7.1}
