@@ -138,7 +138,9 @@ Turns the page's choices into the repo's `.github/autopilot.json`.
      ${CLAUDE_PLUGIN_ROOT}/templates/github/workflows/autopilot.yml .github/autopilot.json --existing
      .github/workflows/autopilot.yml`, never by copying the template: the template runs on GitHub's `ubuntu-24.04`, and
      a repo on its own runners would then block every merge. Say in the body which runner the gate uses and why
-     (the page's `runner`, or kept from the repo's workflow).
+     (the page's `runner`, or kept from the repo's workflow). Print to a temporary file and move it into place, since
+     the script reads the current workflow. If it stops (exit 2) because it can't read the current jobs' runner or
+     they disagree, don't fall back: ask for `runner` to be set on the page, which is the person's call.
      Afterwards, tell the person to run `scripts/setup-github-gate.sh OWNER/REPO --ruleset` once it's merged.
    - `pipeline: own` or `none`: the pull request changes only `.github/autopilot.json`, the CLAUDE.md section, and
      the workflow edits for `tests.suites` and `ci_cost` below.

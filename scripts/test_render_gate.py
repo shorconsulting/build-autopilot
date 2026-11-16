@@ -47,9 +47,25 @@ class Choose(unittest.TestCase):
         current = render_gate.render(TEMPLATE, SELF)
         self.assertEqual(render_gate.choose({"runner": "ubuntu-24.04"}, current), ["ubuntu-24.04"])
 
-    def test_mixed_existing_is_ignored(self):
+    def test_mixed_existing_with_the_template_runner_falls_back(self):
         mixed = TEMPLATE.replace("runs-on: ubuntu-24.04", "runs-on: [self-hosted, x]", 1)
         self.assertEqual(render_gate.choose({}, mixed), ["ubuntu-24.04"])
+
+    def test_mixed_existing_without_the_template_runner_stops(self):
+        current = render_gate.render(TEMPLATE, SELF).replace("runs-on: [self-hosted, shorconsulting-ci]",
+                                                              "runs-on: my-box", 1)
+        with self.assertRaises(ValueError):
+            render_gate.choose({}, current)
+        self.assertEqual(render_gate.choose({"runner": "my-box"}, current), ["my-box"])
+
+    def test_quoted_existing_label_is_read(self):
+        current = TEMPLATE.replace("runs-on: ubuntu-24.04", 'runs-on: "my-box"')
+        self.assertEqual(render_gate.choose({}, current), ["my-box"])
+
+    def test_unreadable_existing_says_what_to_do(self):
+        current = TEMPLATE.replace("runs-on: ubuntu-24.04", "runs-on: ${{ matrix.os }}")
+        with self.assertRaisesRegex(ValueError, "set `runner`"):
+            render_gate.choose({}, current)
 
 
 class Render(unittest.TestCase):

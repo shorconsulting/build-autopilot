@@ -34,7 +34,7 @@ def normalize(value):
         if value.startswith("[") and value.endswith("]"):
             value = [v.strip().strip("'\"") for v in value[1:-1].split(",")]
         else:
-            value = [v.strip() for v in value.split(",")]
+            value = [v.strip().strip("'\"") for v in value.split(",")]
     if not isinstance(value, list):
         raise ValueError("runner must be a label or a list of labels, not %r" % (value,))
     labels = [str(v).strip() for v in value if str(v).strip()]
@@ -45,10 +45,20 @@ def normalize(value):
 
 
 def existing_runner(workflow_text):
-    """The runner every job of a current gate workflow uses, when they all agree; None otherwise."""
+    """The runner every job of a current gate workflow uses, when they all agree; None when there is none to keep.
+
+    Raises ValueError when the current jobs use a runs-on this script can't read, or disagree and none is the
+    template's: falling back to ubuntu-24.04 there could move the repo onto runners that never start."""
     if not workflow_text:
         return None
-    found = {tuple(normalize(m.group("val")) or ()) for m in RUNS_ON.finditer(workflow_text)}
+    try:
+        found = {tuple(normalize(m.group("val")) or ()) for m in RUNS_ON.finditer(workflow_text)}
+    except ValueError as e:
+        raise ValueError("can't read runs-on in the current gate workflow (%s); set `runner` for this repo on the "
+                         "Build Autopilot page" % e)
+    if len(found) > 1 and (DEFAULT,) not in found:
+        raise ValueError("the current gate workflow's jobs use different runners (%s); set `runner` for this repo "
+                         "on the Build Autopilot page" % ", ".join(as_yaml(list(f)) for f in sorted(found)))
     if len(found) != 1:
         return None
     labels = list(found.pop())
@@ -89,7 +99,11 @@ def main(argv=None):
                 existing = fh.read()
         except FileNotFoundError:
             existing = None
-    labels = choose(policy, existing)
+    try:
+        labels = choose(policy, existing)
+    except ValueError as e:
+        print("render_gate: %s" % e, file=sys.stderr)
+        return 2
     if a.which:
         print(json.dumps(labels))
         return 0
