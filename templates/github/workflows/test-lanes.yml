@@ -23,6 +23,10 @@
 # Copy this file to .github/workflows/, and set the two commands below. If the repo already has a test workflow, merge
 # these triggers and the two concurrency groups into it instead of adding a second workflow that runs the same tests.
 #
+# Runner: every job runs on `vars.AUTOPILOT_RUNNER`, like the gate (docs/v2-install.md, "The runner"): the org's
+# self-hosted autopilot pool for a private repo, a repo variable set to a GitHub-hosted label for a public one. If the
+# repo's tests need more than that pool gives (it has no sudo or docker), point these jobs at the repo's own runner.
+#
 # Does not need the gate. Use `tests.suites` in .github/autopilot.json for per-suite path rules; see docs/policy.md.
 
 name: test-lanes
@@ -44,7 +48,7 @@ jobs:
   changes:
     name: what changed
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.AUTOPILOT_RUNNER }}
     timeout-minutes: 5
     outputs:
       class: ${{ steps.classify.outputs.class }}
@@ -81,7 +85,7 @@ jobs:
     needs: changes
     # A skipped job still satisfies a rule that requires `test`. For a matrix job, skip step by step instead.
     if: ${{ !cancelled() && github.event_name == 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.skip != 'true') }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.AUTOPILOT_RUNNER }}
     timeout-minutes: 20
     concurrency:
       group: quick-${{ github.event.pull_request.number }}
@@ -98,7 +102,7 @@ jobs:
   full:
     name: full suite
     if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.AUTOPILOT_RUNNER }}
     timeout-minutes: 60
     concurrency:
       group: full-suite-main

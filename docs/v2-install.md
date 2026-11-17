@@ -19,7 +19,7 @@ What the gate does, and why it is built this way: [v2-report.md](v2-report.md). 
 | `.github/autopilot/lanes.py` | `templates/github/autopilot/lanes.py` | Works out a pull request's change type for the `changes` job in the test workflows (`docs/policy.md`, "Change types"). Installed for every `pipeline`, `own` included |
 | `.github/autopilot.json` | the settings page | The settings (v1 already writes this) |
 
-Copy the files byte for byte. Don't edit the workflow per repo except the two places marked below (required check
+Copy the files byte for byte (the runner is a variable, not an edit: step 3b). Don't edit the workflow per repo except the two places marked below (required check
 names live in the ruleset, not the workflow).
 
 ## The quick way: one script (admin)
@@ -129,6 +129,30 @@ to these files as "needs a person".
 - Allow auto-merge: on (`gh api -X PATCH repos/OWNER/REPO -F allow_auto_merge=true`).
 - Settings → Actions → General → Workflow permissions: **Read repository contents**; "Allow GitHub Actions to create
   and approve pull requests": **off**.
+
+### 3b. The runner (admin)
+
+Every job in the gate (and in `test-lanes.yml`) runs on `runs-on: ${{ vars.AUTOPILOT_RUNNER }}`. With no such
+variable visible to the repo, the jobs have no runner and the workflow fails to start, so set it before merging the
+install pull request. `setup-github-gate.sh` does this in its step 5b.
+
+- **Private repo in an org with a self-hosted autopilot pool** (SConsInc: label `autopilot`, ephemeral unprivileged
+  runners, runner group 3): the org variable `AUTOPILOT_RUNNER=autopilot` has *selected* visibility, so share it with
+  the repo, and make sure the pool's runner group allows the repo:
+
+  ```bash
+  gh api -X PUT orgs/OWNER/actions/variables/AUTOPILOT_RUNNER/repositories/$(gh api repos/OWNER/REPO --jq .id)
+  ```
+
+- **Public repo, or a personal account**: never a self-hosted pool (a fork's pull request would run on that
+  machine). Set a repo variable naming a GitHub-hosted runner:
+
+  ```bash
+  gh variable set AUTOPILOT_RUNNER --repo OWNER/REPO --body ubuntu-24.04
+  ```
+
+Whatever runner it names needs Python 3.12 as `python3` (the review job's hash-pinned wheels are for 3.12, on x86_64
+and arm64 Linux), git 2.40 or later, and curl. The jobs need no sudo or docker. A repo variable overrides the org's.
 
 ### 4. The branch ruleset, only for level `auto-merge` or `autopilot` (admin)
 

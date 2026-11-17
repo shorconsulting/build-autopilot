@@ -164,7 +164,7 @@ and covered by tests or dry-run scenarios:
 | File names (which may contain newlines) reached the reviewer outside the untrusted block and the comment unescaped | Names escaped everywhere, moved inside the block; control characters need a person; reviewer text can't add headings |
 | `skip_duplicate_main` accepted a test run from when the PR targeted another branch | The test workflow's run title records the commit GitHub actually tested; main skips only when that commit's files equal the merged files exactly, and never for a PR that touched `.github/` |
 | Scripts CI runs and dependency manifests were guarded only by the general review | Both are sensitive (second review under `two-ai`) |
-| `ubuntu-latest` moving past Python 3.12 would break the hash-pinned install | Runners pinned to `ubuntu-24.04` |
+| `ubuntu-latest` moving past Python 3.12 would break the hash-pinned install | Runners pinned to `ubuntu-24.04`; since 2026-11 the runner is `vars.AUTOPILOT_RUNNER` (a self-hosted Ubuntu 24.04 pool with Python 3.12 for private org repos, `ubuntu-24.04` for public ones; see v2-install.md, "The runner") |
 
 A second pass by the same reviewer found the first hold fix could be erased (anyone who can push can delete or edit
 any comment), the media check let a `GIF89a=1//` JavaScript file through, `skip_duplicate_main` relied on an

@@ -10,6 +10,9 @@
 #   4. Secrets and variables in those environments: the app key, App ID and Client ID, and the
 #      Anthropic API key (you type it here; it is never shown or written to disk).
 #   5. Repo settings: allow auto-merge; workflow token read-only; Actions may not approve pull requests.
+#   5b. The runner: every gate job runs on vars.AUTOPILOT_RUNNER. A private repo in an org gets the org variable
+#      (the org's self-hosted autopilot pool) shared with it; a public or personal repo gets a repo variable
+#      AUTOPILOT_RUNNER=ubuntu-24.04 (GitHub-hosted: a fork's pull request must never run on your machines).
 #   6. With --ruleset: the "build-autopilot" branch ruleset (pull request required, the app's
 #      autopilot/gate check required, plus the repo's test checks). Only needed for level auto-merge
 #      or autopilot. Note: after this, nobody can push straight to the default branch.
@@ -61,7 +64,7 @@ step() { printf '\n== %s\n' "$*"; }
 warn() { printf 'WARNING: %s\n' "$*" >&2; }
 die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
-usage() { sed -n '2,39p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 # Whatever happens (an error, Ctrl-C), remove the temp folder that may hold the app key and turn echo back on.
 CLEANUP_DIR=""
@@ -516,6 +519,46 @@ if confirm "Allow auto-merge, make the workflow token read-only, and stop Action
   gh api -X PUT "repos/$REPO/actions/permissions/workflow" \
     -f default_workflow_permissions=read -F can_approve_pull_request_reviews=false >/dev/null
   say "  Done."
+fi
+
+# ---------------------------------------------------------------- 5b. the runner
+step "5b. The runner (AUTOPILOT_RUNNER)"
+HOSTED_RUNNER="ubuntu-24.04"
+REPO_ID=$(printf '%s' "$REPO_JSON" | jq -r .id)
+VISIBILITY=$(printf '%s' "$REPO_JSON" | jq -r '.visibility // (if .private then "private" else "public" end)')
+REPO_RUNNER=$(gh api "repos/$REPO/actions/variables/AUTOPILOT_RUNNER" --jq .value 2>/dev/null || true)
+if [ "$VISIBILITY" = "public" ] || [ "$OWNER_TYPE" != "Organization" ]; then
+  # A self-hosted pool on a public repo runs strangers' pull requests on that machine; a personal account has no
+  # org variable. Either way the repo names a GitHub-hosted runner itself.
+  if [ -n "$REPO_RUNNER" ]; then
+    case "$REPO_RUNNER" in
+      ubuntu-*|windows-*|macos-*) say "  Repo variable AUTOPILOT_RUNNER is $REPO_RUNNER (GitHub-hosted)." ;;
+      *) [ "$VISIBILITY" = "public" ] && warn "$REPO is public but AUTOPILOT_RUNNER is '$REPO_RUNNER'. A public repo must not use a self-hosted runner: gh variable set AUTOPILOT_RUNNER --repo $REPO --body $HOSTED_RUNNER" ;;
+    esac
+  elif confirm "Set the repo variable AUTOPILOT_RUNNER=$HOSTED_RUNNER ($VISIBILITY repo: GitHub-hosted runner)?"; then
+    gh variable set AUTOPILOT_RUNNER --repo "$REPO" --body "$HOSTED_RUNNER"
+    say "  Set."
+  fi
+elif [ -n "$REPO_RUNNER" ]; then
+  say "  Repo variable AUTOPILOT_RUNNER is $REPO_RUNNER; it overrides the org's."
+else
+  ORG_RUNNER=$(gh api "orgs/$OWNER/actions/variables/AUTOPILOT_RUNNER" 2>/dev/null || true)
+  if [ -z "$ORG_RUNNER" ]; then
+    warn "$OWNER has no org variable AUTOPILOT_RUNNER, so the gate's jobs have no runner and won't start. Create it for the org's self-hosted autopilot pool: gh variable set AUTOPILOT_RUNNER --org $OWNER --visibility selected --repos ${REPO#*/} --body autopilot (or a repo variable naming a GitHub-hosted runner)"
+  else
+    RUNNER_LABEL=$(printf '%s' "$ORG_RUNNER" | jq -r .value)
+    RUNNER_VIS=$(printf '%s' "$ORG_RUNNER" | jq -r .visibility)
+    if [ "$RUNNER_VIS" != "selected" ]; then
+      say "  Org variable AUTOPILOT_RUNNER ($RUNNER_LABEL) is visible to $RUNNER_VIS repos, this one included."
+    elif gh api --paginate "orgs/$OWNER/actions/variables/AUTOPILOT_RUNNER/repositories" \
+           --jq '.repositories[].id' 2>/dev/null | grep -x "$REPO_ID" >/dev/null; then
+      say "  Org variable AUTOPILOT_RUNNER ($RUNNER_LABEL) is already shared with $REPO."
+    elif confirm "Share the org variable AUTOPILOT_RUNNER ($RUNNER_LABEL) with $REPO?"; then
+      gh api -X PUT "orgs/$OWNER/actions/variables/AUTOPILOT_RUNNER/repositories/$REPO_ID" >/dev/null
+      say "  Shared."
+    fi
+    say "  The runner group that holds the '$RUNNER_LABEL' runners must also allow $REPO (Org settings > Actions > Runner groups)."
+  fi
 fi
 
 # ---------------------------------------------------------------- 6. ruleset

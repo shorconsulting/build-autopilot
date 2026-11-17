@@ -134,6 +134,10 @@ Turns the page's choices into the repo's `.github/autopilot.json`.
    `applied_at` (now, UTC). Drop page-only fields (`dismissed`, `updated_by`, `updated_at`, `claude_md`).
    - `pipeline: gate`: the pull request also adds the gate's files (`docs/v2-install.md`, "What gets installed").
      Afterwards, tell the person to run `scripts/setup-github-gate.sh OWNER/REPO --ruleset` once it's merged.
+     The gate's jobs run on `vars.AUTOPILOT_RUNNER`; if the repo can't see that variable yet, say in the pull request
+     body that it must not merge until `scripts/setup-github-gate.sh OWNER/REPO` (step 5b) has shared the org's
+     variable with it (private repo) or set a GitHub-hosted repo variable (public repo; `docs/v2-install.md`, 3b).
+     When updating an existing gate, keep `runs-on: ${{ vars.AUTOPILOT_RUNNER }}` on every job.
    - `pipeline: own` or `none`: the pull request changes only `.github/autopilot.json`, the CLAUDE.md section, and
      the workflow edits for `tests.suites` and `ci_cost` below.
      Never add the gate's files, a ruleset or auto-merge to such a repo. If the gate's files are already there
