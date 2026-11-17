@@ -22,6 +22,12 @@
 #   - Secrets live in two environments that only the default branch may use, so a workflow added by a pull request
 #     (which runs on refs/pull/N/merge) can't read them, and can't write the required check run as the app.
 # Do not add steps that check out, build, install or run the pull request's code to this file.
+#
+# Runner: every job runs on `vars.AUTOPILOT_RUNNER` (docs/v2-install.md, "The runner"). For a private repo in an org with
+# a self-hosted autopilot pool that is the org variable (e.g. `autopilot`), shared with the repo by
+# setup-github-gate.sh. A public repo must never use a self-hosted pool (a fork's pull request would run on that
+# machine): give it a repo variable AUTOPILOT_RUNNER=ubuntu-24.04 instead. Whatever runs the review job needs
+# Python 3.12, git and curl, and no sudo or docker.
 
 name: autopilot
 
@@ -47,7 +53,7 @@ jobs:
       (github.event.action != 'edited' || github.event.changes.base) &&
       (!contains(fromJSON('["labeled", "unlabeled"]'), github.event.action) ||
        github.event.label.name == 'autopilot-hold')
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.AUTOPILOT_RUNNER }}
     timeout-minutes: 5
     environment: autopilot
     permissions:
@@ -87,8 +93,8 @@ jobs:
     concurrency:
       group: autopilot-review-${{ github.event.pull_request.number }}
       cancel-in-progress: true
-    # Pinned image: requirements.txt holds wheels for its Python (3.12).
-    runs-on: ubuntu-24.04
+    # The runner's python3 must be 3.12: requirements.txt holds wheels for it (x86_64 and arm64 Linux).
+    runs-on: ${{ vars.AUTOPILOT_RUNNER }}
     timeout-minutes: 30
     environment: autopilot-review
     permissions:
@@ -131,7 +137,7 @@ jobs:
     concurrency:
       group: autopilot-decide-${{ github.event.pull_request.number }}
       cancel-in-progress: true
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.AUTOPILOT_RUNNER }}
     timeout-minutes: 10
     environment: autopilot
     permissions:
@@ -169,7 +175,7 @@ jobs:
       (startsWith(github.event.comment.body, '/autopilot approve') ||
        startsWith(github.event.comment.body, '/autopilot stop') ||
        startsWith(github.event.comment.body, '/autopilot resume'))
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.AUTOPILOT_RUNNER }}
     timeout-minutes: 5
     environment: autopilot
     permissions:

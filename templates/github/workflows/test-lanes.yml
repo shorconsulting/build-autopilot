@@ -23,6 +23,11 @@
 # Copy this file to .github/workflows/, and set the two commands below. If the repo already has a test workflow, merge
 # these triggers and the two concurrency groups into it instead of adding a second workflow that runs the same tests.
 #
+# Runner: every job runs on `vars.CI_RUNNER`, the org's general self-hosted CI pool (SConsInc: shorconsulting-ci), not
+# the gate's autopilot pool: that pool only takes the gate workflow on the default branch, and these jobs run the pull
+# request's code. A public repo sets a repo variable CI_RUNNER to a GitHub-hosted label (ubuntu-latest) instead, so a
+# fork's pull request never runs on a self-hosted machine.
+#
 # Does not need the gate. Use `tests.suites` in .github/autopilot.json for per-suite path rules; see docs/policy.md.
 
 name: test-lanes
@@ -44,7 +49,7 @@ jobs:
   changes:
     name: what changed
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER }}
     timeout-minutes: 5
     outputs:
       class: ${{ steps.classify.outputs.class }}
@@ -81,7 +86,7 @@ jobs:
     needs: changes
     # A skipped job still satisfies a rule that requires `test`. For a matrix job, skip step by step instead.
     if: ${{ !cancelled() && github.event_name == 'pull_request' && (needs.changes.result != 'success' || needs.changes.outputs.skip != 'true') }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER }}
     timeout-minutes: 20
     concurrency:
       group: quick-${{ github.event.pull_request.number }}
@@ -98,7 +103,7 @@ jobs:
   full:
     name: full suite
     if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER }}
     timeout-minutes: 60
     concurrency:
       group: full-suite-main
