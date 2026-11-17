@@ -147,7 +147,7 @@ that `autopilot` needs is not built (`docs/v2-report.md`), so nothing here prete
 #### Change types
 
 Every pull request is one of four types, worked out by `scripts/lanes.py classify` (installed as
-`.github/autopilot/lanes.py`) from the files it changes. The `changes` job in a test workflow runs it, reading the
+`.github/autopilot/lanes.py`) from the files it changes. The `What changed` step at the top of each test job runs it, reading the
 rules and this file from the base branch so a pull request cannot reclassify itself; if it cannot, everything runs.
 
 | Type | The change is | Tests | AI review (with the gate) |
@@ -236,6 +236,21 @@ Each audit is recorded (one line per run in `~/.build-autopilot/history/`), comp
 
 Turning a proposal on only saves it as a choice on the page. It reaches the repo when you run `/build-autopilot:apply`, which puts settings in `.github/autopilot.json` and any `CLAUDE.md` line in the same pull request. **Nothing changes a repo without a merged pull request**, and that pull request is never auto-merged.
 
+## Priority runs
+
+GitHub hands queued jobs to self-hosted runners first come, first served. A pull request that other work is waiting on can jump the line with the `ci-priority` label, without a runner held idle for it:
+
+- **In the repo**, each test job picks its runner from the label (the standard `test-lanes.yml` has this line). It does nothing until the variable `CI_PRIORITY_RUNNER` is set to `ci-priority`; set it as an org variable limited to private repos, or per repo:
+
+  ```yaml
+  runs-on: ${{ vars.CI_PRIORITY_RUNNER && contains(github.event.pull_request.labels.*.name, 'ci-priority') && vars.CI_PRIORITY_RUNNER || vars.CI_RUNNER }}
+  ```
+
+- **On the runner machine**, `scripts/priority_runner.py tick --org ORG` runs every minute. While a job that asks for `ci-priority` is waiting, it swaps one pool runner's label from the pool's to `ci-priority` (and marks it `ci-priority-lent`, so it only ever gives back runners it lent): that runner finishes its current job and can only take the priority job next. When none is waiting, or GitHub cannot say, it swaps the label back. The pool never runs more jobs at once than it has runners. The `gh` login it runs under must be allowed to manage the org's runners.
+- **To prioritise a pull request**, run `scripts/priority_runner.py add OWNER/REPO#N`. It adds the label and updates the branch, because a job's runner is chosen when its run is created: labelling a pull request whose run is already queued moves nothing, and a re-run repeats the original labels.
+
+Limits: one runner is lent at a time; if the watcher is not running, a labelled pull request's jobs wait until it is; and anyone who can label a pull request can jump the queue, so keep it for pull requests other work is blocked on and take the label off afterwards (each labelled open pull request costs the watcher API calls every minute). Never set `CI_PRIORITY_RUNNER` for a public repo: it would let a labelled fork's pull request onto a self-hosted runner. The pool's runners must be long-lived ones; a runner that is replaced after every job loses the swapped label.
+
 ## Global build rules (not in this file)
 
 Some rules are the same for every build and are not chosen per repo, so they are not fields here: where questions go
@@ -254,7 +269,7 @@ settings: `always_ask`, `level`, `pipeline` and `sensitive` still decide what ma
 | `level` = `autopilot` | Claude sessions release after merging, where they can | A release workflow with a health check and automatic undo |
 | `phase` | Sets the other fields when chosen on the page; read by `scripts/lanes.py` | Same |
 | `tests.suites` | `apply` writes each suite's `paths` into its workflow's `on.pull_request.paths` in the same reviewed pull request | Same |
-| Change types, `tests.drafts`, `tests.no_code_paths` | `apply` installs `.github/autopilot/lanes.py` and writes the `changes` job into every workflow that runs tests on pull requests; with the gate, a change to the automation rules alone gets the security review only | Same |
+| Change types, `tests.drafts`, `tests.no_code_paths` | `apply` installs `.github/autopilot/lanes.py` and writes the `What changed` step into every job that runs tests on pull requests; with the gate, a change to the automation rules alone gets the security review only | Same |
 | `tests.lane: wave` | `apply` adds `templates/github/workflows/test-lanes.yml` to a repo with no test workflow of its own, or tells you which two blocks to merge into the one it has | Same |
 | `tests.skip_duplicate_main` | `apply` adds the `dedupe` job (`drafts/chasing-shade/test.yml` is the reviewed example); `templates/github/autopilot/skip_duplicate_main.py` skips a push whose pull request passed on identical files, and one whose commit a passing merge-queue run of the same workflow already tested (`ci-queue-then-main`) | Same |
 | `ci_cost` | `apply` makes each finding's fix in the repo's workflow files, in the same reviewed pull request, for every `pipeline`; `audit --cost` measures it | Same |

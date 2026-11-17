@@ -16,7 +16,7 @@ What the gate does, and why it is built this way: [v2-report.md](v2-report.md). 
 | `.github/autopilot/gate.py` | `templates/github/autopilot/gate.py` | The gate's logic (Python 3, standard library plus the Claude SDK in the review job) |
 | `.github/autopilot/requirements.txt` | `templates/github/autopilot/requirements.txt` | The Claude SDK and its dependencies, exact versions and hashes |
 | `.github/autopilot/skip_duplicate_main.py` | `templates/github/autopilot/skip_duplicate_main.py` | Only used if `tests.skip_duplicate_main` is on |
-| `.github/autopilot/lanes.py` | `templates/github/autopilot/lanes.py` | Works out a pull request's change type for the `changes` job in the test workflows (`docs/policy.md`, "Change types"). Installed for every `pipeline`, `own` included |
+| `.github/autopilot/lanes.py` | `templates/github/autopilot/lanes.py` | Works out a pull request's change type for the `What changed` step in the test workflows (`docs/policy.md`, "Change types"). Installed for every `pipeline`, `own` included |
 | `.github/autopilot.json` | the settings page | The settings (v1 already writes this) |
 
 Copy the files byte for byte (the runner is a variable, not an edit: step 3b). Don't edit the workflow per repo except the two places marked below (required check
