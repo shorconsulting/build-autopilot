@@ -557,7 +557,8 @@ else
       gh api -X PUT "orgs/$OWNER/actions/variables/AUTOPILOT_RUNNER/repositories/$REPO_ID" >/dev/null
       say "  Shared."
     fi
-    say "  The runner group that holds the '$RUNNER_LABEL' runners must also allow $REPO (Org settings > Actions > Runner groups)."
+    say "  The runner group that holds the '$RUNNER_LABEL' runners must also allow $REPO and, if it is limited to selected"
+    say "  workflows, $REPO/.github/workflows/autopilot.yml@refs/heads/$DEFAULT_BRANCH (Org settings > Actions > Runner groups)."
   fi
 fi
 

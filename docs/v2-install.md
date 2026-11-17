@@ -132,13 +132,14 @@ to these files as "needs a person".
 
 ### 3b. The runner (admin)
 
-Every job in the gate (and in `test-lanes.yml`) runs on `runs-on: ${{ vars.AUTOPILOT_RUNNER }}`. With no such
+Every job in the gate runs on `runs-on: ${{ vars.AUTOPILOT_RUNNER }}`. With no such
 variable visible to the repo, the jobs have no runner and the workflow fails to start, so set it before merging the
 install pull request. `setup-github-gate.sh` does this in its step 5b.
 
 - **Private repo in an org with a self-hosted autopilot pool** (SConsInc: label `autopilot`, ephemeral unprivileged
   runners, runner group 3): the org variable `AUTOPILOT_RUNNER=autopilot` has *selected* visibility, so share it with
-  the repo, and make sure the pool's runner group allows the repo:
+  the repo, and make sure the pool's runner group allows the repo and, because the group is restricted to selected
+  workflows, lists `OWNER/REPO/.github/workflows/autopilot.yml@refs/heads/<default branch>`:
 
   ```bash
   gh api -X PUT orgs/OWNER/actions/variables/AUTOPILOT_RUNNER/repositories/$(gh api repos/OWNER/REPO --jq .id)
@@ -153,6 +154,9 @@ install pull request. `setup-github-gate.sh` does this in its step 5b.
 
 Whatever runner it names needs Python 3.12 as `python3` (the review job's hash-pinned wheels are for 3.12, on x86_64
 and arm64 Linux), git 2.40 or later, and curl. The jobs need no sudo or docker. A repo variable overrides the org's.
+
+`test-lanes.yml` runs the pull request's own code, so it does not use the gate's pool: its jobs run on
+`vars.CI_RUNNER` (the org's general CI pool; a public repo sets a repo variable `CI_RUNNER=ubuntu-latest`).
 
 ### 4. The branch ruleset, only for level `auto-merge` or `autopilot` (admin)
 
