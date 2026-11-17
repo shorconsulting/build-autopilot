@@ -53,9 +53,10 @@ jobs:
   test:
     name: test
     if: github.event_name == 'pull_request'
-    # A pull request labelled `ci-priority` asks for the priority runner, which scripts/priority_runner.py makes
-    # out of the pool's next free slot (docs/policy.md, "Priority runs"). Every other one waits in the pool's queue.
-    runs-on: ${{ contains(github.event.pull_request.labels.*.name, 'ci-priority') && 'ci-priority' || vars.CI_RUNNER }}
+    # Where the variable CI_PRIORITY_RUNNER is set (private repos only: it names a self-hosted label), a pull request
+    # labelled `ci-priority` asks for that runner, which scripts/priority_runner.py makes out of the pool's next free
+    # slot (docs/policy.md, "Priority runs"). Everything else, and every repo without the variable, uses CI_RUNNER.
+    runs-on: ${{ vars.CI_PRIORITY_RUNNER && contains(github.event.pull_request.labels.*.name, 'ci-priority') && vars.CI_PRIORITY_RUNNER || vars.CI_RUNNER }}
     timeout-minutes: 20
     concurrency:
       group: quick-${{ github.event.pull_request.number }}

@@ -240,16 +240,16 @@ Turning a proposal on only saves it as a choice on the page. It reaches the repo
 
 GitHub hands queued jobs to self-hosted runners first come, first served. A pull request that other work is waiting on can jump the line with the `ci-priority` label, without a runner held idle for it:
 
-- **In the repo**, each test job picks its runner from the label (the standard `test-lanes.yml` has this line):
+- **In the repo**, each test job picks its runner from the label (the standard `test-lanes.yml` has this line). It does nothing until the variable `CI_PRIORITY_RUNNER` is set to `ci-priority`; set it as an org variable limited to private repos, or per repo:
 
   ```yaml
-  runs-on: ${{ contains(github.event.pull_request.labels.*.name, 'ci-priority') && 'ci-priority' || vars.CI_RUNNER }}
+  runs-on: ${{ vars.CI_PRIORITY_RUNNER && contains(github.event.pull_request.labels.*.name, 'ci-priority') && vars.CI_PRIORITY_RUNNER || vars.CI_RUNNER }}
   ```
 
-- **On the runner machine**, `scripts/priority_runner.py tick --org ORG` runs every minute. While a job that asks for `ci-priority` is waiting, it swaps one pool runner's label from the pool's to `ci-priority`: that runner finishes its current job and can only take the priority job next. When none is waiting, it swaps the label back. The pool never runs more jobs at once than it has runners. The `gh` login it runs under must be allowed to manage the org's runners.
+- **On the runner machine**, `scripts/priority_runner.py tick --org ORG` runs every minute. While a job that asks for `ci-priority` is waiting, it swaps one pool runner's label from the pool's to `ci-priority` (and marks it `ci-priority-lent`, so it only ever gives back runners it lent): that runner finishes its current job and can only take the priority job next. When none is waiting, or GitHub cannot say, it swaps the label back. The pool never runs more jobs at once than it has runners. The `gh` login it runs under must be allowed to manage the org's runners.
 - **To prioritise a pull request**, run `scripts/priority_runner.py add OWNER/REPO#N`. It adds the label and updates the branch, because a job's runner is chosen when its run is created: labelling a pull request whose run is already queued moves nothing, and a re-run repeats the original labels.
 
-Limits: one runner is lent at a time; if the watcher is not running, a labelled pull request's jobs wait until it is; and anyone who can label a pull request can jump the queue, so keep it for pull requests other work is blocked on. Leave the line out of a public repo, where it would let a labelled fork's pull request onto a self-hosted runner.
+Limits: one runner is lent at a time; if the watcher is not running, a labelled pull request's jobs wait until it is; and anyone who can label a pull request can jump the queue, so keep it for pull requests other work is blocked on and take the label off afterwards (each labelled open pull request costs the watcher API calls every minute). Never set `CI_PRIORITY_RUNNER` for a public repo: it would let a labelled fork's pull request onto a self-hosted runner. The pool's runners must be long-lived ones; a runner that is replaced after every job loses the swapped label.
 
 ## Global build rules (not in this file)
 

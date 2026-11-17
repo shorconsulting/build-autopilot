@@ -12,8 +12,9 @@ has runners, and nothing sits idle.
     python3 priority_runner.py add  OWNER/REPO#N [--label ci-priority]
 
 `tick` is one pass; run it every minute (launchd or cron) on a machine whose `gh` login may manage the org's runners.
-It keeps no state of its own: a lent runner is one that carries the priority label and not the pool's, so a pass
-after a crash or a reboot puts things right.
+It keeps no state of its own: a runner it lends also gets the marker label `<label>-lent`, and only marked runners
+are ever given back, so a pass after a crash or a reboot puts things right and a runner someone labelled by hand is
+left alone. If GitHub cannot say what is waiting (a rate limit, an outage), lent runners go back to the pool.
 
 `add` labels the pull request and updates its branch from its base. The new commit matters: a job's runner is chosen
 when its run is created, and a re-run repeats the original event, labels included, so re-running a queued pull
@@ -21,10 +22,14 @@ request would leave it in the ordinary queue.
 
 The repo's side is one line per test job (docs/policy.md, "Priority runs"):
 
-    runs-on: ${{ contains(github.event.pull_request.labels.*.name, 'ci-priority') && 'ci-priority' || vars.CI_RUNNER }}
+    runs-on: ${{ vars.CI_PRIORITY_RUNNER && contains(github.event.pull_request.labels.*.name, 'ci-priority') && vars.CI_PRIORITY_RUNNER || vars.CI_RUNNER }}
+
+Each pass costs two API calls, plus two or more for every open pull request that carries the label, so take the
+label off pull requests that no longer need it.
 
 shortcut: lends one runner at a time, and picks it without knowing which job will finish first; lend more, or pick
 by job age, if priority pull requests start waiting on each other.
+shortcut: reads the first 100 runners, labelled pull requests and runs; page through them if the org outgrows that.
 """
 import argparse
 import json
@@ -43,13 +48,14 @@ def gh(method, path, **fields):
 def plan(runners, waiting, pool, label):
     """What to change: [("lend" | "restore", runner)]. `runners` are the org's runners as the API lists them."""
     names = lambda r: {l["name"] for l in r["labels"]}
-    lent = [r for r in runners if label in names(r) and pool not in names(r)]
+    marked = [r for r in runners if f"{label}-lent" in names(r)]
     if not waiting:
-        return [("restore", r) for r in lent]
-    if any(r["status"] == "online" for r in lent):
+        return [("restore", r) for r in marked]
+    if any(r["status"] == "online" and pool not in names(r) for r in marked):
         return []
     free = sorted((r for r in runners if pool in names(r) and r["status"] == "online"),
-                  key=lambda r: (r["busy"], r["name"]))   # an idle one first: it can start at once
+                  # a half-lent one first (finish that swap), then an idle one: it can start at once
+                  key=lambda r: (r not in marked, r["busy"], r["name"]))
     return [("lend", free[0])] if free else []
 
 
@@ -69,16 +75,27 @@ def waiting_jobs(org, label, api=gh):
 
 
 def tick(org, pool, label, dry_run=False, api=gh):
-    waiting = waiting_jobs(org, label, api)
+    try:
+        waiting = waiting_jobs(org, label, api)
+    except subprocess.CalledProcessError as e:
+        # Not knowing is treated as nothing waiting: the pool gets its runner back, and a later pass lends again.
+        print(f"cannot tell what is waiting ({e.stderr.strip() or e}); giving lent runners back", file=sys.stderr)
+        waiting = 0
     runners = api("GET", f"orgs/{org}/actions/runners", per_page="100")["runners"]
+    marker, labels = f"{label}-lent", f"orgs/{org}/actions/runners/%s/labels"
     for what, r in plan(runners, waiting, pool, label):
-        add, drop = (label, pool) if what == "lend" else (pool, label)
-        print(f"{what} {r['name']}: +{add} -{drop} ({waiting} priority job(s) waiting)")
+        print(f"{what} {r['name']} ({waiting} priority job(s) waiting)")
         if dry_run:
             continue
-        # Add before removing: a runner with both labels is still in the pool, one with neither takes nothing.
-        api("POST", f"orgs/{org}/actions/runners/{r['id']}/labels", **{"labels[]": add})
-        api("DELETE", f"orgs/{org}/actions/runners/{r['id']}/labels/{drop}")
+        have = {l["name"] for l in r["labels"]}
+        # Add before removing, and the marker goes on first and comes off last: a pass that dies part-way leaves a
+        # runner that is still marked, which the next pass finishes.
+        add, drop = ([marker, label], [pool]) if what == "lend" else ([pool], [label, marker])
+        for name in add:
+            api("POST", labels % r["id"], **{"labels[]": name})
+        for name in drop:
+            if name in have or name in add:
+                api("DELETE", labels % r["id"] + "/" + name)
 
 
 def add(pr, label, api=gh):
@@ -111,8 +128,8 @@ def main(argv=None):
     try:
         tick(args.org, args.pool, args.label, args.dry_run)
     except subprocess.CalledProcessError as e:
-        # Nothing is changed on an error (a rate limit, GitHub down): the next pass decides again.
-        print(f"no change: {e.stderr.strip() or e}", file=sys.stderr)
+        # A swap may be half done; the runner is still marked, so the next pass finishes it.
+        print(f"stopped: {e.stderr.strip() or e}", file=sys.stderr)
         return 1
     return 0
 

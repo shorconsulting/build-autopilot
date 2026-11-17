@@ -3,6 +3,7 @@ import unittest
 import priority_runner as pr
 
 POOL, LABEL = "shorconsulting-ci", "ci-priority"
+LENT = (LABEL, LABEL + "-lent")   # what a lent runner carries
 
 
 def runner(name, *labels, busy=True, status="online"):
@@ -22,20 +23,25 @@ class Plan(unittest.TestCase):
         self.assertEqual(self.plan(rs, 3), [("lend", "b")])
 
     def test_already_lent_lends_no_second(self):
-        self.assertEqual(self.plan([runner("a", LABEL), runner("b", POOL)], 2), [])
+        self.assertEqual(self.plan([runner("a", *LENT), runner("b", POOL)], 2), [])
 
     def test_restores_every_lent_runner_when_nothing_waits(self):
-        rs = [runner("a", LABEL), runner("b", LABEL, status="offline"), runner("c", POOL)]
+        rs = [runner("a", *LENT), runner("b", *LENT, status="offline"), runner("c", POOL)]
         self.assertEqual(self.plan(rs, 0), [("restore", "a"), ("restore", "b")])
 
     def test_offline_runners_are_not_lent_and_do_not_count_as_lent(self):
-        rs = [runner("a", LABEL, status="offline"), runner("b", POOL, status="offline"), runner("c", POOL)]
+        rs = [runner("a", *LENT, status="offline"), runner("b", POOL, status="offline"), runner("c", POOL)]
         self.assertEqual(self.plan(rs, 1), [("lend", "c")])
 
-    def test_a_runner_with_both_labels_is_still_in_the_pool(self):
-        # a pass that died between the add and the remove: finish the swap
-        self.assertEqual(self.plan([runner("a", POOL, LABEL)], 1), [("lend", "a")])
-        self.assertEqual(self.plan([runner("a", POOL, LABEL)], 0), [])
+    def test_a_half_lent_runner_is_finished_or_given_back(self):
+        # a pass that died after adding the labels and before removing the pool's
+        half = [runner("a", POOL), runner("b", POOL, *LENT)]
+        self.assertEqual(self.plan(half, 1), [("lend", "b")])
+        self.assertEqual(self.plan(half, 0), [("restore", "b")])
+
+    def test_a_runner_labelled_by_hand_is_never_pulled_into_the_pool(self):
+        rs = [runner("dedicated", LABEL), runner("gate", "autopilot", LABEL), runner("c", POOL)]
+        self.assertEqual(self.plan(rs, 0), [])
 
     def test_no_pool_runner_online(self):
         self.assertEqual(self.plan([runner("a", POOL, status="offline")], 1), [])
@@ -70,7 +76,24 @@ class Tick(unittest.TestCase):
         api, calls = self.api([{"status": "queued", "labels": [LABEL]}], [runner("a", POOL)])
         pr.tick("o", POOL, LABEL, api=api)
         writes = [(m, p.rsplit("/", 1)[-1]) for m, p, _ in calls if m != "GET"]
-        self.assertEqual(writes, [("POST", "labels"), ("DELETE", POOL)])
+        self.assertEqual(writes, [("POST", "labels"), ("POST", "labels"), ("DELETE", POOL)])
+
+    def test_restore_adds_the_pool_first_and_drops_the_marker_last(self):
+        api, calls = self.api([], [runner("a", *LENT)])
+        pr.tick("o", POOL, LABEL, api=api)
+        writes = [(m, p.rsplit("/", 1)[-1]) for m, p, _ in calls if m != "GET"]
+        self.assertEqual(writes, [("POST", "labels"), ("DELETE", LABEL), ("DELETE", LABEL + "-lent")])
+
+    def test_not_knowing_what_waits_gives_lent_runners_back(self):
+        import subprocess
+        inner, calls = self.api([], [runner("a", *LENT)])
+
+        def api(method, path, **fields):
+            if path == "search/issues":
+                raise subprocess.CalledProcessError(1, "gh", stderr="rate limit")
+            return inner(method, path, **fields)
+        pr.tick("o", POOL, LABEL, api=api)
+        self.assertTrue(any(m == "DELETE" and p.endswith("/" + LABEL) for m, p, _ in calls))
 
     def test_dry_run_changes_nothing(self):
         api, calls = self.api([{"status": "queued", "labels": [LABEL]}], [runner("a", POOL)])
