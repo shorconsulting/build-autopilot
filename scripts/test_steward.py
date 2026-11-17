@@ -41,11 +41,13 @@ class FakeGitHub:
     def __init__(self, pulls, checks, jobs=None, mergeable=None, main_runs=(), wip=(), runs=()):
         self.pulls, self.checks, self.jobs = pulls, checks, jobs or {}
         self.mergeable, self.main_runs, self.wip, self.runs = mergeable or {}, list(main_runs), list(wip), list(runs)
-        self.calls, self.closed, self.attempts = [], [], {}
+        self.calls, self.closed, self.attempts, self.remaining = [], [], {}, 5000
 
     def __call__(self, path):
         self.calls.append(path)
         base = path.split("?")[0]
+        if base == "rate_limit":
+            return {"resources": {"core": {"remaining": self.remaining}}}
         if base == "repos/%s" % REPO:
             return {"default_branch": "main"}
         if base == "repos/%s/pulls" % REPO:
@@ -162,13 +164,30 @@ class Sweep(unittest.TestCase):
         rep, acts = self.sweep(fake)
         self.assertEqual(acts[0]["lane"], "core")
 
-    def test_past_the_cap_prs_are_not_classified(self):
+    def test_past_the_cap_prs_cost_no_calls(self):
         fake = FakeGitHub(pulls=[pr(1, "a"), pr(2, "b", created="2026-11-11T00:00:00Z")],
                           checks={"a": [run(11, "t", conclusion="failure")], "b": [run(21, "t", conclusion="failure")]},
                           jobs={11: job(11, "x", "failure", step="Checkout"), 21: job(21, "x", "failure", step="Checkout")})
         rep, _ = self.sweep(fake, max_prs_classified=1)
-        self.assertEqual(self.states(rep), {1: "red-infra", 2: "red"})
-        self.assertFalse(any("/actions/jobs/21" in c for c in fake.calls))
+        self.assertEqual(self.states(rep), {1: "red-infra", 2: "unswept"})
+        self.assertFalse(any("/b/check-runs" in c or "pulls/2" in c for c in fake.calls))
+
+    def test_active_draft_past_the_cap_stays_active(self):
+        fake = FakeGitHub(pulls=[pr(1, "a"), pr(2, "b", draft=True, created="2026-11-11T00:00:00Z"),
+                                 pr(3, "c", draft=True, created="2026-11-12T00:00:00Z", updated="2026-11-01T00:00:00Z")],
+                          checks={"a": [run(11, "t")]})
+        rep, _ = self.sweep(fake, max_prs_classified=1)
+        self.assertEqual(self.states(rep), {1: "green", 2: "draft-active", 3: "draft"})
+
+    def test_low_api_allowance_shrinks_the_sweep(self):
+        fake = FakeGitHub(pulls=[pr(1, "a")], checks={"a": [run(11, "t")]})
+        fake.remaining = 2600  # 100 spare over the reserve: 25 PRs
+        rep, _ = self.sweep(fake)
+        self.assertEqual(self.states(rep), {1: "green"})
+        fake = FakeGitHub(pulls=[pr(1, "a")], checks={"a": [run(11, "t")]})
+        fake.remaining = 100
+        rep, _ = self.sweep(fake)
+        self.assertEqual(self.states(rep), {1: "unswept"})
 
     def test_pages_are_fetched_by_hand(self):
         calls = []

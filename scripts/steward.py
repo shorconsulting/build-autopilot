@@ -225,6 +225,16 @@ class Sweeper:
         return {"branch": branch, "state": state, "failed": failed, "red_since": red_since,
                 "red_hours": hours(self.now, parse_time(red_since))}
 
+    def budget_prs(self):
+        """How many PRs this sweep may read in full, from the API calls left this hour (about 4 calls a PR),
+        keeping `steward.api_reserve` for everyone else on the account."""
+        try:
+            core = (api("rate_limit") or {}).get("resources", {}).get("core", {})
+            spare = core.get("remaining", 5000) - self.rules["steward"].get("api_reserve", 2500)
+        except GhError:
+            return self.rules["steward"]["max_prs_classified"]
+        return max(0, spare // 4)
+
     def flaky(self, repo):
         """Jobs that failed and then passed on a re-run of the same commit: the test or the machine is unreliable."""
         out = {}
@@ -276,10 +286,19 @@ class Sweeper:
         idle_limit = self.rules["steward"]["idle_hours"]
         prs, counts = [], {}
         # Oldest first: the work that has waited longest is the work most likely to be forgotten.
+        # Past the cap, read nothing more per PR: a sweep must not spend the account's API allowance, which every
+        # session on the account shares (one sweep of 400 PRs used to cost ~1,000 calls).
+        cap = min(cap, self.budget_prs())
+        empty = {"failed": [], "infra": [], "stalled": []}
         for i, p in enumerate(sorted(pulls, key=lambda p: p["created_at"])):
-            detail = api("repos/%s/pulls/%s" % (repo, p["number"])) if i < cap else p
-            chk = self.checks(repo, p["head"]["sha"], classify=i < cap)
-            state = self.pr_state(dict(p, mergeable_state=(detail or {}).get("mergeable_state")), chk, open_heads)
+            if i < cap:
+                detail = api("repos/%s/pulls/%s" % (repo, p["number"]))
+                chk = self.checks(repo, p["head"]["sha"])
+                state = self.pr_state(dict(p, mergeable_state=(detail or {}).get("mergeable_state")), chk, open_heads)
+            else:
+                # Unswept PRs are reached once the older ones ahead of them land; their own lanes still watch them.
+                chk = empty
+                state = "draft" if p.get("draft") else ("stacked" if p["base"]["ref"] in open_heads else "unswept")
             idle = hours(self.now, parse_time(p.get("updated_at")))
             if state == "draft" and (idle or 0) < idle_limit:
                 state = "draft-active"
