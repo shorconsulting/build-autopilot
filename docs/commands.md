@@ -320,6 +320,8 @@ with this plugin and build-questions installed and GitHub access to the tracked 
      `Steward: <kind> <check or runner>` (link an open one with that title instead), with the `evidence` and the
      last few sweeps' numbers, then build the fix like `fix-main`: the steward lane's next item in fast-builder,
      otherwise a session on a new branch by the repo's policy. Never skip, quarantine or delete a test to clear it.
+   - A PR in state `needs-person` (its autopilot gate says "Needs a person": a review finding or an `always_ask`
+     item) gets no action and is not counted as a failing check; list it in the summary as needing the person.
    - `resume` (an idle draft) and `resume-branch` (a `fast-builder/wip/*` branch with no PR): hand it to the lane
      whose paths it touches, as for `fix`, with its handoff if there is one.
 3. A lane that asked for more work (fast-builder `requests_for_conductor`, or a lane done while its repo still has
