@@ -318,7 +318,7 @@ reroutes, so idle runners with other labels stay idle while a pool queues for ho
    runners that no queued job can use while a pool is backed up).
 2. Act without asking:
    - `cancel-stale`: `gh api -X POST repos/<repo>/actions/runs/<run>/cancel` for each listed run (at most
-     `capacity.max_cancels`). Any run can be re-run, so this needs nobody.
+     `capacity.max_cancels` per repo per pass). Any run can be re-run, so this needs nobody.
    - `restart-runner` and `restore-pool`: through Remote Control on the person's computer (runner admin and the
      machines are only reachable from there). Restart only that runner's own service or container. Never delete a
      registration. Restarting the VM or machine it runs in (Colima, a reboot) takes down every slot on it, so do it

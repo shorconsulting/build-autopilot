@@ -252,6 +252,20 @@ class Hosts(unittest.TestCase):
                                  self.t + self.dt.timedelta(minutes=30))
         self.assertEqual([x["do"] for x in a], ["report"])
 
+    def test_colima_runners_belong_to_the_vm_not_the_mac(self):
+        boxes = {"mac": ["davids-mac-mini-"], "colima": ["davids-mac-mini-dind-"]}
+        self.assertEqual(steward.box_of("davids-mac-mini-dind-sconsinc-1", boxes), "colima")
+        self.assertEqual(steward.box_of("davids-mac-mini-1", boxes), "mac")
+        self.assertIsNone(steward.box_of("hph-ci-1", boxes))
+
+    def test_resume_only_when_the_backlog_fits_the_paused_slot(self):
+        state = {"hosts": {"hph-ci": {"paused": ["hph-ci-light-1"]}}}
+        slots = [runner("hph-ci-light-1", ["self-hosted", "hph-ci-light"], status="offline")]
+        self.assertEqual(steward.host_actions([host("hph-ci", 16)], BACKED, RULES, state, self.t, slots), [])
+        slots = [runner("hph-ci-light-1", ["self-hosted", "hph-ci"], status="offline")]
+        a = steward.host_actions([host("hph-ci", 16)], BACKED, RULES, state, self.t, slots)
+        self.assertEqual([x["do"] for x in a], ["resume-slot"])
+
     def test_no_resume_without_a_backlog(self):
         state = {"hosts": {"hph-ci": {"paused": ["hph-ci-7"]}}}
         self.assertEqual(steward.host_actions([host("hph-ci", 16)], [], RULES, state, self.t), [])

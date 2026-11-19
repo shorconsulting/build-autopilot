@@ -688,7 +688,14 @@ def host_actions(hosts, pools, rules, state, now, runners=None):
             st["changed"] = stamp
             continue
         st.pop("red_seen", None)
-        if level == "headroom" and backed_up and st["paused"] and not cooling:
+        slot_labels = {}
+        for r in runners or []:
+            slot_labels[r.get("name")] = [l["name"] for l in r.get("labels") or []]
+        wanted = [p for p in pools if p["queued_jobs"] >= rules["capacity"]["backed_up_jobs"] and p["idle"] == 0]
+        fits_backlog = bool(st["paused"]) and (
+            st["paused"][-1] not in slot_labels  # labels unknown: any backlog counts
+            or any(fits(p["labels"], slot_labels[st["paused"][-1]]) for p in wanted))
+        if level == "headroom" and backed_up and fits_backlog and not cooling:
             acts.append({"do": "resume-slot", "needs_person": False, "host": h["host"], "runner": st["paused"][-1],
                          "metrics": m,
                          "why": "%s has headroom (load %.2f per core, memory %d%%) and jobs are backed up: start %s "
@@ -718,6 +725,17 @@ def hosts_missing(spec, hosts, state, rules, now):
              "why": "no host readings from %s%s" % (spec, "; still paused: %s" % ", ".join(paused) if paused else "")}]
 
 
+def box_of(name, boxes):
+    """The one box a runner belongs to: the box with the LONGEST matching name prefix, so `davids-mac-mini-dind-`
+    (the Colima VM) wins over `davids-mac-mini-` and no runner counts under two boxes."""
+    name, best, size = (name or "").lower(), None, -1
+    for box, prefixes in boxes.items():
+        for p in prefixes:
+            if name.startswith(p.lower()) and len(p) > size:
+                best, size = box, len(p)
+    return best
+
+
 def pick_idle_slot(host, runners, rules, paused):
     """The one runner to pause on `host`: online, not busy, not already paused, and only if at least
     `capacity.host.min_slots` would stay online on that box. Runners belong to a box by name prefix
@@ -728,7 +746,7 @@ def pick_idle_slot(host, runners, rules, paused):
         return None, "runners not readable from here"
     if not prefixes:
         return None, "no runner prefixes for this box in capacity.host.runners"
-    mine = [r for r in runners if any((r.get("name") or "").lower().startswith(p) for p in prefixes)]
+    mine = [r for r in runners if box_of(r.get("name"), t.get("runners") or {}) == host]
     online = [r for r in mine if r.get("status") == "online"]
     idle = [r for r in online if not r.get("busy") and r.get("name") not in paused]
     if len(online) - 1 < t["min_slots"]:
