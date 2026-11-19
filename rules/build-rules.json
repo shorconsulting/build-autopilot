@@ -63,8 +63,7 @@
       "shell-ci",
       "app-ci",
       "repo-hygiene",
-      "Qwen review",
-      "HPortHealth/app:Auto-merge"
+      "Qwen review"
     ],
     "host": {
       "red_load_per_core": 1.5,
@@ -74,6 +73,7 @@
       "headroom_mem_pct": 75,
       "cooldown_minutes": 20,
       "min_slots": 2,
+      "paused_report_hours": 12,
       "runners": {
         "hph-ci": [
           "hph-ci-"

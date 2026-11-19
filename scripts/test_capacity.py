@@ -303,6 +303,18 @@ class Hosts(unittest.TestCase):
             self.assertEqual(steward.read_hosts(fh.name), [])
             os.unlink(fh.name)
 
+    def test_a_paused_slot_seen_online_is_unpaused_and_a_long_pause_is_reported(self):
+        T = lambda m: self.t + self.dt.timedelta(minutes=m)
+        stamp = T(0).strftime("%Y-%m-%dT%H:%M:%SZ")
+        state = {"hosts": {"hph-ci": {"paused": ["hph-ci-3", "hph-ci-4"],
+                                      "paused_at": {"hph-ci-3": stamp, "hph-ci-4": stamp}}}}
+        slots = [runner("hph-ci-3", ["hph-ci"], status="online"), runner("hph-ci-4", ["hph-ci"], status="offline")]
+        steward.host_actions([host("hph-ci", 30)], [], RULES, state, T(10), slots)
+        self.assertEqual(state["hosts"]["hph-ci"]["paused"], ["hph-ci-4"])  # 3 is running again
+        a = steward.host_actions([host("hph-ci", 30)], [], RULES, state, T(13 * 60), slots)
+        self.assertEqual([(x["do"], x["needs_person"], x["runners"]) for x in a], [("report", True, ["hph-ci-4"])])
+        self.assertEqual(steward.host_actions([host("hph-ci", 30)], [], RULES, state, T(13 * 60 + 10), slots), [])
+
     def test_a_pause_not_yet_confirmed_still_protects_the_slot_from_a_restart(self):
         state, T = {}, lambda m: self.t + self.dt.timedelta(minutes=m)
         steward.host_actions([host("hph-ci", 52)], BACKED, RULES, state, T(0))

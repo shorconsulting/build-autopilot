@@ -708,6 +708,21 @@ def host_actions(hosts, pools, rules, state, now, runners=None):
         last = parse_time(st.get("changed"))
         cooling = last and (now - last).total_seconds() < t["cooldown_minutes"] * 60
         hot = level == "red" and (m["load_per_core"] >= t["red_load_per_core"] or m["mem_pct"] >= t["red_mem_pct"])
+        online_names = {r.get("name") for r in runners or [] if r.get("status") == "online"}
+        for n in [n for n in st["paused"] if n in online_names]:
+            # Running again (a resume whose note was never recorded, or a pause that never happened): not paused.
+            st["paused"].remove(n)
+            (st.get("paused_at") or {}).pop(n, None)
+        long_paused = [n for n in st["paused"] if parse_time((st.get("paused_at") or {}).get(n))
+                       and (now - parse_time(st["paused_at"][n])).total_seconds()
+                       >= t.get("paused_report_hours", 12) * 3600]
+        lp_last = parse_time(st.get("long_paused_reported"))
+        if long_paused and (not lp_last or (now - lp_last).total_seconds()
+                            >= rules["capacity"]["report_cooldown_minutes"] * 60):
+            st["long_paused_reported"] = stamp
+            acts.append({"do": "report", "needs_person": True, "host": h["host"], "runners": long_paused,
+                         "why": "%s paused on %s for over %d hours: that capacity is parked; check the box and "
+                                "resume them" % (", ".join(long_paused), h["host"], t.get("paused_report_hours", 12))})
         rep_last = parse_time(st.get("pressure_reported"))
         may_report = not rep_last or (now - rep_last).total_seconds() >= rules["capacity"]["report_cooldown_minutes"] * 60
         for n, when in list((st.get("pending_pause") or {}).items()):
@@ -851,8 +866,11 @@ def cmd_capacity_note(args):
             st["paused"] = []
         if args.paused and args.paused not in st["paused"]:
             st["paused"].append(args.paused)
+            st.setdefault("paused_at", {})[args.paused] = dt.datetime.now(dt.timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ")
         if args.resumed and args.resumed in st["paused"]:
             st["paused"].remove(args.resumed)
+            (st.get("paused_at") or {}).pop(args.resumed, None)
         for n in (args.paused, args.resumed):
             (st.get("pending_pause") or {}).pop(n, None)
         _write_state(args.state, state)
@@ -889,8 +907,9 @@ def read_hosts(spec):
 
 
 def machine_restart(names, runners, rules):
-    """Whether restarting the VM or machine the named runners run on is safe: every runner on that box (by
-    `capacity.host.runners` prefix) is offline or idle. Returns {"box", "machine_restart_ok", "busy"}; busy lists
+    """Whether a person could restart the VM or machine the named runners run on without killing a job: every
+    runner on that box (by `capacity.host.runners` prefix) is offline or idle. The steward never restarts a VM or
+    machine itself (other workloads, like the dashboard, run there too): it puts this in a `report`. Returns {"box", "machine_restart_ok", "busy"}; busy lists
     the runners a machine restart would kill."""
     boxes = rules["capacity"].get("host", {}).get("runners") or {}
     found = {box_of(n, boxes) for n in names} - {None}
@@ -1228,6 +1247,9 @@ def _capacity_pass(args):
         groups = runner_groups(owner) if org_runners is not None else None
         if org_runners is not None:
             seen_runners.extend(org_runners)
+        # Repo-level runners count for a box's min_slots and idle checks too.
+        seen_runners.extend(r for a in aggs.values() for r in a["runners"]
+                            if r.get("id") not in {x.get("id") for x in seen_runners})
         res = owner_pools(owner, org_runners, aggs, state, rules, now, lean, groups)
         if res is None:
             continue
