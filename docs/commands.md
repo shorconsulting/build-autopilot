@@ -287,7 +287,61 @@ with this plugin and build-questions installed and GitHub access to the tracked 
    all-linked`, `--steps`, `--task-id` and `--where cloud`. The run ends with `PushNotification`, which reaches the
    person's phone through the Claude app; say in one line that notifications must be allowed for the Claude app on
    the phone, and that the digest also goes by the build-questions `email_method` if one is set.
-3. Reply with both schedules in the person's local time and how to stop them (`delete_trigger`).
+3. The capacity check, in two parts. In the cloud, a trigger with the prompt `/build-autopilot:steward --capacity`,
+   hourly (cloud scheduled tasks run at most hourly): it can only find and cancel stale runs, because cloud sessions
+   can't read runners or reach the boxes and don't keep `~/.build-autopilot/capacity-state.json`. Runner and host
+   actions (restarts, pause and resume, reroutes) only work from the person's computer, where the state file
+   persists and the dashboard's box health is at `http://127.0.0.1:4517/api/data`: run it there every
+   `capacity.cron` (10 minutes) as a scheduled task on that computer, with `--hosts` set. Replace an existing one
+   instead of adding a second.
+4. Reply with the schedules in the person's local time and how to stop them (`delete_trigger`).
+
+**`--capacity`** (every 10 minutes; build rule 3, "a stalled check is restarted, not waited on", applied to the
+runners). GitHub gives a job only to a runner in the same org that has every label the job asks for. It never
+reroutes, so idle runners with other labels stay idle while a pool queues for hours.
+
+1. `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/steward.py" capacity --repo A --repo B ... --out <scratchpad>/capacity.json`.
+   It is read-only. Per repo it lists the queued runs nobody needs: head superseded, an older duplicate of the same
+   workflow file, event, head and pull request, or a closed pull request's run of a workflow that is pull-request CI
+   (it also has runs for open PRs) that was created before the PR closed (a run the close started is kept). A workflow that only runs when a PR closes is never cancelled, nor anything matching mark-done,
+   release, deploy, publish, cleanup, backport, notify or preview, or `capacity.keep_after_close`. GitHub-hosted
+   label sets are never a pool. A runner finding (offline, hung, pool down) only becomes an action when it held on
+   the previous pass too (state in `~/.build-autopilot/capacity-state.json`), and one runner is restarted at most
+   once per `capacity.restart_cooldown_minutes` and `capacity.max_restarts` times in all, counted per runner across
+   offline, hung and pool-down (a runner a pool-down covers is restarted once, as `restore-pool`), before it becomes a
+   `report` for the person; idle-while-queued also needs a matching job queued over
+   `capacity.settle_minutes`. Reroute and report findings repeat at most once per `capacity.report_cooldown_minutes`.
+   Duplicates are only cancelled for `capacity.dedupe_workflows` (workflows that do the same work whatever started
+   them). Below `capacity.min_rate_remaining` API calls left it runs lean (no close-time lookups or job sampling);
+   close times are cached in the state file, so each closed branch is looked up once. Per org, when
+   runners can be read, it lists the label pools the queued jobs ask for and these findings: `runner-offline`,
+   `pool-down`, `no-runner-for-labels`, `idle-but-queued` (hung), and `idle-capacity-unreachable` (online idle
+   runners that no queued job can use while a pool is backed up).
+2. Act without asking:
+   - `cancel-stale`: `gh api -X POST repos/<repo>/actions/runs/<run>/cancel` for each listed run (at most
+     `capacity.max_cancels` per repo per pass). Any run can be re-run, so this needs nobody.
+   - `restart-runner` and `restore-pool`: through Remote Control on the person's computer (runner admin and the
+     machines are only reachable from there). Restart only that runner's own service or container. Never delete a
+     registration. Never restart the VM or machine it runs in (Colima, a reboot) unattended: other workloads run
+     there too. If the service restart doesn't bring the runner back, `report` it to the person with the action's
+     `box`, `machine_restart_ok` (no GitHub runner on that box is busy) and `busy`. If its machine can't be reached, say so once, with which machine and why.
+   - `pause-slot` and `resume-slot` (from `--hosts`, the github-throughput dashboard's box health; run on the
+     person's computer with `--hosts http://127.0.0.1:4517/api/data`): keep every runner box (Hetzner, the Mac mini
+     and its Colima VM) inside its limits in `capacity.host`. Each box is read on its own: the Mac's reading can pause only
+     the Mac's own slots, and the Colima VM's slots need the VM's own reading (`colima` in the dashboard's hosts). On `pause-slot`, stop ONE idle runner slot on that box
+     the action names (its service or container). The check itself picks only an idle, online slot on that box
+     (`capacity.host.runners` maps each box to its runner name prefixes) and never one that would leave fewer than
+     `min_slots` online; if none qualifies it is a `report`. Check the runner is still idle just before stopping it.
+     Then record it: `steward.py capacity-note --host <box> --paused <runner>` (record nothing if none could be
+     paused). Paused slots are left out of the offline and pool checks, so they are never restarted by mistake. On
+     `resume-slot`, start the named runner, then `capacity-note --host <box> --resumed <runner>`. Pausing needs red
+     load or memory on two passes in a row; red disk alone is a `report` (prune Docker or the Colima disk). One
+     change per box per `cooldown_minutes`.
+   - `reroute`: before opening a pull request, look for an open one from the steward for the same labels and
+     update it instead. Open a pull request in the repo that moves its light jobs (auto-merge, sweeps, labelling, mark-done,
+     cancel-on-close) to the idle runners' label, or file it as the steward lane's next item. A CI-machinery or ADR
+     change follows the repo's own landing rules.
+3. Say nothing when nothing was found. Otherwise one line per repo: runs cancelled, runners restarted, PRs opened.
 
 **A sweep:**
 

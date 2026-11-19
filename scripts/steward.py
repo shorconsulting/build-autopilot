@@ -4,6 +4,7 @@
 Read-only. It never re-runs, merges, pushes or comments; the steward command acts on its output.
 
     python3 steward.py sweep --repo owner/name [--repo ...] [--out sweep.json]
+    python3 steward.py capacity --repo owner/name [--out capacity.json]   # idle/offline runners, stale queued runs
     python3 steward.py rules                 # the global build rules (rules/build-rules.json), as JSON
     python3 steward.py session-note          # SessionStart hook: a short reminder of the global rules
 
@@ -35,6 +36,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RULES_PATH = os.path.join(os.path.dirname(HERE), "rules", "build-rules.json")
@@ -79,8 +81,16 @@ def paged(path, key=None, cap=1000, per_page=100):
 
 
 def load_rules(path=RULES_PATH):
+    """The rules file; a custom one without a `capacity` block (or part of it) gets the built-in defaults."""
     with open(path, encoding="utf-8") as fh:
-        return json.load(fh)
+        rules = json.load(fh)
+    if os.path.abspath(path) != os.path.abspath(RULES_PATH):
+        with open(RULES_PATH, encoding="utf-8") as fh:
+            base = json.load(fh).get("capacity") or {}
+        cap = dict(base, **(rules.get("capacity") or {}))
+        cap["host"] = dict(base.get("host") or {}, **((rules.get("capacity") or {}).get("host") or {}))
+        rules["capacity"] = cap
+    return rules
 
 
 def parse_time(s):
@@ -402,6 +412,888 @@ def actions_for(report, rules):
     return head + imps + [a for a in acts if a not in head]
 
 
+# ---------------------------------------------------------------- capacity (every few minutes, not hourly)
+# The hourly sweep looks at pull requests. It misses the commonest way throughput dies: runners sitting idle while
+# hundreds of jobs queue, because the queued jobs ask for labels the idle runners don't have, the runners for those
+# labels are offline, or the queue is full of runs nobody needs (closed pull requests, superseded heads, duplicates).
+# GitHub never moves a job to a runner whose labels don't match, so nothing reroutes by itself.
+# `capacity` finds all three. Cancelling unneeded runs is safe and reversible (a run can be re-run); the rest are
+# actions for the steward to take through the person's computer.
+
+PR_EVENTS = ("pull_request", "pull_request_target", "pull_request_review", "workflow_run")
+# Runs that must still happen after their pull request closed: never cancelled as stale. Extend with
+# `capacity.keep_after_close` in build-rules.json.
+KEEP_AFTER_CLOSE = r"mark.*done|release|deploy|publish|cleanup|clean-up|teardown|backport|changelog|notify|preview"
+# GitHub-hosted labels: queued jobs asking for these are GitHub's to start, never a self-hosted pool's.
+HOSTED = re.compile(r"^(ubuntu|windows|macos)-[\w.-]+$", re.I)
+
+
+def _keep(rules):
+    extra = (rules or {}).get("capacity", {}).get("keep_after_close") or []
+    return re.compile("|".join([KEEP_AFTER_CLOSE] + list(extra)), re.I)
+
+
+def _head_key(repo_full, ref):
+    return ((repo_full or "").lower(), ref)
+
+
+def _dedupe(rules, repo):
+    names = set()
+    for w in (rules or {}).get("capacity", {}).get("dedupe_workflows") or []:
+        if ":" in w:
+            r, n = w.split(":", 1)
+            if r.lower() == (repo or "").lower():
+                names.add(n)
+        else:
+            names.add(w)
+    return names
+
+
+def stale_runs(queued, open_prs, keep=None, closed_at=None, dedupe=None):
+    """Queued runs nobody needs. Returns [(run_id, reason, workflow)]:
+      closed      no open pull request has this head (repo and branch), the workflow is pull-request CI (it also has
+                  queued runs for an open pull request), AND the run was created before its pull request closed
+                  (`closed_at`: {(head repo, branch): ISO time}). A run the close itself started (post-merge
+                  bookkeeping on `closed`) is created after it, so it is kept; with no close time known it is kept.
+      superseded  an open pull request has this head branch but its head is another commit, the workflow is in
+                  `dedupe` (CI that does the same thing whatever started it) and a run of that same workflow is
+                  already queued for the new head. A run a label, a review or another workflow started, of any
+                  other workflow, is not started again by a push, so it is kept;
+      duplicate   an older queued run of the same workflow file (workflow_id), event, head and pull request, only for
+                  workflows in `dedupe` (`capacity.dedupe_workflows`): ones known to do the same thing whatever
+                  action or label started them (CI over the head). Others may branch on the event, so never.
+    `queued` is GitHub's workflow_runs; `open_prs` the open pulls."""
+    closed_at = closed_at or {}
+    dedupe = dedupe if dedupe is not None else {"CI", "test"}
+    keep = keep or _keep(None)
+    heads, open_shas = {}, set()
+    for p in open_prs:
+        h = p.get("head") or {}
+        heads[_head_key((h.get("repo") or {}).get("full_name"), h.get("ref"))] = h.get("sha")
+        open_shas.add(h.get("sha"))
+
+    def key(r):
+        return _head_key((r.get("head_repository") or {}).get("full_name"), r.get("head_branch"))
+
+    def pr_run(r):
+        return r.get("event") in PR_EVENTS and not keep.search(r.get("name") or "")
+
+    pr_ci = {r.get("name") for r in queued if pr_run(r) and r.get("head_sha") in open_shas}
+    on_head = {(r.get("workflow_id") or r.get("name"), r.get("head_sha")) for r in queued
+               if pr_run(r) and r.get("head_sha") in open_shas}
+    out, newest = [], {}
+    for r in queued:
+        if not pr_run(r):
+            continue
+        sha, k = r.get("head_sha"), key(r)
+        if sha in open_shas:
+            if r.get("name") not in dedupe:
+                continue
+            dkey = (r.get("workflow_id") or r.get("name"), r.get("event"), sha,
+                    tuple(sorted(p.get("number") for p in r.get("pull_requests") or [])))
+            prev = newest.get(dkey)
+            if prev is None or r["id"] > prev:
+                if prev is not None:
+                    out.append((prev, "duplicate", r.get("name")))
+                newest[dkey] = r["id"]
+            else:
+                out.append((r["id"], "duplicate", r.get("name")))
+        elif k in heads:
+            if (r.get("event") != "workflow_run" and r.get("name") in dedupe
+                    and (r.get("workflow_id") or r.get("name"), heads[k]) in on_head):
+                out.append((r["id"], "superseded", r.get("name")))
+        elif r.get("event") != "workflow_run" and r.get("name") in pr_ci:
+            closed = parse_time(closed_at.get(k))
+            made = parse_time(r.get("created_at"))
+            if closed and made and made < closed:
+                out.append((r["id"], "closed", r.get("name")))
+    return out
+
+
+def fits(job_labels, runner_labels):
+    """GitHub's rule: a runner can take a job only if it has every label the job asks for."""
+    have = {l.lower() for l in runner_labels}
+    return all(l.lower() in have for l in job_labels)
+
+
+def self_hosted(labels):
+    """A label set is a self-hosted pool unless every label is a GitHub-hosted image (`runs-on: hph-ci` with no
+    `self-hosted` is still self-hosted)."""
+    return bool(labels) and not all(HOSTED.match(l) for l in labels)
+
+
+def pool_report(runners, queued_labels, min_queue, oldest_minutes=None, settle_minutes=10, paused=()):
+    """Per self-hosted label set asked for by queued jobs: how many runners could take it (online, idle,
+    offline), and the findings. `runners`: GitHub's runner objects (org and repo level); `queued_labels`:
+    {tuple(labels): count of queued jobs}; `oldest_minutes`: {tuple(labels): minutes the oldest such job has
+    queued}. A momentary state is not a finding: idle-but-queued needs a job queued over `settle_minutes`
+    (a runner that just finished a job looks idle for a moment), and offline runners are only candidates
+    (`settle` in cmd_capacity requires two passes in a row before acting)."""
+    oldest_minutes = oldest_minutes or {}
+    # Slots this check paused for host pressure are offline on purpose: never "offline", "pool down" or restarted.
+    paused = {n.lower() for n in paused}
+    runners = [r for r in runners if (r.get("name") or "").lower() not in paused]
+
+    def labels(r):
+        return [l["name"] for l in r.get("labels") or []]
+    pools, findings = [], []
+    used = set()
+    for want, n in sorted(queued_labels.items(), key=lambda kv: -kv[1]):
+        if not self_hosted(want):
+            continue  # GitHub-hosted: not ours to restore
+        able = [r for r in runners if fits(want, labels(r))]
+        online = [r for r in able if r.get("status") == "online"]
+        idle = [r for r in online if not r.get("busy")]
+        offline = [r for r in able if r.get("status") != "online"]
+        used.update(r["name"] for r in able)
+        waited = oldest_minutes.get(want)
+        pools.append({"labels": list(want), "queued_jobs": n, "runners": len(able), "online": len(online),
+                      "idle": len(idle), "offline": [r["name"] for r in offline], "oldest_minutes": waited})
+        if n and not able:
+            findings.append({"kind": "no-runner-for-labels", "labels": list(want), "queued_jobs": n})
+        elif n and not online:
+            findings.append({"kind": "pool-down", "labels": list(want), "queued_jobs": n,
+                             "offline": [r["name"] for r in offline]})
+        elif n and idle and waited is not None and waited >= settle_minutes:
+            # Jobs queued for minutes while matching runners are idle: GitHub hands work out within seconds, so the
+            # runners are hung or deregistered behind a stale "online".
+            findings.append({"kind": "idle-but-queued", "labels": list(want), "queued_jobs": n,
+                             "idle": [r["name"] for r in idle], "oldest_minutes": waited})
+        for r in offline:
+            findings.append({"kind": "runner-offline", "runner": r["name"], "id": r.get("id"),
+                             "labels": labels(r)})
+    # Online runners no queued job can use, while a pool is backed up: capacity the workflows can't reach.
+    backed_up = [p for p in pools if p["queued_jobs"] >= min_queue and p["idle"] == 0]
+    spare = [r for r in runners if r.get("status") == "online" and not r.get("busy") and r["name"] not in used]
+    if backed_up and spare:
+        findings.append({"kind": "idle-capacity-unreachable",
+                         "idle": [{"runner": r["name"], "labels": labels(r)} for r in spare],
+                         "backed_up": [{"labels": p["labels"], "queued_jobs": p["queued_jobs"]} for p in backed_up]})
+    seen, uniq = set(), []
+    for f in findings:  # a runner offline in two pools is one finding
+        k = json.dumps(f, sort_keys=True)
+        if k not in seen:
+            seen.add(k)
+            uniq.append(f)
+    return pools, uniq
+
+
+RESTART_KINDS = ("runner-offline", "idle-but-queued", "pool-down")
+
+
+def restart_targets(f):
+    """The runner names a restart finding would restart."""
+    if f["kind"] == "runner-offline":
+        return [f["runner"]]
+    if f["kind"] == "pool-down":
+        return list(f.get("offline") or [])
+    return [x["runner"] if isinstance(x, dict) else x for x in f.get("idle") or []]
+
+
+def settle(findings, state, now, cooldown_minutes, max_restarts=3, report_cooldown_minutes=240, online=None):
+    """Act on a runner only when the finding held on the previous pass too, and not again within the cooldown.
+    Restarts are counted PER RUNNER across every finding kind, so `max_restarts` caps a runner's restarts in all,
+    and a runner a `pool-down` finding covers is not also restarted as `runner-offline` in the same pass.
+    `state` (kept between passes): seen {finding key: first seen}, acted {key: last acted}, restarts
+    {"r|runner": count}, last_seen {key: last seen}. Returns the findings to act on; updates `state` in place.
+    `online`: names of runners seen online and not hung this pass, whose restart history is cleared at once."""
+    def names(f):
+        if f["kind"] == "idle-capacity-unreachable":
+            # Keyed on what is backed up, not on which runners happen to be idle this pass.
+            return ";".join(sorted(",".join(b["labels"]) for b in f.get("backed_up") or []))
+        if f["kind"] in RESTART_KINDS:
+            return ",".join(sorted(restart_targets(f))) or ",".join(f.get("labels") or [])
+        return f.get("runner") or ",".join(f.get("labels") or [])
+
+    covered = {n for f in findings if f["kind"] == "pool-down" for n in restart_targets(f)}
+    findings = [f for f in findings if not (f["kind"] == "runner-offline" and f["runner"] in covered)]
+    prev = state.get("seen", {})
+    acted = state.setdefault("acted", {})
+    tries = state.setdefault("restarts", {})
+    last_seen = state.setdefault("last_seen", {})
+    stamp = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    keep, seen, done = [], {}, set()
+    for f in findings:
+        key = "%s|%s" % (f["kind"], names(f))
+        seen[key] = prev.get(key) or stamp
+        last_seen[key] = stamp
+        if f["kind"] in ("idle-capacity-unreachable", "no-runner-for-labels"):
+            # A reroute PR or a report: once per report cooldown, not every pass.
+            last = parse_time(acted.get(key))
+            if key not in prev or (last and (now - last).total_seconds() < report_cooldown_minutes * 60):
+                continue
+            acted[key] = stamp
+            keep.append(f)
+            continue
+        if f["kind"] in RESTART_KINDS:
+            targets = [n for n in restart_targets(f) if n not in done]
+            rkeys = ["r|" + n for n in targets]
+            for rk in rkeys:
+                last_seen[rk] = stamp
+            if key not in prev or (restart_targets(f) and not targets):
+                continue  # first sighting (wait for the next pass), or already handled this pass
+            count = max([tries.get(rk, 0) for rk in rkeys] or [0])
+            if count >= max_restarts:
+                # Restarting hasn't cleared it (wrong runner group, a dead machine): stop churning, tell the person,
+                # once per report cooldown.
+                rep = "report|" + key
+                last = parse_time(acted.get(rep))
+                if not last or (now - last).total_seconds() >= report_cooldown_minutes * 60:
+                    acted[rep] = stamp
+                    keep.append(dict(f, escalate=True, restarts=count))
+                done.update(targets)
+                continue
+            last = max([parse_time(acted.get(k)) for k in [key] + rkeys if parse_time(acted.get(k))] or [None],
+                       key=lambda x: x or dt.datetime.min.replace(tzinfo=dt.timezone.utc))
+            if last and (now - last).total_seconds() < cooldown_minutes * 60:
+                continue
+            for k in [key] + rkeys:
+                acted[k] = stamp
+            for rk in rkeys:
+                tries[rk] = tries.get(rk, 0) + 1
+            done.update(targets)
+        keep.append(f)
+    # A finding that vanishes for a pass or two (a sampled queue, a flapping runner, a skipped repo) keeps its restart
+    # count and cooldown; only one absent for `forget` minutes, or a runner seen online and fine, is forgotten.
+    forget = max(report_cooldown_minutes, cooldown_minutes * 3) * 60
+    healthy = {"r|" + n for n in (online or ())}
+    for key in set(acted) | set(tries) | set(last_seen):
+        base = key[len("report|"):] if key.startswith("report|") else key
+        if base in seen or (base.startswith("r|") and last_seen.get(base) == stamp):
+            continue
+        gone = parse_time(last_seen.get(base))
+        if base in healthy or not gone or (now - gone).total_seconds() >= forget:
+            acted.pop(key, None)
+            tries.pop(base, None)
+            last_seen.pop(base, None)
+    state["seen"] = seen
+    return keep
+
+
+def host_pressure(h, rules):
+    """'red', 'headroom' or 'ok' for one runner box from the github-throughput dashboard's host health
+    (`/api/data` field `hosts`: cpus, load5, MemTotal, MemAvailable, disks). Thresholds: `capacity.host`."""
+    t = rules["capacity"]["host"]
+    if (not h.get("ok") or not h.get("cpus") or not h.get("MemTotal") or h.get("MemAvailable") is None
+            or h.get("load5") is None):
+        return "unknown", {}  # a partial reading must not look like 100% memory or zero load
+    load = h["load5"] / h["cpus"]
+    mem = 1 - h["MemAvailable"] / h["MemTotal"]
+    disk = max([(d.get("used") or 0) / d["size"] for d in h.get("disks") or [] if d.get("size")] or [0])
+    m = {"load_per_core": round(load, 2), "mem_pct": round(mem * 100), "disk_pct": round(disk * 100)}
+    if load >= t["red_load_per_core"] or mem * 100 >= t["red_mem_pct"] or disk * 100 >= t["red_disk_pct"]:
+        return "red", m
+    if load <= t["headroom_load_per_core"] and mem * 100 <= t["headroom_mem_pct"] and disk * 100 < t["red_disk_pct"] - 10:
+        return "headroom", m
+    return "ok", m
+
+
+def host_actions(hosts, pools, rules, state, now, runners=None):
+    """Keep each runner box inside its CPU and memory limits, one slot at a time.
+    red (load or memory, two passes in a row) -> pause-slot: stop one IDLE runner slot on that box (its service or
+                 container; never a busy one, never below `min_slots`). The steward records which slot with
+                 `steward.py capacity-note --paused NAME --host BOX` (or that none could be paused), so the
+                 paused list stays true and pool checks don't restart it.
+    red on disk only -> report: pausing runners frees no disk.
+    headroom while a pool is backed up -> resume-slot: start the slot this check paused most recently.
+    One change per box per `capacity.host.cooldown_minutes`. `state["hosts"][box]`: {"paused": [names],
+    "red_seen": iso, "changed": iso}."""
+    t = rules["capacity"]["host"]
+    backed_up = any(p["queued_jobs"] >= rules["capacity"]["backed_up_jobs"] and p["idle"] == 0 for p in pools)
+    hs = state.setdefault("hosts", {})
+    acts = []
+    stamp = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    for h in hosts:
+        if not isinstance(h, dict) or not h.get("host"):
+            continue
+        try:
+            level, m = host_pressure(h, rules)
+        except (TypeError, ValueError, ZeroDivisionError, KeyError):
+            level, m = "unknown", {}
+        st = hs.setdefault(h["host"], {})
+        if not isinstance(st.get("paused"), list):
+            st["paused"] = []
+        last = parse_time(st.get("changed"))
+        cooling = last and (now - last).total_seconds() < t["cooldown_minutes"] * 60
+        hot = level == "red" and (m["load_per_core"] >= t["red_load_per_core"] or m["mem_pct"] >= t["red_mem_pct"])
+        online_names = {r.get("name") for r in runners or [] if r.get("status") == "online"}
+        for n in [n for n in st["paused"] if n in online_names]:
+            # Running again (a resume whose note was never recorded, or a pause that never happened): not paused.
+            st["paused"].remove(n)
+            (st.get("paused_at") or {}).pop(n, None)
+        long_paused = [n for n in st["paused"] if parse_time((st.get("paused_at") or {}).get(n))
+                       and (now - parse_time(st["paused_at"][n])).total_seconds()
+                       >= t.get("paused_report_hours", 12) * 3600]
+        lp_last = parse_time(st.get("long_paused_reported"))
+        if long_paused and (not lp_last or (now - lp_last).total_seconds()
+                            >= rules["capacity"]["report_cooldown_minutes"] * 60):
+            st["long_paused_reported"] = stamp
+            acts.append({"do": "report", "needs_person": True, "host": h["host"], "runners": long_paused,
+                         "why": "%s paused on %s for over %d hours: that capacity is parked; check the box and "
+                                "resume them" % (", ".join(long_paused), h["host"], t.get("paused_report_hours", 12))})
+        rep_last = parse_time(st.get("pressure_reported"))
+        may_report = not rep_last or (now - rep_last).total_seconds() >= rules["capacity"]["report_cooldown_minutes"] * 60
+        for n, when in list((st.get("pending_pause") or {}).items()):
+            t0 = parse_time(when)
+            if not t0 or (now - t0).total_seconds() >= PENDING_PAUSE_HOURS * 3600:
+                st["pending_pause"].pop(n)
+        if level == "red" and not hot:
+            # A report is not a change on the box: it uses the report cooldown and never delays a resume.
+            if may_report:
+                st["pressure_reported"] = stamp
+                acts.append({"do": "report", "needs_person": False, "host": h["host"], "metrics": m,
+                             "why": "%s disk at %d%%: free space (docker builder/image prune, Colima disk); pausing "
+                                    "runners won't help" % (h["host"], m["disk_pct"])})
+            st.pop("red_seen", None)
+            continue
+        if hot:
+            first = st.get("red_seen")
+            st["red_seen"] = first or stamp
+            if not first or cooling:
+                continue  # first red reading: confirm on the next pass
+            pick, online = pick_idle_slot(h["host"], runners, rules, st["paused"])
+            if pick is None:
+                if not may_report:
+                    continue
+                st["pressure_reported"] = stamp
+                acts.append({"do": "report", "needs_person": False, "host": h["host"], "metrics": m,
+                             "why": "%s is over its limit (load %.2f per core, memory %d%%) but no slot can be paused "
+                                    "(%s)" % (h["host"], m["load_per_core"], m["mem_pct"], online)})
+                continue
+            acts.append({"do": "pause-slot", "needs_person": False, "host": h["host"], "runner": pick, "metrics": m,
+                         "why": "%s is over its limit (load %.2f per core, memory %d%%): stop idle runner %s (%d online "
+                                "on it), then record it with capacity-note --paused %s"
+                                % (h["host"], m["load_per_core"], m["mem_pct"], pick, online, pick)})
+            st["changed"] = stamp
+            st.setdefault("pending_pause", {})[pick] = stamp
+            continue
+        st.pop("red_seen", None)
+        slot_labels = {}
+        for r in runners or []:
+            slot_labels[r.get("name")] = [l["name"] for l in r.get("labels") or []]
+        wanted = [p for p in pools if p["queued_jobs"] >= rules["capacity"]["backed_up_jobs"] and p["idle"] == 0]
+        fits_backlog = bool(st["paused"]) and (
+            st["paused"][-1] not in slot_labels  # labels unknown: any backlog counts
+            or any(fits(p["labels"], slot_labels[st["paused"][-1]]) for p in wanted))
+        if level == "headroom" and backed_up and fits_backlog and not cooling:
+            acts.append({"do": "resume-slot", "needs_person": False, "host": h["host"], "runner": st["paused"][-1],
+                         "metrics": m,
+                         "why": "%s has headroom (load %.2f per core, memory %d%%) and jobs are backed up: start %s "
+                                "again, then record it with capacity-note --resumed"
+                                % (h["host"], m["load_per_core"], m["mem_pct"], st["paused"][-1])})
+            st["changed"] = stamp
+        elif level == "unknown" and h.get("host"):
+            last_r = parse_time(st.get("reported"))
+            if not last_r or (now - last_r).total_seconds() >= rules["capacity"]["report_cooldown_minutes"] * 60:
+                st["reported"] = stamp
+                acts.append({"do": "report", "needs_person": False, "host": h["host"],
+                             "why": "no health reading from %s: %s" % (h["host"], h.get("error") or "unreachable")})
+    return acts
+
+
+def hosts_missing(spec, hosts, state, rules, now):
+    """`--hosts` was given but returned nothing (the dashboard is down): one report per report cooldown, which says
+    so plainly when slots are still paused, since nothing can resume them until the readings come back."""
+    if not spec or hosts:
+        return []
+    last = parse_time(state.get("hosts_missing_reported"))
+    if last and (now - last).total_seconds() < rules["capacity"]["report_cooldown_minutes"] * 60:
+        return []
+    state["hosts_missing_reported"] = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    paused = paused_runners(state)
+    return [{"do": "report", "needs_person": bool(paused), "host": spec,
+             "why": "no host readings from %s%s" % (spec, "; still paused: %s" % ", ".join(paused) if paused else "")}]
+
+
+def box_of(name, boxes):
+    """The one box a runner belongs to: the box with the LONGEST matching name prefix, so `davids-mac-mini-dind-`
+    (the Colima VM) wins over `davids-mac-mini-` and no runner counts under two boxes."""
+    name, best, size = (name or "").lower(), None, -1
+    for box, prefixes in boxes.items():
+        for p in prefixes:
+            if name.startswith(p.lower()) and len(p) > size:
+                best, size = box, len(p)
+    return best
+
+
+def pick_idle_slot(host, runners, rules, paused):
+    """The one runner to pause on `host`: online, not busy, not already paused, and only if at least
+    `capacity.host.min_slots` would stay online on that box. Runners belong to a box by name prefix
+    (`capacity.host.runners`: {box: [prefix, ...]}). Returns (name or None, online count or a reason)."""
+    t = rules["capacity"]["host"]
+    prefixes = [x.lower() for x in (t.get("runners") or {}).get(host, [])]
+    if runners is None:
+        return None, "runners not readable from here"
+    if not prefixes:
+        return None, "no runner prefixes for this box in capacity.host.runners"
+    mine = [r for r in runners if box_of(r.get("name"), t.get("runners") or {}) == host]
+    online = [r for r in mine if r.get("status") == "online"]
+    idle = [r for r in online if not r.get("busy") and r.get("name") not in paused]
+    if len(online) - 1 < t["min_slots"]:
+        return None, "only %d online, minimum %d" % (len(online), t["min_slots"])
+    if not idle:
+        return None, "every online slot is busy"
+    return sorted(r["name"] for r in idle)[-1], len(online)
+
+
+PENDING_PAUSE_HOURS = 4
+
+
+def paused_runners(state, now=None):
+    """Slots paused on purpose: those recorded with capacity-note --paused, plus any a pause-slot action named in
+    the last PENDING_PAUSE_HOURS that was never confirmed (the session stopped, or the note couldn't get the
+    lock), so a slot the steward meant to stop is never restarted as 'offline'."""
+    now = now or dt.datetime.now(dt.timezone.utc)
+    out = []
+    for st in (state.get("hosts") or {}).values():
+        if isinstance(st.get("paused"), list):
+            out.extend(st["paused"])
+        for n, when in (st.get("pending_pause") or {}).items():
+            t = parse_time(when)
+            if t and (now - t).total_seconds() < PENDING_PAUSE_HOURS * 3600 and n not in out:
+                out.append(n)
+    return out
+
+
+def cmd_capacity_note(args):
+    """Record what the steward did on a box, so the next pass knows which slots are paused on purpose. Waits up to
+    as long as the stale-lock window for a running capacity pass, so neither overwrites the other's state."""
+    lock, deadline = None, time.time() + LOCK_STALE_MINUTES * 60 + 30
+    while lock is None:
+        lock = _take_lock(args.state)
+        if lock is None:
+            if time.time() >= deadline:
+                print("capacity state is locked (%s.lock); note not recorded, run it again" % args.state,
+                      file=sys.stderr)
+                return 1
+            time.sleep(2)
+    try:
+        state = _read_state(args.state)
+        st = state.setdefault("hosts", {}).setdefault(args.host, {})
+        if not isinstance(st.get("paused"), list):
+            st["paused"] = []
+        if args.paused and args.paused not in st["paused"]:
+            st["paused"].append(args.paused)
+            st.setdefault("paused_at", {})[args.paused] = dt.datetime.now(dt.timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ")
+        if args.resumed and args.resumed in st["paused"]:
+            st["paused"].remove(args.resumed)
+            (st.get("paused_at") or {}).pop(args.resumed, None)
+        for n in (args.paused, args.resumed):
+            (st.get("pending_pause") or {}).pop(n, None)
+        _write_state(args.state, state)
+    finally:
+        try:
+            os.unlink(lock)
+        except OSError:
+            pass
+    print(json.dumps({"host": args.host, "paused": st["paused"]}))
+    return 0
+
+
+def read_hosts(spec):
+    """Host health from the dashboard (`http://127.0.0.1:4517/api/data`) or a saved JSON file; [] when neither."""
+    if not spec:
+        return []
+    try:
+        if spec.startswith("http"):
+            import urllib.request
+            with urllib.request.urlopen(spec, timeout=10) as r:
+                data = json.load(r)
+        else:
+            with open(spec, encoding="utf-8") as fh:
+                data = json.load(fh)
+    except (OSError, ValueError):
+        return []
+    if isinstance(data, list):
+        return data
+    if not isinstance(data, dict):
+        return []
+    ci = data.get("ci") if isinstance(data.get("ci"), dict) else {}
+    found = ci.get("hosts") or data.get("hosts") or []
+    return found if isinstance(found, list) else []
+
+
+def machine_restart(names, runners, rules):
+    """Whether a person could restart the VM or machine the named runners run on without killing a job: every
+    runner on that box (by `capacity.host.runners` prefix) is offline or idle. The steward never restarts a VM or
+    machine itself (other workloads, like the dashboard, run there too): it puts this in a `report`. Returns {"box", "machine_restart_ok", "busy"}; busy lists
+    the runners a machine restart would kill."""
+    boxes = rules["capacity"].get("host", {}).get("runners") or {}
+    found = {box_of(n, boxes) for n in names} - {None}
+    if len(found) != 1 or runners is None:
+        return {"box": ",".join(sorted(found)) or None, "machine_restart_ok": False, "busy": None}
+    box = found.pop()
+    busy = sorted(r.get("name") for r in runners if box_of(r.get("name"), boxes) == box and r.get("busy"))
+    return {"box": box, "machine_restart_ok": not busy, "busy": busy}
+
+
+def capacity_actions(stale, findings, rules, runners=None):
+    """`runners`: the owner's runners this pass, to decide whether a restart may go as far as the machine."""
+    cap = rules["capacity"]
+    acts = []
+    if stale:
+        acts.append({"do": "cancel-stale", "needs_person": False, "runs": [s[0] for s in stale][:cap["max_cancels"]],
+                     "why": "%d queued runs nobody needs (%s); cancelling them is safe and any can be re-run"
+                            % (len(stale), ", ".join("%s %d" % kv for kv in sorted(_count(s[1] for s in stale).items())))})
+    for f in findings:
+        k = f["kind"]
+        if f.get("escalate"):
+            acts.append({"do": "report", "needs_person": True, "finding": k,
+                         "runner": f.get("runner") or f.get("idle") or f.get("labels"),
+                         "why": "%s is still there after %d restarts: a restart can't fix it (runner group, labels, "
+                                "or a dead machine). Stopped restarting; it needs a look." % (k, f["restarts"])})
+            continue
+        if k == "runner-offline":
+            acts.append(dict({"do": "restart-runner", "needs_person": False, "runner": f["runner"],
+                              "why": "offline with jobs queued for its labels: restart its service or container on "
+                                     "its machine (never delete the registration)"},
+                             **machine_restart([f["runner"]], runners, rules)))
+        elif k == "idle-but-queued":
+            idle = [x if isinstance(x, str) else x.get("runner") for x in f["idle"]]
+            acts.append(dict({"do": "restart-runner", "needs_person": False, "runner": ", ".join(idle),
+                              "why": "shown idle while %d jobs it fits are queued: hung; restart it"
+                                     % f["queued_jobs"]}, **machine_restart(idle, runners, rules)))
+        elif k == "pool-down":
+            acts.append(dict({"do": "restore-pool", "needs_person": False, "labels": f["labels"],
+                              "runner": ", ".join(f.get("offline") or []),
+                              "why": "%d jobs queued and every runner that fits %s is offline: restart them"
+                                     % (f["queued_jobs"], f["labels"])},
+                             **machine_restart(f.get("offline") or [], runners, rules)))
+        elif k == "no-runner-for-labels":
+            # Nothing to restart: a mistyped runs-on, a larger-runner label, or a runner never registered.
+            acts.append({"do": "report", "needs_person": True, "labels": f["labels"], "repos": f.get("repos"),
+                         "why": "%d jobs in %s ask for %s and no runner has those labels: fix runs-on or register a "
+                                "runner" % (f["queued_jobs"], ", ".join(f.get("repos") or []) or "these repos",
+                                            f["labels"])})
+        elif k == "idle-capacity-unreachable":
+            acts.append({"do": "reroute", "needs_person": False, "idle": f["idle"], "backed_up": f["backed_up"],
+                         "why": "runners idle while other pools are backed up: move the light jobs (auto-merge, "
+                                "sweeps, labelling, mark-done) to the idle label in the workflows, or give the idle "
+                                "runners the busy pool's label on their machine"})
+    return acts
+
+
+def _count(xs):
+    c = {}
+    for x in xs:
+        c[x] = c.get(x, 0) + 1
+    return c
+
+
+def rate_remaining():
+    try:
+        return ((api("rate_limit") or {}).get("resources", {}).get("core", {}) or {}).get("remaining")
+    except GhError:
+        return None
+
+
+def capacity_repo(repo, rules, sample_runs, cache=None, lean=False):
+    """`cache`: {(head repo, branch): closed_at} kept between passes, so each closed branch is looked up once.
+    `lean`: the API budget is low, so skip close lookups and job sampling (stale superseded runs still found)."""
+    from urllib.parse import quote
+    cache = cache if cache is not None else {}
+    now = dt.datetime.now(dt.timezone.utc)
+    queued = paged("repos/%s/actions/runs?status=queued" % repo, key="workflow_runs", cap=2000)
+    open_prs = paged("repos/%s/pulls?state=open" % repo, cap=2000)
+    open_keys = {_head_key((p["head"].get("repo") or {}).get("full_name"), p["head"].get("ref")) for p in open_prs}
+    closed_at = {}
+    candidates = {(r.get("head_repository") or {}).get("full_name") and
+                  _head_key(r["head_repository"]["full_name"], r.get("head_branch"))
+                  for r in queued if r.get("event") in PR_EVENTS}
+    todo = sorted(k for k in candidates if k and k not in open_keys)
+    lookups = 0
+    for key in todo:
+        ck = "%s|%s" % key
+        if ck in cache:
+            hit = cache[ck]
+            closed_at[key] = hit["t"] if isinstance(hit, dict) else hit
+            cache[ck] = {"t": closed_at[key], "seen": now.strftime("%Y-%m-%dT%H:%M:%SZ")}
+            continue
+        if lean or lookups >= rules["capacity"]["max_close_lookups"]:
+            continue
+        lookups += 1
+        full, branch = key
+        try:
+            closed = api("repos/%s/pulls?state=closed&head=%s&per_page=5"
+                         % (repo, quote("%s:%s" % (full.split("/")[0], branch), safe=""))) or []
+        except GhError:
+            continue
+        times = [p.get("closed_at") for p in closed if p.get("closed_at")]
+        if times:
+            closed_at[key] = max(times)
+            cache[ck] = {"t": closed_at[key], "seen": now.strftime("%Y-%m-%dT%H:%M:%SZ")}
+    # Forget branches no queued run has needed for a few days (a reused name then gets a fresh lookup).
+    for ck in list(cache):
+        seen = parse_time(cache[ck].get("seen")) if isinstance(cache[ck], dict) else None
+        if not seen or (now - seen).total_seconds() > 3 * 86400:
+            cache.pop(ck)
+    stale = stale_runs(queued, open_prs, _keep(rules), closed_at, _dedupe(rules, repo))
+    stale_ids = {s[0] for s in stale}
+    labels, oldest = {}, {}
+    live = [r for r in queued if r["id"] not in stale_ids]
+    oldest_first = sorted(live, key=lambda r: r.get("created_at") or "")
+    half = max(1, sample_runs // 2)
+    sample = oldest_first[:half] + [r for r in oldest_first[-half:] if r not in oldest_first[:half]]
+    sample = [] if lean else sample
+    for r in sample:
+        try:
+            jobs = (api("repos/%s/actions/runs/%s/jobs?per_page=100" % (repo, r["id"])) or {}).get("jobs", [])
+        except GhError:
+            continue
+        for j in jobs:
+            if j.get("status") == "queued" and j.get("labels"):
+                k = tuple(sorted(j["labels"]))
+                labels[k] = labels.get(k, 0) + 1
+                waited = (now - parse_time(j.get("created_at"))).total_seconds() / 60 if j.get("created_at") else None
+                if waited is not None:
+                    oldest[k] = max(oldest.get(k, 0), round(waited))
+    # The jobs were read from a sample of the queued runs: scale the counts to the whole queue, so they compare
+    # with `backed_up_jobs` (a count of queued jobs in the whole queue).
+    if sample and len(live) > len(sample):
+        f = len(live) / len(sample)
+        labels = {k: int(round(v * f)) for k, v in labels.items()}
+    first = min((parse_time(r.get("created_at")) for r in live), default=None)
+    try:  # repo-level runners also serve these jobs; the org list doesn't show them
+        repo_runners = paged("repos/%s/actions/runners" % repo, key="runners")
+    except GhError:
+        repo_runners = []
+    return {"_oldest": oldest, "_runners": repo_runners, "repo": repo, "queued_runs": len(queued), "stale": [{"run": i, "reason": why, "workflow": w}
+                                                                   for i, why, w in stale],
+            "queued_job_labels": {",".join(k): v for k, v in labels.items()}, "_labels": labels,
+            "oldest_queued_hours": hours(now, first)}
+
+
+def _read_state(path):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_state(path, state):
+    """Write to a temp file beside it and rename, so a crash mid-write never leaves half a state file."""
+    tmp = "%s.%d.tmp" % (path, os.getpid())
+    try:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(state, fh, indent=1)
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+LOCK_STALE_MINUTES = 60
+
+
+def _take_lock(path):
+    """One capacity pass per state file at a time. A lock older than LOCK_STALE_MINUTES is from a run that died
+    and is taken over. Returns the lock path, or None when another pass holds it."""
+    lock = path + ".lock"
+    os.makedirs(os.path.dirname(lock) or ".", exist_ok=True)
+    for _ in range(2):
+        try:
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            os.write(fd, str(os.getpid()).encode())
+            os.close(fd)
+            return lock
+        except FileExistsError:
+            try:
+                age = time.time() - os.path.getmtime(lock)
+            except OSError:
+                continue
+            if age < LOCK_STALE_MINUTES * 60:
+                return None
+            try:
+                os.unlink(lock)
+            except OSError:
+                return None
+    return None
+
+
+def runner_groups(owner):
+    """{runner id: set of repo full names it may serve, or None for every repo}, from the org's runner groups;
+    None when they can't be read."""
+    try:
+        groups = paged("orgs/%s/actions/runner-groups" % owner, key="runner_groups")
+        allowed = {}
+        for g in groups:
+            repos = None
+            if g.get("visibility") == "selected":
+                repos = {r["full_name"].lower() for r in
+                         paged("orgs/%s/actions/runner-groups/%s/repositories" % (owner, g["id"]), key="repositories")}
+            for r in paged("orgs/%s/actions/runner-groups/%s/runners" % (owner, g["id"]), key="runners"):
+                allowed[r["id"]] = repos
+        return allowed
+    except GhError:
+        return None
+
+
+def _finding_key(f):
+    if f["kind"] in ("runner-offline",):
+        return (f["kind"], f["runner"])
+    if f["kind"] == "idle-but-queued":
+        return (f["kind"], tuple(sorted(f["idle"])))
+    return (f["kind"], tuple(f.get("labels") or []))
+
+
+def owner_pools(owner, org_runners, aggs, state, rules, now, lean, groups=None):
+    """Pool findings for one owner, settled against what earlier passes saw. `aggs`: {repo: {"labels", "oldest",
+    "runners"}} (that repo's sampled queued-job labels and its own repo-level runners). `org_runners`: the org's
+    runners, or None when they can't be read. `groups`: runner_groups(), or None when unreadable.
+
+    Each repo is checked against the org runners its runner groups allow plus ITS OWN repo-level runners. Findings
+    are then merged across repos (one runner offline for five repos is one finding) and settled ONCE under the
+    owner's state, so the cooldown and the restart cap count per runner, not per repo. Without runner groups, a
+    runner that looks idle while jobs queue may simply not be allowed to take them, so idle-but-queued is not
+    acted on. When the org's runners can't be read, only label sets a readable repo-level runner fits are checked,
+    and never as pool-down or no-runner-for-labels. A pass that sampled no job labels (lean, nothing queued)
+    leaves the state as it was. Returns (pools, findings, ready) or None."""
+    cap = rules["capacity"]
+    if lean or not any(a["labels"] for a in aggs.values()):
+        return None
+    paused = paused_runners(state, now)
+    pools, merged = [], {}
+    for repo, a in sorted(aggs.items()):
+        if not a["labels"] or (org_runners is None and not a["runners"]):
+            continue
+        usable = [r for r in (org_runners or [])
+                  if groups is None or groups.get(r.get("id"), None) is None
+                  or repo.lower() in groups.get(r.get("id"))]
+        labels = a["labels"]
+        if org_runners is None:
+            labels = {k: v for k, v in labels.items()
+                      if any(fits(k, [l["name"] for l in r.get("labels") or []]) for r in a["runners"])}
+        p, f = pool_report(usable + a["runners"], labels, 10 ** 9, a["oldest"], cap["settle_minutes"], paused)
+        for x in p:
+            x["repo"] = repo
+        pools.extend(p)
+        for x in f:
+            if org_runners is None and x["kind"] in ("pool-down", "no-runner-for-labels"):
+                continue
+            if groups is None and x["kind"] == "idle-but-queued":
+                continue
+            k = _finding_key(x)
+            if k in merged:
+                merged[k].setdefault("repos", []).append(repo)
+                if "queued_jobs" in x:
+                    merged[k]["queued_jobs"] = merged[k].get("queued_jobs", 0) + x["queued_jobs"]
+            else:
+                merged[k] = dict(x, repos=[repo])
+    findings = list(merged.values())
+    if org_runners is not None:
+        allm, oldest = {}, {}
+        for a in aggs.values():
+            for k, v in a["labels"].items():
+                allm[k] = allm.get(k, 0) + v
+            for k, v in a["oldest"].items():
+                oldest[k] = max(oldest.get(k, 0), v)
+        every = org_runners + [r for a in aggs.values() for r in a["runners"]]
+        _, f = pool_report(every, allm, cap["backed_up_jobs"], oldest, cap["settle_minutes"], paused)
+        findings.extend(x for x in f if x["kind"] == "idle-capacity-unreachable")
+    online = None
+    if org_runners is not None:
+        hung = {x if isinstance(x, str) else x.get("runner") for f in findings if f["kind"] == "idle-but-queued"
+                for x in f.get("idle") or []}
+        online = {r.get("name") for r in org_runners if r.get("status") == "online" and r.get("name") not in hung}
+    ready = settle(findings, state.setdefault(owner, {}), now, cap["restart_cooldown_minutes"],
+                   cap["max_restarts"], cap["report_cooldown_minutes"], online)
+    return pools, findings, ready
+
+
+def cmd_capacity(args):
+    lock = _take_lock(args.state)
+    if lock is None:
+        print("another capacity pass holds %s.lock; skipping this one" % args.state, file=sys.stderr)
+        return 0
+    try:
+        return _capacity_pass(args)
+    finally:
+        try:
+            os.unlink(lock)
+        except OSError:
+            pass
+
+
+def _capacity_pass(args):
+    rules = load_rules(args.rules)
+    repos = args.repo or [current_repo()]
+    out = {"generated_at": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "owners": [],
+           "repos": [], "errors": []}
+    by_owner = {}
+    state = _read_state(args.state)
+    cap = rules["capacity"]
+    left = rate_remaining()
+    lean = left is not None and left < cap["min_rate_remaining"]
+    out["rate_remaining"], out["lean"] = left, lean
+    for repo in repos:
+        try:
+            rep = capacity_repo(repo, rules, cap["sample_runs"], state.setdefault("closed_at", {}), lean)
+        except GhError as exc:
+            out["errors"].append({"repo": repo, "error": str(exc)})
+            continue
+        owner = repo.split("/")[0]
+        by_owner.setdefault(owner, {})[repo] = {"labels": rep.pop("_labels"), "oldest": rep.pop("_oldest"),
+                                                "runners": rep.pop("_runners")}
+        stale = [(s["run"], s["reason"], s["workflow"]) for s in rep["stale"]]
+        rep["actions"] = capacity_actions(stale, [], rules)
+        out["repos"].append(rep)
+    now = dt.datetime.now(dt.timezone.utc)
+    all_pools, seen_runners = [], []
+    for owner, aggs in by_owner.items():
+        try:
+            org_runners = paged("orgs/%s/actions/runners" % owner, key="runners")
+        except GhError as exc:
+            # Listing an org's runners needs org admin, and cloud sessions are refused it: runner and host actions
+            # only work from the person's computer. Stale runs are still found and cancelled.
+            out["errors"].append({"owner": owner, "error": "org runners not readable: %s" % exc})
+            org_runners = None
+        groups = runner_groups(owner) if org_runners is not None else None
+        if org_runners is not None:
+            seen_runners.extend(org_runners)
+        # Repo-level runners count for a box's min_slots and idle checks too.
+        seen_runners.extend(r for a in aggs.values() for r in a["runners"]
+                            if r.get("id") not in {x.get("id") for x in seen_runners})
+        res = owner_pools(owner, org_runners, aggs, state, rules, now, lean, groups)
+        if res is None:
+            continue
+        pools, findings, ready = res
+        all_pools.extend(pools)
+        out["owners"].append({"owner": owner, "pools": pools, "findings": findings,
+                              "actions": capacity_actions([], ready, rules, org_runners)})
+    hosts = read_hosts(args.hosts)
+    out["hosts"] = []
+    for h in hosts:
+        try:
+            out["hosts"].append(dict(host=h.get("host"), **dict(zip(("level", "metrics"), host_pressure(h, rules)))))
+        except (AttributeError, TypeError, ValueError, ZeroDivisionError, KeyError):
+            out["hosts"].append({"host": str(h)[:60], "level": "unknown", "metrics": {}})
+    out["host_actions"] = host_actions(hosts, all_pools, rules, state, now, seen_runners or None) + hosts_missing(args.hosts, hosts, state,
+                                                                                        rules, now)
+    _write_state(args.state, state)
+    text = json.dumps(out, indent=2)
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as fh:
+            fh.write(text + "\n")
+        for r in out["repos"]:
+            print("%s: %d queued, oldest %sh, %d stale" % (r["repo"], r["queued_runs"], r["oldest_queued_hours"],
+                                                          len(r["stale"])))
+        for o in out["owners"]:
+            print("%s: %s" % (o["owner"], "; ".join("%s %s" % (a["do"], a.get("runner") or a.get("labels") or "")
+                                                     for a in o["actions"]) or "pools fine"))
+        for a in out["host_actions"]:
+            print("%s: %s" % (a["host"], a["do"]))
+        for e in out["errors"]:
+            print("skipped: %s" % json.dumps(e))
+    else:
+        print(text)
+    return 0
+
+
 def cmd_sweep(args):
     rules = load_rules(args.rules)
     sw = Sweeper(rules)
@@ -471,11 +1363,27 @@ def main(argv=None):
     h = sub.add_parser("health", help="the CI health history for a repo, and what it says to improve")
     h.add_argument("--repo", required=True)
     h.add_argument("--history-dir", default=HISTORY_DIR)
+    c = sub.add_parser("capacity", help="idle runners, offline runners and stale queued runs (every few minutes)")
+    c.add_argument("--repo", action="append")
+    c.add_argument("--out")
+    c.add_argument("--state", default=os.path.join(os.path.expanduser("~"), ".build-autopilot", "capacity-state.json"),
+                   help="findings seen on the last pass and runners restarted, so one snapshot never acts")
+    c.add_argument("--hosts", default=os.environ.get("CAPACITY_HOSTS", ""),
+                   help="runner box health: the github-throughput dashboard (http://127.0.0.1:4517/api/data) or a JSON file")
+    n = sub.add_parser("capacity-note", help="record a slot the steward paused or resumed on a box")
+    n.add_argument("--host", required=True)
+    n.add_argument("--paused")
+    n.add_argument("--resumed")
+    n.add_argument("--state", default=os.path.join(os.path.expanduser("~"), ".build-autopilot", "capacity-state.json"))
     sub.add_parser("rules")
     sub.add_parser("session-note")
     args = ap.parse_args(argv)
     if args.cmd == "sweep":
         return cmd_sweep(args)
+    if args.cmd == "capacity":
+        return cmd_capacity(args)
+    if args.cmd == "capacity-note":
+        return cmd_capacity_note(args)
     if args.cmd == "health":
         hist = read_history(args.repo, args.history_dir)
         print(json.dumps({"sweeps": len(hist), "latest": hist[-1] if hist else None,

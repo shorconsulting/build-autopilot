@@ -59,6 +59,12 @@ sweep picks its work up (rule 5).
   person's: pull it from the pool at once (remove its custom label, which is undone by adding it back), repair it on
   its machine (clean its work folder, fix the mount or ownership, restart it), put the label back once a job passes,
   and re-run what it failed. The person hears only if the machine can't be reached or a repair needs a credential.
+- Idle runners while jobs queue are the steward's job too, checked every `capacity.cron` (10 minutes), not hourly.
+  GitHub never moves a job to a runner whose labels don't match, so nothing reroutes by itself. The steward cancels
+  queued runs nobody needs (closed pull request, superseded head, older duplicate), restarts offline or hung runners
+  on their machine, and moves light jobs (auto-merge, sweeps, labelling, mark-done) to idle labels with a pull
+  request. A no-op job that only joins a concurrency group still takes a runner: do that work with API calls in a
+  job that already runs.
 - The default branch red for over `main_red_hours`: fixing it comes before any other work for the steward lane, and
   the person hears once.
 
