@@ -117,7 +117,8 @@ class Pools(unittest.TestCase):
         ready = steward.settle(f, state, t0 + dt.timedelta(minutes=10), 30)
         acts = steward.capacity_actions([], ready, RULES)
         self.assertEqual([a["do"] for a in acts], ["reroute"])
-        # A lasting mismatch is one reroute per report cooldown, not a PR every pass.
+        # A lasting mismatch is one reroute per report cooldown, not a PR every pass, even as idle runners change.
+        f = [dict(f[0], idle=[{"runner": "other", "labels": []}])] if f[0]["kind"] == "idle-capacity-unreachable" else f
         self.assertEqual(steward.settle(f, state, t0 + dt.timedelta(minutes=20), 30), [])
         self.assertEqual(len(steward.settle(f, state, t0 + dt.timedelta(minutes=260), 30)), 1)
 
@@ -195,22 +196,52 @@ class Hosts(unittest.TestCase):
         self.assertEqual(steward.host_pressure(host("h", 16), RULES)[0], "headroom")
         self.assertEqual(steward.host_pressure({"host": "h", "ok": False}, RULES)[0], "unknown")
 
-    def test_pause_under_pressure_then_resume_with_headroom_one_slot_at_a_time(self):
-        state = {}
-        a = steward.host_actions([host("hph-ci", 52)], BACKED, RULES, state, self.t)
+    def test_pause_needs_two_red_passes_then_resume_with_headroom(self):
+        state, T = {}, lambda m: self.t + self.dt.timedelta(minutes=m)
+        self.assertEqual(steward.host_actions([host("hph-ci", 52)], BACKED, RULES, state, T(0)), [])  # first red
+        a = steward.host_actions([host("hph-ci", 52)], BACKED, RULES, state, T(10))
         self.assertEqual([x["do"] for x in a], ["pause-slot"])
-        # still hot 5 minutes later: inside the cooldown, nothing more
-        self.assertEqual(steward.host_actions([host("hph-ci", 52)], BACKED, RULES, state,
-                                              self.t + self.dt.timedelta(minutes=5)), [])
-        a = steward.host_actions([host("hph-ci", 16)], BACKED, RULES, state, self.t + self.dt.timedelta(minutes=30))
-        self.assertEqual([x["do"] for x in a], ["resume-slot"])
-        # nothing left that this check paused: headroom alone never adds slots it didn't take out
-        self.assertEqual(steward.host_actions([host("hph-ci", 16)], BACKED, RULES, state,
-                                              self.t + self.dt.timedelta(minutes=60)), [])
+        self.assertEqual(steward.host_actions([host("hph-ci", 52)], BACKED, RULES, state, T(15)), [])  # cooldown
+        # Nothing recorded as paused (no idle slot could be stopped): headroom has nothing to resume.
+        self.assertEqual(steward.host_actions([host("hph-ci", 16)], BACKED, RULES, state, T(40)), [])
+        state["hosts"]["hph-ci"]["paused"].append("hph-ci-7")
+        a = steward.host_actions([host("hph-ci", 16)], BACKED, RULES, state, T(70))
+        self.assertEqual([(x["do"], x["runner"]) for x in a], [("resume-slot", "hph-ci-7")])
+
+    def test_a_disk_only_red_is_a_report_not_a_pause(self):
+        state = {}
+        for m in (0, 10):
+            a = steward.host_actions([host("mini", 4, cpus=10, disk=0.93)], BACKED, RULES, state,
+                                     self.t + self.dt.timedelta(minutes=m))
+        self.assertNotIn("pause-slot", [x["do"] for x in a])
+        a = steward.host_actions([host("mini", 4, cpus=10, disk=0.93)], BACKED, RULES, state,
+                                 self.t + self.dt.timedelta(minutes=30))
+        self.assertEqual([x["do"] for x in a], ["report"])
 
     def test_no_resume_without_a_backlog(self):
-        state = {"hosts": {"hph-ci": {"paused": 1}}}
+        state = {"hosts": {"hph-ci": {"paused": ["hph-ci-7"]}}}
         self.assertEqual(steward.host_actions([host("hph-ci", 16)], [], RULES, state, self.t), [])
+
+    def test_a_paused_slot_is_never_restarted_by_the_pool_check(self):
+        state = {"hosts": {"hph-ci": {"paused": ["hph-ci-7"]}}}
+        runners = [runner("hph-ci-7", ["self-hosted", "hph-ci"], status="offline"),
+                   runner("hph-ci-1", ["self-hosted", "hph-ci"], busy=True)]
+        dos = []
+        for m in (0, 10, 20):
+            _, f = steward.pool_report(runners, {SH: 50}, 20, {SH: 60}, 10, steward.paused_runners(state))
+            ready = steward.settle(f, state.setdefault("HPortHealth", {}), self.t + self.dt.timedelta(minutes=m), 30)
+            dos += [a["do"] for a in steward.capacity_actions([], ready, RULES)]
+        self.assertNotIn("restart-runner", dos)
+        self.assertNotIn("report", dos)
+
+    def test_capacity_note_records_and_clears_a_paused_slot(self):
+        import tempfile, os
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "s.json")
+            steward.main(["capacity-note", "--host", "hph-ci", "--paused", "hph-ci-7", "--state", path])
+            self.assertEqual(steward.paused_runners(steward._read_state(path)), ["hph-ci-7"])
+            steward.main(["capacity-note", "--host", "hph-ci", "--resumed", "hph-ci-7", "--state", path])
+            self.assertEqual(steward.paused_runners(steward._read_state(path)), [])
 
 
 class CapacityRepo(unittest.TestCase):

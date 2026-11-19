@@ -316,14 +316,19 @@ reroutes, so idle runners with other labels stay idle while a pool queues for ho
    - `cancel-stale`: `gh api -X POST repos/<repo>/actions/runs/<run>/cancel` for each listed run (at most
      `capacity.max_cancels`). Any run can be re-run, so this needs nobody.
    - `restart-runner` and `restore-pool`: through Remote Control on the person's computer (runner admin and the
-     machines are only reachable from there). Restart the runner's service or container, or the VM it runs in
-     (Colima). Never delete a registration. If its machine can't be reached, say so once, with which machine and why.
+     machines are only reachable from there). Restart only that runner's own service or container. Never delete a
+     registration. Restarting the VM or machine it runs in (Colima, a reboot) takes down every slot on it, so do it
+     only when no runner on that VM is busy and Colima itself is stopped or unresponsive; otherwise make it a
+     `report`. If its machine can't be reached, say so once, with which machine and why.
    - `pause-slot` and `resume-slot` (from `--hosts`, the github-throughput dashboard's box health; run on the
      person's computer with `--hosts http://127.0.0.1:4517/api/data`): keep every runner box (Hetzner, the Mac mini
      and its Colima VM) inside its limits in `capacity.host`. On `pause-slot`, stop ONE idle runner slot on that box
-     (its service or container; never a busy one, never below `min_slots` running, never delete a registration) and
-     note which one in the state file; on `resume-slot`, start the slot this check paused most recently. One change
-     per box per `cooldown_minutes`. A box at red with no idle slot left is a `report`.
+     (its service or container; never a busy one, never below `min_slots` running, never delete a registration),
+     then record it: `steward.py capacity-note --host <box> --paused <runner>` (record nothing if none could be
+     paused). Paused slots are left out of the offline and pool checks, so they are never restarted by mistake. On
+     `resume-slot`, start the named runner, then `capacity-note --host <box> --resumed <runner>`. Pausing needs red
+     load or memory on two passes in a row; red disk alone is a `report` (prune Docker or the Colima disk). One
+     change per box per `cooldown_minutes`.
    - `reroute`: before opening a pull request, look for an open one from the steward for the same labels and
      update it instead. Open a pull request in the repo that moves its light jobs (auto-merge, sweeps, labelling, mark-done,
      cancel-on-close) to the idle runners' label, or file it as the steward lane's next item. A CI-machinery or ADR

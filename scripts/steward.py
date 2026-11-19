@@ -506,7 +506,7 @@ def self_hosted(labels):
     return bool(labels) and not all(HOSTED.match(l) for l in labels)
 
 
-def pool_report(runners, queued_labels, min_queue, oldest_minutes=None, settle_minutes=10):
+def pool_report(runners, queued_labels, min_queue, oldest_minutes=None, settle_minutes=10, paused=()):
     """Per self-hosted label set asked for by queued jobs: how many runners could take it (online, idle,
     offline), and the findings. `runners`: GitHub's runner objects (org and repo level); `queued_labels`:
     {tuple(labels): count of queued jobs}; `oldest_minutes`: {tuple(labels): minutes the oldest such job has
@@ -514,6 +514,9 @@ def pool_report(runners, queued_labels, min_queue, oldest_minutes=None, settle_m
     (a runner that just finished a job looks idle for a moment), and offline runners are only candidates
     (`settle` in cmd_capacity requires two passes in a row before acting)."""
     oldest_minutes = oldest_minutes or {}
+    # Slots this check paused for host pressure are offline on purpose: never "offline", "pool down" or restarted.
+    paused = {n.lower() for n in paused}
+    runners = [r for r in runners if (r.get("name") or "").lower() not in paused]
 
     def labels(r):
         return [l["name"] for l in r.get("labels") or []]
@@ -564,6 +567,9 @@ def settle(findings, state, now, cooldown_minutes, max_restarts=3, report_cooldo
     `state` (kept between passes): {"seen": {key: iso time}, "acted": {runner: iso time}}. Returns the findings to
     act on; updates `state` in place."""
     def names(f):
+        if f["kind"] == "idle-capacity-unreachable":
+            # Keyed on what is backed up, not on which runners happen to be idle this pass.
+            return ";".join(sorted(",".join(b["labels"]) for b in f.get("backed_up") or []))
         idle = [x["runner"] if isinstance(x, dict) else x for x in f.get("idle") or []]
         return f.get("runner") or ",".join(idle) or ",".join(f.get("labels") or [])
 
@@ -628,38 +634,80 @@ def host_pressure(h, rules):
 
 
 def host_actions(hosts, pools, rules, state, now):
-    """Keep each runner box inside its CPU, memory and disk limits, one slot at a time.
-    red       -> pause-slot: take one IDLE slot on that box out (stop its runner service; never a busy one).
-    headroom  -> resume-slot: bring back one slot this check paused, only while a pool is backed up.
-    Each box changes at most once per `capacity.host.cooldown_minutes`, and a box is never taken below
-    `capacity.host.min_slots` running slots. `state["hosts"]` remembers paused slots and the last change."""
+    """Keep each runner box inside its CPU and memory limits, one slot at a time.
+    red (load or memory, two passes in a row) -> pause-slot: stop one IDLE runner slot on that box (its service or
+                 container; never a busy one, never below `min_slots`). The steward records which slot with
+                 `steward.py capacity-note --paused NAME --host BOX` (or that none could be paused), so the
+                 paused list stays true and pool checks don't restart it.
+    red on disk only -> report: pausing runners frees no disk.
+    headroom while a pool is backed up -> resume-slot: start the slot this check paused most recently.
+    One change per box per `capacity.host.cooldown_minutes`. `state["hosts"][box]`: {"paused": [names],
+    "red_seen": iso, "changed": iso}."""
     t = rules["capacity"]["host"]
     backed_up = any(p["queued_jobs"] >= rules["capacity"]["backed_up_jobs"] and p["idle"] == 0 for p in pools)
     hs = state.setdefault("hosts", {})
     acts = []
+    stamp = now.strftime("%Y-%m-%dT%H:%M:%SZ")
     for h in hosts:
         level, m = host_pressure(h, rules)
-        st = hs.setdefault(h.get("host", "?"), {"paused": 0})
+        st = hs.setdefault(h.get("host", "?"), {})
+        if not isinstance(st.get("paused"), list):
+            st["paused"] = []
         last = parse_time(st.get("changed"))
         cooling = last and (now - last).total_seconds() < t["cooldown_minutes"] * 60
-        if level == "red" and not cooling:
+        hot = level == "red" and (m["load_per_core"] >= t["red_load_per_core"] or m["mem_pct"] >= t["red_mem_pct"])
+        if level == "red" and not hot:
+            if not cooling:
+                st["changed"] = stamp
+                acts.append({"do": "report", "needs_person": False, "host": h["host"], "metrics": m,
+                             "why": "%s disk at %d%%: free space (docker builder/image prune, Colima disk); pausing "
+                                    "runners won't help" % (h["host"], m["disk_pct"])})
+            st.pop("red_seen", None)
+            continue
+        if hot:
+            first = st.get("red_seen")
+            st["red_seen"] = first or stamp
+            if not first or cooling:
+                continue  # first red reading: confirm on the next pass
             acts.append({"do": "pause-slot", "needs_person": False, "host": h["host"], "metrics": m,
                          "min_slots": t["min_slots"],
-                         "why": "%s is over its limit (load %.2f per core, memory %d%%, disk %d%%): stop one idle runner "
-                                "slot on it, never a busy one and never below %d running"
-                                % (h["host"], m["load_per_core"], m["mem_pct"], m["disk_pct"], t["min_slots"])})
-            st["paused"] += 1
-            st["changed"] = now.strftime("%Y-%m-%dT%H:%M:%SZ")
-        elif level == "headroom" and backed_up and st["paused"] > 0 and not cooling:
-            acts.append({"do": "resume-slot", "needs_person": False, "host": h["host"], "metrics": m,
-                         "why": "%s has headroom (load %.2f per core, memory %d%%) and jobs are backed up: start one "
-                                "slot this check paused" % (h["host"], m["load_per_core"], m["mem_pct"])})
-            st["paused"] -= 1
-            st["changed"] = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+                         "why": "%s is over its limit (load %.2f per core, memory %d%%): stop one idle runner slot on "
+                                "it, never a busy one and never below %d running, then record it with capacity-note"
+                                % (h["host"], m["load_per_core"], m["mem_pct"], t["min_slots"])})
+            st["changed"] = stamp
+            continue
+        st.pop("red_seen", None)
+        if level == "headroom" and backed_up and st["paused"] and not cooling:
+            acts.append({"do": "resume-slot", "needs_person": False, "host": h["host"], "runner": st["paused"][-1],
+                         "metrics": m,
+                         "why": "%s has headroom (load %.2f per core, memory %d%%) and jobs are backed up: start %s "
+                                "again, then record it with capacity-note --resumed"
+                                % (h["host"], m["load_per_core"], m["mem_pct"], st["paused"][-1])})
+            st["changed"] = stamp
         elif level == "unknown" and h.get("host"):
             acts.append({"do": "report", "needs_person": False, "host": h["host"],
                          "why": "no health reading from %s: %s" % (h["host"], h.get("error") or "unreachable")})
     return acts
+
+
+def paused_runners(state):
+    return [n for st in (state.get("hosts") or {}).values() for n in (st.get("paused") or [])
+            if isinstance(st.get("paused"), list)]
+
+
+def cmd_capacity_note(args):
+    """Record what the steward did on a box, so the next pass knows which slots are paused on purpose."""
+    state = _read_state(args.state)
+    st = state.setdefault("hosts", {}).setdefault(args.host, {})
+    if not isinstance(st.get("paused"), list):
+        st["paused"] = []
+    if args.paused and args.paused not in st["paused"]:
+        st["paused"].append(args.paused)
+    if args.resumed and args.resumed in st["paused"]:
+        st["paused"].remove(args.resumed)
+    _write_state(args.state, state)
+    print(json.dumps({"host": args.host, "paused": st["paused"]}))
+    return 0
 
 
 def read_hosts(spec):
@@ -764,7 +812,10 @@ def capacity_repo(repo, rules, sample_runs, cache=None, lean=False):
     labels, oldest = {}, {}
     now = dt.datetime.now(dt.timezone.utc)
     live = [r for r in queued if r["id"] not in stale_ids]
-    for r in ([] if lean else live[:sample_runs]):
+    oldest_first = sorted(live, key=lambda r: r.get("created_at") or "")
+    half = max(1, sample_runs // 2)
+    sample = oldest_first[:half] + [r for r in oldest_first[-half:] if r not in oldest_first[:half]]
+    for r in ([] if lean else sample):
         try:
             jobs = (api("repos/%s/actions/runs/%s/jobs?per_page=100" % (repo, r["id"])) or {}).get("jobs", [])
         except GhError:
@@ -845,9 +896,9 @@ def cmd_capacity(args):
             if not runners:
                 continue
         pools, findings = pool_report(runners, agg["labels"], cap["backed_up_jobs"], agg["oldest"],
-                                      cap["settle_minutes"])
+                                      cap["settle_minutes"], paused_runners(state))
         ready = settle(findings, state.setdefault(owner, {}), now, cap["restart_cooldown_minutes"],
-                       cap["max_restarts"])
+                       cap["max_restarts"], cap["report_cooldown_minutes"])
         all_pools.extend(pools)
         out["owners"].append({"owner": owner, "pools": pools, "findings": findings,
                               "actions": capacity_actions([], ready, rules)})
@@ -951,6 +1002,11 @@ def main(argv=None):
                    help="findings seen on the last pass and runners restarted, so one snapshot never acts")
     c.add_argument("--hosts", default=os.environ.get("CAPACITY_HOSTS", ""),
                    help="runner box health: the github-throughput dashboard (http://127.0.0.1:4517/api/data) or a JSON file")
+    n = sub.add_parser("capacity-note", help="record a slot the steward paused or resumed on a box")
+    n.add_argument("--host", required=True)
+    n.add_argument("--paused")
+    n.add_argument("--resumed")
+    n.add_argument("--state", default=os.path.join(os.path.expanduser("~"), ".build-autopilot", "capacity-state.json"))
     sub.add_parser("rules")
     sub.add_parser("session-note")
     args = ap.parse_args(argv)
@@ -958,6 +1014,8 @@ def main(argv=None):
         return cmd_sweep(args)
     if args.cmd == "capacity":
         return cmd_capacity(args)
+    if args.cmd == "capacity-note":
+        return cmd_capacity_note(args)
     if args.cmd == "health":
         hist = read_history(args.repo, args.history_dir)
         print(json.dumps({"sweeps": len(hist), "latest": hist[-1] if hist else None,
