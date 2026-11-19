@@ -624,7 +624,7 @@ def host_pressure(h, rules):
         return "unknown", {}
     load = (h.get("load5") or 0) / h["cpus"]
     mem = 1 - (h.get("MemAvailable") or 0) / h["MemTotal"]
-    disk = max([d["used"] / d["size"] for d in h.get("disks") or [] if d.get("size")] or [0])
+    disk = max([(d.get("used") or 0) / d["size"] for d in h.get("disks") or [] if d.get("size")] or [0])
     m = {"load_per_core": round(load, 2), "mem_pct": round(mem * 100), "disk_pct": round(disk * 100)}
     if load >= t["red_load_per_core"] or mem * 100 >= t["red_mem_pct"] or disk * 100 >= t["red_disk_pct"]:
         return "red", m
@@ -649,8 +649,13 @@ def host_actions(hosts, pools, rules, state, now):
     acts = []
     stamp = now.strftime("%Y-%m-%dT%H:%M:%SZ")
     for h in hosts:
-        level, m = host_pressure(h, rules)
-        st = hs.setdefault(h.get("host", "?"), {})
+        if not isinstance(h, dict) or not h.get("host"):
+            continue
+        try:
+            level, m = host_pressure(h, rules)
+        except (TypeError, ValueError, ZeroDivisionError, KeyError):
+            level, m = "unknown", {}
+        st = hs.setdefault(h["host"], {})
         if not isinstance(st.get("paused"), list):
             st["paused"] = []
         last = parse_time(st.get("changed"))
@@ -798,6 +803,7 @@ def capacity_repo(repo, rules, sample_runs, cache=None, lean=False):
     `lean`: the API budget is low, so skip close lookups and job sampling (stale superseded runs still found)."""
     from urllib.parse import quote
     cache = cache if cache is not None else {}
+    now = dt.datetime.now(dt.timezone.utc)
     queued = paged("repos/%s/actions/runs?status=queued" % repo, key="workflow_runs", cap=2000)
     open_prs = paged("repos/%s/pulls?state=open" % repo, cap=2000)
     open_keys = {_head_key((p["head"].get("repo") or {}).get("full_name"), p["head"].get("ref")) for p in open_prs}
@@ -810,7 +816,9 @@ def capacity_repo(repo, rules, sample_runs, cache=None, lean=False):
     for key in todo:
         ck = "%s|%s" % key
         if ck in cache:
-            closed_at[key] = cache[ck]
+            hit = cache[ck]
+            closed_at[key] = hit["t"] if isinstance(hit, dict) else hit
+            cache[ck] = {"t": closed_at[key], "seen": now.strftime("%Y-%m-%dT%H:%M:%SZ")}
             continue
         if lean or lookups >= rules["capacity"]["max_close_lookups"]:
             continue
@@ -823,11 +831,16 @@ def capacity_repo(repo, rules, sample_runs, cache=None, lean=False):
             continue
         times = [p.get("closed_at") for p in closed if p.get("closed_at")]
         if times:
-            closed_at[key] = cache[ck] = max(times)
+            closed_at[key] = max(times)
+            cache[ck] = {"t": closed_at[key], "seen": now.strftime("%Y-%m-%dT%H:%M:%SZ")}
+    # Forget branches no queued run has needed for a few days (a reused name then gets a fresh lookup).
+    for ck in list(cache):
+        seen = parse_time(cache[ck].get("seen")) if isinstance(cache[ck], dict) else None
+        if not seen or (now - seen).total_seconds() > 3 * 86400:
+            cache.pop(ck)
     stale = stale_runs(queued, open_prs, _keep(rules), closed_at, _dedupe(rules, repo))
     stale_ids = {s[0] for s in stale}
     labels, oldest = {}, {}
-    now = dt.datetime.now(dt.timezone.utc)
     live = [r for r in queued if r["id"] not in stale_ids]
     oldest_first = sorted(live, key=lambda r: r.get("created_at") or "")
     half = max(1, sample_runs // 2)
@@ -872,52 +885,88 @@ def _write_state(path, state):
         pass
 
 
-def owner_pools(owner, org_runners, aggs, state, rules, now, lean):
+def runner_groups(owner):
+    """{runner id: set of repo full names it may serve, or None for every repo}, from the org's runner groups;
+    None when they can't be read."""
+    try:
+        groups = paged("orgs/%s/actions/runner-groups" % owner, key="runner_groups")
+        allowed = {}
+        for g in groups:
+            repos = None
+            if g.get("visibility") == "selected":
+                repos = {r["full_name"].lower() for r in
+                         paged("orgs/%s/actions/runner-groups/%s/repositories" % (owner, g["id"]), key="repositories")}
+            for r in paged("orgs/%s/actions/runner-groups/%s/runners" % (owner, g["id"]), key="runners"):
+                allowed[r["id"]] = repos
+        return allowed
+    except GhError:
+        return None
+
+
+def _finding_key(f):
+    if f["kind"] in ("runner-offline",):
+        return (f["kind"], f["runner"])
+    if f["kind"] == "idle-but-queued":
+        return (f["kind"], tuple(sorted(f["idle"])))
+    return (f["kind"], tuple(f.get("labels") or []))
+
+
+def owner_pools(owner, org_runners, aggs, state, rules, now, lean, groups=None):
     """Pool findings for one owner, settled against what earlier passes saw. `aggs`: {repo: {"labels", "oldest",
     "runners"}} (that repo's sampled queued-job labels and its own repo-level runners). `org_runners`: the org's
-    runners, or None when they can't be read.
+    runners, or None when they can't be read. `groups`: runner_groups(), or None when unreadable.
 
-    Each repo is checked against the org's runners plus ITS OWN repo-level runners (a repo-level runner serves only
-    its repo). Runner groups that limit an org runner to some repos are not modelled. When the org's runners can't
-    be read, only label sets a readable repo-level runner fits are checked, and never as pool-down or
-    no-runner-for-labels (the real runners may be fine). Idle capacity no queued job can use is judged across the
-    owner's repos. A pass that sampled no job labels (lean on API budget, or nothing queued) leaves the state as it
-    was, so restart counts and cooldowns survive it. Returns (pools, findings, ready) or None."""
+    Each repo is checked against the org runners its runner groups allow plus ITS OWN repo-level runners. Findings
+    are then merged across repos (one runner offline for five repos is one finding) and settled ONCE under the
+    owner's state, so the cooldown and the restart cap count per runner, not per repo. Without runner groups, a
+    runner that looks idle while jobs queue may simply not be allowed to take them, so idle-but-queued is not
+    acted on. When the org's runners can't be read, only label sets a readable repo-level runner fits are checked,
+    and never as pool-down or no-runner-for-labels. A pass that sampled no job labels (lean, nothing queued)
+    leaves the state as it was. Returns (pools, findings, ready) or None."""
     cap = rules["capacity"]
     if lean or not any(a["labels"] for a in aggs.values()):
         return None
     paused = paused_runners(state)
-    pools, findings, ready = [], [], []
+    pools, merged = [], {}
     for repo, a in sorted(aggs.items()):
         if not a["labels"] or (org_runners is None and not a["runners"]):
             continue
-        runners = (org_runners or []) + a["runners"]
+        usable = [r for r in (org_runners or [])
+                  if groups is None or groups.get(r.get("id"), None) is None
+                  or repo.lower() in groups.get(r.get("id"))]
         labels = a["labels"]
         if org_runners is None:
             labels = {k: v for k, v in labels.items()
                       if any(fits(k, [l["name"] for l in r.get("labels") or []]) for r in a["runners"])}
-        p, f = pool_report(runners, labels, 10 ** 9, a["oldest"], cap["settle_minutes"], paused)
-        if org_runners is None:
-            f = [x for x in f if x["kind"] not in ("pool-down", "no-runner-for-labels")]
+        p, f = pool_report(usable + a["runners"], labels, 10 ** 9, a["oldest"], cap["settle_minutes"], paused)
         for x in p:
             x["repo"] = repo
         pools.extend(p)
-        findings.extend(f)
-        ready.extend(settle(f, state.setdefault(repo, {}), now, cap["restart_cooldown_minutes"],
-                            cap["max_restarts"], cap["report_cooldown_minutes"]))
+        for x in f:
+            if org_runners is None and x["kind"] in ("pool-down", "no-runner-for-labels"):
+                continue
+            if groups is None and x["kind"] == "idle-but-queued":
+                continue
+            k = _finding_key(x)
+            if k in merged:
+                merged[k].setdefault("repos", []).append(repo)
+                if "queued_jobs" in x:
+                    merged[k]["queued_jobs"] = merged[k].get("queued_jobs", 0) + x["queued_jobs"]
+            else:
+                merged[k] = dict(x, repos=[repo])
+    findings = list(merged.values())
     if org_runners is not None:
-        merged, oldest = {}, {}
+        allm, oldest = {}, {}
         for a in aggs.values():
             for k, v in a["labels"].items():
-                merged[k] = merged.get(k, 0) + v
+                allm[k] = allm.get(k, 0) + v
             for k, v in a["oldest"].items():
                 oldest[k] = max(oldest.get(k, 0), v)
         every = org_runners + [r for a in aggs.values() for r in a["runners"]]
-        _, f = pool_report(every, merged, cap["backed_up_jobs"], oldest, cap["settle_minutes"], paused)
-        f = [x for x in f if x["kind"] == "idle-capacity-unreachable"]
-        findings.extend(f)
-        ready.extend(settle(f, state.setdefault(owner, {}), now, cap["restart_cooldown_minutes"],
-                            cap["max_restarts"], cap["report_cooldown_minutes"]))
+        _, f = pool_report(every, allm, cap["backed_up_jobs"], oldest, cap["settle_minutes"], paused)
+        findings.extend(x for x in f if x["kind"] == "idle-capacity-unreachable")
+    ready = settle(findings, state.setdefault(owner, {}), now, cap["restart_cooldown_minutes"],
+                   cap["max_restarts"], cap["report_cooldown_minutes"])
     return pools, findings, ready
 
 
@@ -954,7 +1003,8 @@ def cmd_capacity(args):
             # only work from the person's computer. Stale runs are still found and cancelled.
             out["errors"].append({"owner": owner, "error": "org runners not readable: %s" % exc})
             org_runners = None
-        res = owner_pools(owner, org_runners, aggs, state, rules, now, lean)
+        groups = runner_groups(owner) if org_runners is not None else None
+        res = owner_pools(owner, org_runners, aggs, state, rules, now, lean, groups)
         if res is None:
             continue
         pools, findings, ready = res
@@ -962,8 +1012,12 @@ def cmd_capacity(args):
         out["owners"].append({"owner": owner, "pools": pools, "findings": findings,
                               "actions": capacity_actions([], ready, rules)})
     hosts = read_hosts(args.hosts)
-    out["hosts"] = [dict(host=h.get("host"), **dict(zip(("level", "metrics"), host_pressure(h, rules))))
-                    for h in hosts]
+    out["hosts"] = []
+    for h in hosts:
+        try:
+            out["hosts"].append(dict(host=h.get("host"), **dict(zip(("level", "metrics"), host_pressure(h, rules)))))
+        except (AttributeError, TypeError, ValueError, ZeroDivisionError, KeyError):
+            out["hosts"].append({"host": str(h)[:60], "level": "unknown", "metrics": {}})
     out["host_actions"] = host_actions(hosts, all_pools, rules, state, now) + hosts_missing(args.hosts, hosts, state,
                                                                                         rules, now)
     _write_state(args.state, state)

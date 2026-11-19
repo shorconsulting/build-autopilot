@@ -265,6 +265,31 @@ class Owners(unittest.TestCase):
         self.assertEqual(dos.count("restart-runner"), 3)
         self.assertIn("report", dos)
 
+    def test_one_shared_offline_runner_is_one_restart_for_all_repos(self):
+        org = [runner("dind-1", ["self-hosted", "hph-ci"], status="offline", rid=7)]
+        aggs = {"o/a": self.agg(), "o/b": self.agg(), "o/c": self.agg()}
+        state, dos = {}, []
+        for i in range(12):
+            res = steward.owner_pools("o", org, aggs, state, RULES, self.t + self.dt.timedelta(minutes=10 * i), False)
+            dos += [a["do"] for a in steward.capacity_actions([], res[2], RULES)]
+        self.assertEqual(dos.count("restart-runner"), 3)  # the cap counts per runner, across every repo
+        self.assertEqual(dos.count("restore-pool"), 3)
+        self.assertEqual(dos.count("report"), 2)  # runner-offline and pool-down, each once
+
+    def test_idle_but_queued_needs_runner_groups_and_respects_them(self):
+        org = [runner("r1", ["self-hosted", "hph-ci"], rid=1)]
+        aggs = {"o/a": self.agg()}
+        _, f, _ = steward.owner_pools("o", org, aggs, {}, RULES, self.t, False, groups=None)
+        self.assertNotIn("idle-but-queued", [x["kind"] for x in f])  # can't tell if o/a may use r1
+        _, f, _ = steward.owner_pools("o", org, aggs, {}, RULES, self.t, False, groups={1: {"o/other"}})
+        self.assertNotIn("idle-but-queued", [x["kind"] for x in f])  # r1 isn't allowed for o/a
+        _, f, _ = steward.owner_pools("o", org, aggs, {}, RULES, self.t, False, groups={1: None})
+        self.assertIn("idle-but-queued", [x["kind"] for x in f])
+
+    def test_a_malformed_host_reading_never_crashes(self):
+        bad = [{"ok": True}, {"host": "x", "ok": True, "cpus": 4, "MemTotal": 8, "disks": [{"size": 10}]}, "junk"]
+        steward.host_actions(bad, [], RULES, {}, self.t)
+
     def test_a_repo_level_runner_only_serves_its_repo(self):
         mine = runner("repo-b-runner", ["self-hosted", "hph-ci"])  # idle, belongs to o/b
         aggs = {"o/a": self.agg(), "o/b": self.agg(labels={})}
