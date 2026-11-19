@@ -570,24 +570,41 @@ def pool_report(runners, queued_labels, min_queue, oldest_minutes=None, settle_m
     return pools, uniq
 
 
+RESTART_KINDS = ("runner-offline", "idle-but-queued", "pool-down")
+
+
+def restart_targets(f):
+    """The runner names a restart finding would restart."""
+    if f["kind"] == "runner-offline":
+        return [f["runner"]]
+    if f["kind"] == "pool-down":
+        return list(f.get("offline") or [])
+    return [x["runner"] if isinstance(x, dict) else x for x in f.get("idle") or []]
+
+
 def settle(findings, state, now, cooldown_minutes, max_restarts=3, report_cooldown_minutes=240, online=None):
     """Act on a runner only when the finding held on the previous pass too, and not again within the cooldown.
-    `state` (kept between passes): {"seen": {key: iso time}, "acted": {runner: iso time}}. Returns the findings to
-    act on; updates `state` in place. `online`: names of runners seen online and not busy-hung this pass, whose
-    runner-offline history can be cleared at once."""
+    Restarts are counted PER RUNNER across every finding kind, so `max_restarts` caps a runner's restarts in all,
+    and a runner a `pool-down` finding covers is not also restarted as `runner-offline` in the same pass.
+    `state` (kept between passes): seen {finding key: first seen}, acted {key: last acted}, restarts
+    {"r|runner": count}, last_seen {key: last seen}. Returns the findings to act on; updates `state` in place.
+    `online`: names of runners seen online and not hung this pass, whose restart history is cleared at once."""
     def names(f):
         if f["kind"] == "idle-capacity-unreachable":
             # Keyed on what is backed up, not on which runners happen to be idle this pass.
             return ";".join(sorted(",".join(b["labels"]) for b in f.get("backed_up") or []))
-        idle = [x["runner"] if isinstance(x, dict) else x for x in f.get("idle") or []]
-        return f.get("runner") or ",".join(idle) or ",".join(f.get("labels") or [])
+        if f["kind"] in RESTART_KINDS:
+            return ",".join(sorted(restart_targets(f))) or ",".join(f.get("labels") or [])
+        return f.get("runner") or ",".join(f.get("labels") or [])
 
+    covered = {n for f in findings if f["kind"] == "pool-down" for n in restart_targets(f)}
+    findings = [f for f in findings if not (f["kind"] == "runner-offline" and f["runner"] in covered)]
     prev = state.get("seen", {})
     acted = state.setdefault("acted", {})
     tries = state.setdefault("restarts", {})
     last_seen = state.setdefault("last_seen", {})
     stamp = now.strftime("%Y-%m-%dT%H:%M:%SZ")
-    keep, seen = [], {}
+    keep, seen, done = [], {}, set()
     for f in findings:
         key = "%s|%s" % (f["kind"], names(f))
         seen[key] = prev.get(key) or stamp
@@ -597,38 +614,47 @@ def settle(findings, state, now, cooldown_minutes, max_restarts=3, report_cooldo
             last = parse_time(acted.get(key))
             if key not in prev or (last and (now - last).total_seconds() < report_cooldown_minutes * 60):
                 continue
-            acted[key] = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+            acted[key] = stamp
             keep.append(f)
             continue
-        if f["kind"] in ("runner-offline", "idle-but-queued", "pool-down"):
-            if key not in prev:
-                continue  # first sighting: wait for the next pass
-            if tries.get(key, 0) >= max_restarts:
+        if f["kind"] in RESTART_KINDS:
+            targets = [n for n in restart_targets(f) if n not in done]
+            rkeys = ["r|" + n for n in targets]
+            for rk in rkeys:
+                last_seen[rk] = stamp
+            if key not in prev or (restart_targets(f) and not targets):
+                continue  # first sighting (wait for the next pass), or already handled this pass
+            count = max([tries.get(rk, 0) for rk in rkeys] or [0])
+            if count >= max_restarts:
                 # Restarting hasn't cleared it (wrong runner group, a dead machine): stop churning, tell the person,
                 # once per report cooldown.
                 rep = "report|" + key
                 last = parse_time(acted.get(rep))
                 if not last or (now - last).total_seconds() >= report_cooldown_minutes * 60:
-                    acted[rep] = now.strftime("%Y-%m-%dT%H:%M:%SZ")
-                    keep.append(dict(f, escalate=True, restarts=tries[key]))
+                    acted[rep] = stamp
+                    keep.append(dict(f, escalate=True, restarts=count))
+                done.update(targets)
                 continue
-            last = parse_time(acted.get(key))
+            last = max([parse_time(acted.get(k)) for k in [key] + rkeys if parse_time(acted.get(k))] or [None],
+                       key=lambda x: x or dt.datetime.min.replace(tzinfo=dt.timezone.utc))
             if last and (now - last).total_seconds() < cooldown_minutes * 60:
                 continue
-            acted[key] = now.strftime("%Y-%m-%dT%H:%M:%SZ")
-            tries[key] = tries.get(key, 0) + 1
+            for k in [key] + rkeys:
+                acted[k] = stamp
+            for rk in rkeys:
+                tries[rk] = tries.get(rk, 0) + 1
+            done.update(targets)
         keep.append(f)
     # A finding that vanishes for a pass or two (a sampled queue, a flapping runner, a skipped repo) keeps its restart
-    # count and cooldown; only one absent for `forget` minutes, or whose runner is seen online and fine, is forgotten.
+    # count and cooldown; only one absent for `forget` minutes, or a runner seen online and fine, is forgotten.
     forget = max(report_cooldown_minutes, cooldown_minutes * 3) * 60
-    healthy = set(online or ())
+    healthy = {"r|" + n for n in (online or ())}
     for key in set(acted) | set(tries) | set(last_seen):
         base = key[len("report|"):] if key.startswith("report|") else key
-        if base in seen:
+        if base in seen or (base.startswith("r|") and last_seen.get(base) == stamp):
             continue
         gone = parse_time(last_seen.get(base))
-        runner = base.split("|", 1)[1] if base.startswith("runner-offline|") else None
-        if (runner and runner in healthy) or not gone or (now - gone).total_seconds() >= forget:
+        if base in healthy or not gone or (now - gone).total_seconds() >= forget:
             acted.pop(key, None)
             tries.pop(base, None)
             last_seen.pop(base, None)
@@ -682,9 +708,16 @@ def host_actions(hosts, pools, rules, state, now, runners=None):
         last = parse_time(st.get("changed"))
         cooling = last and (now - last).total_seconds() < t["cooldown_minutes"] * 60
         hot = level == "red" and (m["load_per_core"] >= t["red_load_per_core"] or m["mem_pct"] >= t["red_mem_pct"])
+        rep_last = parse_time(st.get("pressure_reported"))
+        may_report = not rep_last or (now - rep_last).total_seconds() >= rules["capacity"]["report_cooldown_minutes"] * 60
+        for n, when in list((st.get("pending_pause") or {}).items()):
+            t0 = parse_time(when)
+            if not t0 or (now - t0).total_seconds() >= PENDING_PAUSE_HOURS * 3600:
+                st["pending_pause"].pop(n)
         if level == "red" and not hot:
-            if not cooling:
-                st["changed"] = stamp
+            # A report is not a change on the box: it uses the report cooldown and never delays a resume.
+            if may_report:
+                st["pressure_reported"] = stamp
                 acts.append({"do": "report", "needs_person": False, "host": h["host"], "metrics": m,
                              "why": "%s disk at %d%%: free space (docker builder/image prune, Colima disk); pausing "
                                     "runners won't help" % (h["host"], m["disk_pct"])})
@@ -697,7 +730,9 @@ def host_actions(hosts, pools, rules, state, now, runners=None):
                 continue  # first red reading: confirm on the next pass
             pick, online = pick_idle_slot(h["host"], runners, rules, st["paused"])
             if pick is None:
-                st["changed"] = stamp
+                if not may_report:
+                    continue
+                st["pressure_reported"] = stamp
                 acts.append({"do": "report", "needs_person": False, "host": h["host"], "metrics": m,
                              "why": "%s is over its limit (load %.2f per core, memory %d%%) but no slot can be paused "
                                     "(%s)" % (h["host"], m["load_per_core"], m["mem_pct"], online)})
@@ -846,7 +881,11 @@ def read_hosts(spec):
         return []
     if isinstance(data, list):
         return data
-    return (data.get("ci") or {}).get("hosts") or data.get("hosts") or []
+    if not isinstance(data, dict):
+        return []
+    ci = data.get("ci") if isinstance(data.get("ci"), dict) else {}
+    found = ci.get("hosts") or data.get("hosts") or []
+    return found if isinstance(found, list) else []
 
 
 def machine_restart(names, runners, rules):

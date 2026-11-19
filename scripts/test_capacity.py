@@ -185,7 +185,25 @@ class Pools(unittest.TestCase):
         steward.settle(f2, state, t + dt.timedelta(minutes=30), 30)  # first sighting again
         acts += len(steward.settle(f2, state, t + dt.timedelta(minutes=35), 30))  # inside the 30-minute cooldown
         self.assertEqual(acts, 1)
-        self.assertEqual(state["restarts"]["runner-offline|dind-1"], 1)
+        self.assertEqual(state["restarts"]["r|dind-1"], 1)
+
+    def test_a_runner_is_restarted_once_per_pass_and_capped_across_every_kind(self):
+        import datetime as dt
+        t = dt.datetime(2026, 11, 19, 14, 0, tzinfo=dt.timezone.utc)
+        both = [{"kind": "runner-offline", "runner": "dind-1", "labels": []},
+                {"kind": "pool-down", "labels": ["hph-ci"], "queued_jobs": 5, "offline": ["dind-1"]}]
+        state = {}
+        steward.settle(both, state, t, 30)
+        ready = steward.settle(both, state, t + dt.timedelta(minutes=10), 30)
+        self.assertEqual([f["kind"] for f in ready], ["pool-down"])
+        self.assertEqual(state["restarts"], {"r|dind-1": 1})
+        hung = [{"kind": "idle-but-queued", "idle": ["dind-1"], "queued_jobs": 5}]
+        steward.settle(hung, state, t + dt.timedelta(minutes=50), 30)
+        steward.settle(hung, state, t + dt.timedelta(minutes=60), 30)
+        steward.settle(hung, state, t + dt.timedelta(minutes=100), 30)
+        ready = steward.settle(hung, state, t + dt.timedelta(minutes=140), 30)
+        self.assertEqual(state["restarts"]["r|dind-1"], 3)
+        self.assertTrue(ready and ready[0].get("escalate"))
 
     def test_restart_history_is_forgotten_when_the_runner_is_online_or_long_gone(self):
         import datetime as dt
@@ -195,14 +213,14 @@ class Pools(unittest.TestCase):
         steward.settle(f, state, t, 30)
         steward.settle(f, state, t + dt.timedelta(minutes=10), 30)
         steward.settle([], state, t + dt.timedelta(minutes=20), 30, online={"dind-1"})
-        self.assertNotIn("runner-offline|dind-1", state["restarts"])
+        self.assertNotIn("r|dind-1", state["restarts"])
         state = {}
         steward.settle(f, state, t, 30)
         steward.settle(f, state, t + dt.timedelta(minutes=10), 30)
         steward.settle([], state, t + dt.timedelta(minutes=60), 30)
-        self.assertIn("runner-offline|dind-1", state["restarts"])
+        self.assertIn("r|dind-1", state["restarts"])
         steward.settle([], state, t + dt.timedelta(minutes=10 + 241), 30)
-        self.assertNotIn("runner-offline|dind-1", state["restarts"])
+        self.assertNotIn("r|dind-1", state["restarts"])
 
     def test_machine_restart_only_when_every_runner_on_the_box_is_idle(self):
         rules = dict(RULES, capacity=dict(RULES["capacity"], host=dict(RULES["capacity"]["host"],
@@ -269,12 +287,30 @@ class Hosts(unittest.TestCase):
         partial.pop("MemAvailable")
         self.assertEqual(steward.host_pressure(partial, RULES)[0], "unknown")  # not "100% memory used"
 
+    def test_disk_and_no_slot_reports_use_the_report_cooldown_and_never_delay_a_resume(self):
+        state, T = {}, lambda m: self.t + self.dt.timedelta(minutes=m)
+        dos = []
+        for i in range(10):  # 100 minutes of a full disk
+            dos += [x["do"] for x in steward.host_actions([host("hph-ci", 16, disk=0.95)], BACKED, RULES, state, T(10 * i))]
+        self.assertEqual(dos, ["report"])
+        self.assertNotIn("changed", state["hosts"]["hph-ci"])
+
+    def test_read_hosts_ignores_json_that_is_not_a_host_list(self):
+        import tempfile
+        for body in ("null", "3", '"x"', '{"ci": "x"}', '{"hosts": 4}'):
+            with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+                fh.write(body)
+            self.assertEqual(steward.read_hosts(fh.name), [])
+            os.unlink(fh.name)
+
     def test_a_pause_not_yet_confirmed_still_protects_the_slot_from_a_restart(self):
         state, T = {}, lambda m: self.t + self.dt.timedelta(minutes=m)
         steward.host_actions([host("hph-ci", 52)], BACKED, RULES, state, T(0))
         steward.host_actions([host("hph-ci", 52)], BACKED, RULES, state, T(10), SLOTS)
         self.assertEqual(steward.paused_runners(state, T(20)), ["hph-ci-3"])
         self.assertEqual(steward.paused_runners(state, T(10 + 60 * steward.PENDING_PAUSE_HOURS)), [])
+        steward.host_actions([host("hph-ci", 16)], [], RULES, state, T(10 + 60 * steward.PENDING_PAUSE_HOURS))
+        self.assertEqual(state["hosts"]["hph-ci"].get("pending_pause"), {})  # expired entries are pruned
 
     def test_pause_needs_two_red_passes_then_resume_with_headroom(self):
         state, T = {}, lambda m: self.t + self.dt.timedelta(minutes=m)
@@ -312,8 +348,8 @@ class Hosts(unittest.TestCase):
                                      self.t + self.dt.timedelta(minutes=m))
         self.assertNotIn("pause-slot", [x["do"] for x in a])
         a = steward.host_actions([host("mini", 4, cpus=10, disk=0.93)], BACKED, RULES, state,
-                                 self.t + self.dt.timedelta(minutes=30))
-        self.assertEqual([x["do"] for x in a], ["report"])
+                                 self.t + self.dt.timedelta(minutes=240))
+        self.assertEqual([x["do"] for x in a], ["report"])  # again only after the report cooldown
 
     def test_colima_runners_belong_to_the_vm_not_the_mac(self):
         boxes = {"mac": ["davids-mac-mini-"], "colima": ["davids-mac-mini-dind-"]}
@@ -373,7 +409,8 @@ class Owners(unittest.TestCase):
                                       self.t + self.dt.timedelta(minutes=40 * i), lean)
             if res:
                 dos += [a["do"] for a in steward.capacity_actions([], res[2], RULES)]
-        self.assertEqual(dos.count("restart-runner"), 3)
+        self.assertEqual(dos.count("restore-pool"), 3)  # its pool is down: one restart kind, counted per runner
+        self.assertNotIn("restart-runner", dos)
         self.assertIn("report", dos)
 
     def test_one_shared_offline_runner_is_one_restart_for_all_repos(self):
@@ -383,9 +420,11 @@ class Owners(unittest.TestCase):
         for i in range(12):
             res = steward.owner_pools("o", org, aggs, state, RULES, self.t + self.dt.timedelta(minutes=10 * i), False)
             dos += [a["do"] for a in steward.capacity_actions([], res[2], RULES)]
-        self.assertEqual(dos.count("restart-runner"), 3)  # the cap counts per runner, across every repo
+        # The pool is down, so the runner is restarted as restore-pool only, never also as runner-offline: three
+        # restarts in all across every repo and kind, then one escalation.
         self.assertEqual(dos.count("restore-pool"), 3)
-        self.assertEqual(dos.count("report"), 2)  # runner-offline and pool-down, each once
+        self.assertEqual(dos.count("restart-runner"), 0)
+        self.assertEqual(dos.count("report"), 1)
 
     def test_idle_but_queued_needs_runner_groups_and_respects_them(self):
         org = [runner("r1", ["self-hosted", "hph-ci"], rid=1)]

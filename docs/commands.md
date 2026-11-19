@@ -307,7 +307,8 @@ reroutes, so idle runners with other labels stay idle while a pool queues for ho
    release, deploy, publish, cleanup, backport, notify or preview, or `capacity.keep_after_close`. GitHub-hosted
    label sets are never a pool. A runner finding (offline, hung, pool down) only becomes an action when it held on
    the previous pass too (state in `~/.build-autopilot/capacity-state.json`), and one runner is restarted at most
-   once per `capacity.restart_cooldown_minutes` and `capacity.max_restarts` times in all before it becomes a
+   once per `capacity.restart_cooldown_minutes` and `capacity.max_restarts` times in all, counted per runner across
+   offline, hung and pool-down (a runner a pool-down covers is restarted once, as `restore-pool`), before it becomes a
    `report` for the person; idle-while-queued also needs a matching job queued over
    `capacity.settle_minutes`. Reroute and report findings repeat at most once per `capacity.report_cooldown_minutes`.
    Duplicates are only cancelled for `capacity.dedupe_workflows` (workflows that do the same work whatever started
