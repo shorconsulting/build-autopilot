@@ -166,6 +166,21 @@ class Pools(unittest.TestCase):
         self.assertEqual(dos.count("report"), 2)  # once, then again only after the 4-hour report cooldown
         self.assertEqual(dos[3], "report")
 
+    def test_no_runner_with_the_labels_is_a_report_for_a_person(self):
+        _, f = steward.pool_report([], {("self-hosted", "linux-large"): 4}, 20)
+        a = steward.capacity_actions([], [dict(f[0], repos=["o/a"])], RULES)
+        self.assertEqual((a[0]["do"], a[0]["needs_person"]), ("report", True))
+
+    def test_paged_appends_to_an_existing_query(self):
+        seen = []
+        old = steward.api
+        steward.api = lambda path: seen.append(path) or {"workflow_runs": []}
+        try:
+            steward.paged("repos/o/r/actions/runs?status=queued", key="workflow_runs")
+        finally:
+            steward.api = old
+        self.assertEqual(seen, ["repos/o/r/actions/runs?status=queued&per_page=100&page=1"])
+
     def test_cancel_action_is_capped(self):
         stale = [(i, "closed", "CI") for i in range(RULES["capacity"]["max_cancels"] + 10)]
         a = steward.capacity_actions(stale, [], RULES)[0]
@@ -180,6 +195,8 @@ def host(name, load5, cpus=32, mem_avail=100, mem_total=128, disk=0.05):
 
 
 BACKED = [{"labels": ["hph-ci"], "queued_jobs": 100, "idle": 0}]
+SLOTS = [runner("hph-ci-1", ["hph-ci"], busy=True), runner("hph-ci-2", ["hph-ci"]), runner("hph-ci-3", ["hph-ci"]),
+         runner("davids-mac-mini-dind-sconsinc-1", ["shorconsulting-ci"])]
 
 
 class Hosts(unittest.TestCase):
@@ -199,14 +216,31 @@ class Hosts(unittest.TestCase):
     def test_pause_needs_two_red_passes_then_resume_with_headroom(self):
         state, T = {}, lambda m: self.t + self.dt.timedelta(minutes=m)
         self.assertEqual(steward.host_actions([host("hph-ci", 52)], BACKED, RULES, state, T(0)), [])  # first red
-        a = steward.host_actions([host("hph-ci", 52)], BACKED, RULES, state, T(10))
-        self.assertEqual([x["do"] for x in a], ["pause-slot"])
-        self.assertEqual(steward.host_actions([host("hph-ci", 52)], BACKED, RULES, state, T(15)), [])  # cooldown
-        # Nothing recorded as paused (no idle slot could be stopped): headroom has nothing to resume.
+        a = steward.host_actions([host("hph-ci", 52)], BACKED, RULES, state, T(10), SLOTS)
+        self.assertEqual([(x["do"], x["runner"]) for x in a], [("pause-slot", "hph-ci-3")])
+        self.assertEqual(steward.host_actions([host("hph-ci", 52)], BACKED, RULES, state, T(15), SLOTS), [])
+        # Nothing recorded as paused (the steward didn't confirm it): headroom has nothing to resume.
         self.assertEqual(steward.host_actions([host("hph-ci", 16)], BACKED, RULES, state, T(40)), [])
         state["hosts"]["hph-ci"]["paused"].append("hph-ci-7")
         a = steward.host_actions([host("hph-ci", 16)], BACKED, RULES, state, T(70))
         self.assertEqual([(x["do"], x["runner"]) for x in a], [("resume-slot", "hph-ci-7")])
+
+    def test_pause_never_takes_a_busy_slot_or_goes_below_the_minimum(self):
+        T = lambda m: self.t + self.dt.timedelta(minutes=m)
+        busy = [runner("hph-ci-%d" % i, ["hph-ci"], busy=True) for i in range(1, 5)]
+        state = {}
+        steward.host_actions([host("hph-ci", 52)], BACKED, RULES, state, T(0), busy)
+        a = steward.host_actions([host("hph-ci", 52)], BACKED, RULES, state, T(10), busy)
+        self.assertEqual([x["do"] for x in a], ["report"])
+        two = [runner("hph-ci-1", ["hph-ci"], busy=True), runner("hph-ci-2", ["hph-ci"])]
+        state = {}
+        steward.host_actions([host("hph-ci", 52)], BACKED, RULES, state, T(0), two)
+        a = steward.host_actions([host("hph-ci", 52)], BACKED, RULES, state, T(10), two)
+        self.assertEqual([x["do"] for x in a], ["report"])  # 2 online, min 2: pausing one would go below
+        state = {}
+        steward.host_actions([host("hph-ci", 52)], BACKED, RULES, state, T(0), None)
+        a = steward.host_actions([host("hph-ci", 52)], BACKED, RULES, state, T(10), None)
+        self.assertEqual([x["do"] for x in a], ["report"])  # runners unknown: never a blind pause
 
     def test_a_disk_only_red_is_a_report_not_a_pause(self):
         state = {}
@@ -348,6 +382,21 @@ class CapacityRepo(unittest.TestCase):
             self.assertEqual([c for c in calls if "state=closed" in c or "/jobs" in c], [])
         finally:
             steward.paged, steward.api = old
+
+
+class Sampling(unittest.TestCase):
+    def test_sampled_job_counts_are_scaled_to_the_whole_queue(self):
+        queued = [run(i, "CI", "b", "b1", wid=i, created="2026-11-19T%02d:00:00Z" % i) for i in range(1, 11)]
+        old = steward.paged, steward.api
+        steward.paged = lambda path, key=None, cap=1000, per_page=100: queued if "actions/runs" in path else (
+            OPEN if "/pulls" in path else [])
+        steward.api = lambda path: {"jobs": [{"status": "queued", "labels": ["hph-ci"],
+                                              "created_at": "2026-11-19T01:00:00Z"}]}
+        try:
+            rep = steward.capacity_repo("o/r", RULES, 2, {})
+        finally:
+            steward.paged, steward.api = old
+        self.assertEqual(rep["_labels"], {("hph-ci",): 10})  # 2 sampled runs of 10, one job each
 
 
 if __name__ == "__main__":

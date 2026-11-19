@@ -73,7 +73,19 @@
       "headroom_load_per_core": 0.8,
       "headroom_mem_pct": 75,
       "cooldown_minutes": 20,
-      "min_slots": 2
-    }
+      "min_slots": 2,
+      "runners": {
+        "hph-ci": [
+          "hph-ci-"
+        ],
+        "davids-mac-mini": [
+          "davids-mac-mini-"
+        ],
+        "colima": [
+          "davids-mac-mini-dind-"
+        ]
+      }
+    },
+    "backed_up_note": "backed_up_jobs counts queued jobs in the whole queue; sampled job counts are scaled up to it"
   }
 }

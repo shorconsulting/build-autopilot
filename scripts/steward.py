@@ -633,7 +633,7 @@ def host_pressure(h, rules):
     return "ok", m
 
 
-def host_actions(hosts, pools, rules, state, now):
+def host_actions(hosts, pools, rules, state, now, runners=None):
     """Keep each runner box inside its CPU and memory limits, one slot at a time.
     red (load or memory, two passes in a row) -> pause-slot: stop one IDLE runner slot on that box (its service or
                  container; never a busy one, never below `min_slots`). The steward records which slot with
@@ -674,11 +674,17 @@ def host_actions(hosts, pools, rules, state, now):
             st["red_seen"] = first or stamp
             if not first or cooling:
                 continue  # first red reading: confirm on the next pass
-            acts.append({"do": "pause-slot", "needs_person": False, "host": h["host"], "metrics": m,
-                         "min_slots": t["min_slots"],
-                         "why": "%s is over its limit (load %.2f per core, memory %d%%): stop one idle runner slot on "
-                                "it, never a busy one and never below %d running, then record it with capacity-note"
-                                % (h["host"], m["load_per_core"], m["mem_pct"], t["min_slots"])})
+            pick, online = pick_idle_slot(h["host"], runners, rules, st["paused"])
+            if pick is None:
+                st["changed"] = stamp
+                acts.append({"do": "report", "needs_person": False, "host": h["host"], "metrics": m,
+                             "why": "%s is over its limit (load %.2f per core, memory %d%%) but no slot can be paused "
+                                    "(%s)" % (h["host"], m["load_per_core"], m["mem_pct"], online)})
+                continue
+            acts.append({"do": "pause-slot", "needs_person": False, "host": h["host"], "runner": pick, "metrics": m,
+                         "why": "%s is over its limit (load %.2f per core, memory %d%%): stop idle runner %s (%d online "
+                                "on it), then record it with capacity-note --paused %s"
+                                % (h["host"], m["load_per_core"], m["mem_pct"], pick, online, pick)})
             st["changed"] = stamp
             continue
         st.pop("red_seen", None)
@@ -710,6 +716,26 @@ def hosts_missing(spec, hosts, state, rules, now):
     paused = paused_runners(state)
     return [{"do": "report", "needs_person": bool(paused), "host": spec,
              "why": "no host readings from %s%s" % (spec, "; still paused: %s" % ", ".join(paused) if paused else "")}]
+
+
+def pick_idle_slot(host, runners, rules, paused):
+    """The one runner to pause on `host`: online, not busy, not already paused, and only if at least
+    `capacity.host.min_slots` would stay online on that box. Runners belong to a box by name prefix
+    (`capacity.host.runners`: {box: [prefix, ...]}). Returns (name or None, online count or a reason)."""
+    t = rules["capacity"]["host"]
+    prefixes = [x.lower() for x in (t.get("runners") or {}).get(host, [])]
+    if runners is None:
+        return None, "runners not readable from here"
+    if not prefixes:
+        return None, "no runner prefixes for this box in capacity.host.runners"
+    mine = [r for r in runners if any((r.get("name") or "").lower().startswith(p) for p in prefixes)]
+    online = [r for r in mine if r.get("status") == "online"]
+    idle = [r for r in online if not r.get("busy") and r.get("name") not in paused]
+    if len(online) - 1 < t["min_slots"]:
+        return None, "only %d online, minimum %d" % (len(online), t["min_slots"])
+    if not idle:
+        return None, "every online slot is busy"
+    return sorted(r["name"] for r in idle)[-1], len(online)
 
 
 def paused_runners(state):
@@ -773,9 +799,16 @@ def capacity_actions(stale, findings, rules):
         elif k == "idle-but-queued":
             acts.append({"do": "restart-runner", "needs_person": False, "runner": ", ".join(f["idle"]),
                          "why": "shown idle while %d jobs it fits are queued: hung; restart it" % f["queued_jobs"]})
-        elif k in ("pool-down", "no-runner-for-labels"):
+        elif k == "pool-down":
             acts.append({"do": "restore-pool", "needs_person": False, "labels": f["labels"],
-                         "why": "%d jobs queued and no runner online that fits %s" % (f["queued_jobs"], f["labels"])})
+                         "why": "%d jobs queued and every runner that fits %s is offline: restart them"
+                                % (f["queued_jobs"], f["labels"])})
+        elif k == "no-runner-for-labels":
+            # Nothing to restart: a mistyped runs-on, a larger-runner label, or a runner never registered.
+            acts.append({"do": "report", "needs_person": True, "labels": f["labels"], "repos": f.get("repos"),
+                         "why": "%d jobs in %s ask for %s and no runner has those labels: fix runs-on or register a "
+                                "runner" % (f["queued_jobs"], ", ".join(f.get("repos") or []) or "these repos",
+                                            f["labels"])})
         elif k == "idle-capacity-unreachable":
             acts.append({"do": "reroute", "needs_person": False, "idle": f["idle"], "backed_up": f["backed_up"],
                          "why": "runners idle while other pools are backed up: move the light jobs (auto-merge, "
@@ -845,7 +878,8 @@ def capacity_repo(repo, rules, sample_runs, cache=None, lean=False):
     oldest_first = sorted(live, key=lambda r: r.get("created_at") or "")
     half = max(1, sample_runs // 2)
     sample = oldest_first[:half] + [r for r in oldest_first[-half:] if r not in oldest_first[:half]]
-    for r in ([] if lean else sample):
+    sample = [] if lean else sample
+    for r in sample:
         try:
             jobs = (api("repos/%s/actions/runs/%s/jobs?per_page=100" % (repo, r["id"])) or {}).get("jobs", [])
         except GhError:
@@ -857,6 +891,11 @@ def capacity_repo(repo, rules, sample_runs, cache=None, lean=False):
                 waited = (now - parse_time(j.get("created_at"))).total_seconds() / 60 if j.get("created_at") else None
                 if waited is not None:
                     oldest[k] = max(oldest.get(k, 0), round(waited))
+    # The jobs were read from a sample of the queued runs: scale the counts to the whole queue, so they compare
+    # with `backed_up_jobs` (a count of queued jobs in the whole queue).
+    if sample and len(live) > len(sample):
+        f = len(live) / len(sample)
+        labels = {k: int(round(v * f)) for k, v in labels.items()}
     first = min((parse_time(r.get("created_at")) for r in live), default=None)
     try:  # repo-level runners also serve these jobs; the org list doesn't show them
         repo_runners = paged("repos/%s/actions/runners" % repo, key="runners")
@@ -994,7 +1033,7 @@ def cmd_capacity(args):
         rep["actions"] = capacity_actions(stale, [], rules)
         out["repos"].append(rep)
     now = dt.datetime.now(dt.timezone.utc)
-    all_pools = []
+    all_pools, seen_runners = [], []
     for owner, aggs in by_owner.items():
         try:
             org_runners = paged("orgs/%s/actions/runners" % owner, key="runners")
@@ -1004,6 +1043,8 @@ def cmd_capacity(args):
             out["errors"].append({"owner": owner, "error": "org runners not readable: %s" % exc})
             org_runners = None
         groups = runner_groups(owner) if org_runners is not None else None
+        if org_runners is not None:
+            seen_runners.extend(org_runners)
         res = owner_pools(owner, org_runners, aggs, state, rules, now, lean, groups)
         if res is None:
             continue
@@ -1018,7 +1059,7 @@ def cmd_capacity(args):
             out["hosts"].append(dict(host=h.get("host"), **dict(zip(("level", "metrics"), host_pressure(h, rules)))))
         except (AttributeError, TypeError, ValueError, ZeroDivisionError, KeyError):
             out["hosts"].append({"host": str(h)[:60], "level": "unknown", "metrics": {}})
-    out["host_actions"] = host_actions(hosts, all_pools, rules, state, now) + hosts_missing(args.hosts, hosts, state,
+    out["host_actions"] = host_actions(hosts, all_pools, rules, state, now, seen_runners or None) + hosts_missing(args.hosts, hosts, state,
                                                                                         rules, now)
     _write_state(args.state, state)
     text = json.dumps(out, indent=2)

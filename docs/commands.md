@@ -327,8 +327,10 @@ reroutes, so idle runners with other labels stay idle while a pool queues for ho
    - `pause-slot` and `resume-slot` (from `--hosts`, the github-throughput dashboard's box health; run on the
      person's computer with `--hosts http://127.0.0.1:4517/api/data`): keep every runner box (Hetzner, the Mac mini
      and its Colima VM) inside its limits in `capacity.host`. On `pause-slot`, stop ONE idle runner slot on that box
-     (its service or container; never a busy one, never below `min_slots` running, never delete a registration),
-     then record it: `steward.py capacity-note --host <box> --paused <runner>` (record nothing if none could be
+     the action names (its service or container). The check itself picks only an idle, online slot on that box
+     (`capacity.host.runners` maps each box to its runner name prefixes) and never one that would leave fewer than
+     `min_slots` online; if none qualifies it is a `report`. Check the runner is still idle just before stopping it.
+     Then record it: `steward.py capacity-note --host <box> --paused <runner>` (record nothing if none could be
      paused). Paused slots are left out of the offline and pool checks, so they are never restarted by mistake. On
      `resume-slot`, start the named runner, then `capacity-note --host <box> --resumed <runner>`. Pausing needs red
      load or memory on two passes in a row; red disk alone is a `report` (prune Docker or the Colima disk). One
