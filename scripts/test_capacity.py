@@ -40,8 +40,14 @@ class StaleRuns(unittest.TestCase):
     def test_closed_superseded_and_duplicates(self):
         queued = [run(1, "CI", "gone", "x"), run(2, "CI", "a", "a1"), run(3, "CI", "a", "a2"),
                   run(4, "Auto-merge", "b", "b1"), run(5, "Auto-merge", "b", "b1"), run(6, "Auto-merge", "b", "b1")]
-        got = {i: why for i, why, _ in steward.stale_runs(queued, OPEN, closed_at=CLOSED, dedupe={"Auto-merge"})}
+        got = {i: why for i, why, _ in steward.stale_runs(queued, OPEN, closed_at=CLOSED, dedupe={"Auto-merge", "CI"})}
         self.assertEqual(got, {1: "closed", 2: "superseded", 4: "duplicate", 5: "duplicate"})
+
+    def test_an_old_head_run_is_kept_unless_the_same_ci_is_queued_for_the_new_head(self):
+        # A label-triggered run of a workflow not in the dedupe list is not started again by the push: keep it.
+        queued = [run(1, "Label sync", "a", "a1"), run(2, "Label sync", "a", "a2"),
+                  run(3, "CI", "a", "a1")]  # no CI queued for a2 (it may already have finished): keep it too
+        self.assertEqual(steward.stale_runs(queued, OPEN, dedupe={"CI"}), [])
 
     def test_only_listed_workflows_are_deduplicated(self):
         queued = [run(4, "Label sync", "b", "b1"), run(5, "Label sync", "b", "b1"), run(6, "CI", "b", "b1"),
@@ -259,6 +265,16 @@ class Hosts(unittest.TestCase):
         self.assertEqual(steward.host_pressure(host("h", 30), RULES)[0], "ok")         # 0.94 per core
         self.assertEqual(steward.host_pressure(host("h", 16), RULES)[0], "headroom")
         self.assertEqual(steward.host_pressure({"host": "h", "ok": False}, RULES)[0], "unknown")
+        partial = dict(host("h", 16))
+        partial.pop("MemAvailable")
+        self.assertEqual(steward.host_pressure(partial, RULES)[0], "unknown")  # not "100% memory used"
+
+    def test_a_pause_not_yet_confirmed_still_protects_the_slot_from_a_restart(self):
+        state, T = {}, lambda m: self.t + self.dt.timedelta(minutes=m)
+        steward.host_actions([host("hph-ci", 52)], BACKED, RULES, state, T(0))
+        steward.host_actions([host("hph-ci", 52)], BACKED, RULES, state, T(10), SLOTS)
+        self.assertEqual(steward.paused_runners(state, T(20)), ["hph-ci-3"])
+        self.assertEqual(steward.paused_runners(state, T(10 + 60 * steward.PENDING_PAUSE_HOURS)), [])
 
     def test_pause_needs_two_red_passes_then_resume_with_headroom(self):
         state, T = {}, lambda m: self.t + self.dt.timedelta(minutes=m)

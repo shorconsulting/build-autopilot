@@ -447,7 +447,10 @@ def stale_runs(queued, open_prs, keep=None, closed_at=None, dedupe=None):
                   queued runs for an open pull request), AND the run was created before its pull request closed
                   (`closed_at`: {(head repo, branch): ISO time}). A run the close itself started (post-merge
                   bookkeeping on `closed`) is created after it, so it is kept; with no close time known it is kept.
-      superseded  an open pull request has this head branch but its head is another commit;
+      superseded  an open pull request has this head branch but its head is another commit, the workflow is in
+                  `dedupe` (CI that does the same thing whatever started it) and a run of that same workflow is
+                  already queued for the new head. A run a label, a review or another workflow started, of any
+                  other workflow, is not started again by a push, so it is kept;
       duplicate   an older queued run of the same workflow file (workflow_id), event, head and pull request, only for
                   workflows in `dedupe` (`capacity.dedupe_workflows`): ones known to do the same thing whatever
                   action or label started them (CI over the head). Others may branch on the event, so never.
@@ -468,6 +471,8 @@ def stale_runs(queued, open_prs, keep=None, closed_at=None, dedupe=None):
         return r.get("event") in PR_EVENTS and not keep.search(r.get("name") or "")
 
     pr_ci = {r.get("name") for r in queued if pr_run(r) and r.get("head_sha") in open_shas}
+    on_head = {(r.get("workflow_id") or r.get("name"), r.get("head_sha")) for r in queued
+               if pr_run(r) and r.get("head_sha") in open_shas}
     out, newest = [], {}
     for r in queued:
         if not pr_run(r):
@@ -486,7 +491,9 @@ def stale_runs(queued, open_prs, keep=None, closed_at=None, dedupe=None):
             else:
                 out.append((r["id"], "duplicate", r.get("name")))
         elif k in heads:
-            out.append((r["id"], "superseded", r.get("name")))
+            if (r.get("event") != "workflow_run" and r.get("name") in dedupe
+                    and (r.get("workflow_id") or r.get("name"), heads[k]) in on_head):
+                out.append((r["id"], "superseded", r.get("name")))
         elif r.get("event") != "workflow_run" and r.get("name") in pr_ci:
             closed = parse_time(closed_at.get(k))
             made = parse_time(r.get("created_at"))
@@ -633,10 +640,11 @@ def host_pressure(h, rules):
     """'red', 'headroom' or 'ok' for one runner box from the github-throughput dashboard's host health
     (`/api/data` field `hosts`: cpus, load5, MemTotal, MemAvailable, disks). Thresholds: `capacity.host`."""
     t = rules["capacity"]["host"]
-    if not h.get("ok") or not h.get("cpus") or not h.get("MemTotal"):
-        return "unknown", {}
-    load = (h.get("load5") or 0) / h["cpus"]
-    mem = 1 - (h.get("MemAvailable") or 0) / h["MemTotal"]
+    if (not h.get("ok") or not h.get("cpus") or not h.get("MemTotal") or h.get("MemAvailable") is None
+            or h.get("load5") is None):
+        return "unknown", {}  # a partial reading must not look like 100% memory or zero load
+    load = h["load5"] / h["cpus"]
+    mem = 1 - h["MemAvailable"] / h["MemTotal"]
     disk = max([(d.get("used") or 0) / d["size"] for d in h.get("disks") or [] if d.get("size")] or [0])
     m = {"load_per_core": round(load, 2), "mem_pct": round(mem * 100), "disk_pct": round(disk * 100)}
     if load >= t["red_load_per_core"] or mem * 100 >= t["red_mem_pct"] or disk * 100 >= t["red_disk_pct"]:
@@ -699,6 +707,7 @@ def host_actions(hosts, pools, rules, state, now, runners=None):
                                 "on it), then record it with capacity-note --paused %s"
                                 % (h["host"], m["load_per_core"], m["mem_pct"], pick, online, pick)})
             st["changed"] = stamp
+            st.setdefault("pending_pause", {})[pick] = stamp
             continue
         st.pop("red_seen", None)
         slot_labels = {}
@@ -769,15 +778,29 @@ def pick_idle_slot(host, runners, rules, paused):
     return sorted(r["name"] for r in idle)[-1], len(online)
 
 
-def paused_runners(state):
-    return [n for st in (state.get("hosts") or {}).values() for n in (st.get("paused") or [])
-            if isinstance(st.get("paused"), list)]
+PENDING_PAUSE_HOURS = 4
+
+
+def paused_runners(state, now=None):
+    """Slots paused on purpose: those recorded with capacity-note --paused, plus any a pause-slot action named in
+    the last PENDING_PAUSE_HOURS that was never confirmed (the session stopped, or the note couldn't get the
+    lock), so a slot the steward meant to stop is never restarted as 'offline'."""
+    now = now or dt.datetime.now(dt.timezone.utc)
+    out = []
+    for st in (state.get("hosts") or {}).values():
+        if isinstance(st.get("paused"), list):
+            out.extend(st["paused"])
+        for n, when in (st.get("pending_pause") or {}).items():
+            t = parse_time(when)
+            if t and (now - t).total_seconds() < PENDING_PAUSE_HOURS * 3600 and n not in out:
+                out.append(n)
+    return out
 
 
 def cmd_capacity_note(args):
     """Record what the steward did on a box, so the next pass knows which slots are paused on purpose. Waits up to
-    two minutes for a running capacity pass, so neither overwrites the other's state."""
-    lock, deadline = None, time.time() + 120
+    as long as the stale-lock window for a running capacity pass, so neither overwrites the other's state."""
+    lock, deadline = None, time.time() + LOCK_STALE_MINUTES * 60 + 30
     while lock is None:
         lock = _take_lock(args.state)
         if lock is None:
@@ -795,6 +818,8 @@ def cmd_capacity_note(args):
             st["paused"].append(args.paused)
         if args.resumed and args.resumed in st["paused"]:
             st["paused"].remove(args.resumed)
+        for n in (args.paused, args.resumed):
+            (st.get("pending_pause") or {}).pop(n, None)
         _write_state(args.state, state)
     finally:
         try:
@@ -1065,7 +1090,7 @@ def owner_pools(owner, org_runners, aggs, state, rules, now, lean, groups=None):
     cap = rules["capacity"]
     if lean or not any(a["labels"] for a in aggs.values()):
         return None
-    paused = paused_runners(state)
+    paused = paused_runners(state, now)
     pools, merged = [], {}
     for repo, a in sorted(aggs.items()):
         if not a["labels"] or (org_runners is None and not a["runners"]):
