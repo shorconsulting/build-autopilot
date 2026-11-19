@@ -81,8 +81,16 @@ def paged(path, key=None, cap=1000, per_page=100):
 
 
 def load_rules(path=RULES_PATH):
+    """The rules file; a custom one without a `capacity` block (or part of it) gets the built-in defaults."""
     with open(path, encoding="utf-8") as fh:
-        return json.load(fh)
+        rules = json.load(fh)
+    if os.path.abspath(path) != os.path.abspath(RULES_PATH):
+        with open(RULES_PATH, encoding="utf-8") as fh:
+            base = json.load(fh).get("capacity") or {}
+        cap = dict(base, **(rules.get("capacity") or {}))
+        cap["host"] = dict(base.get("host") or {}, **((rules.get("capacity") or {}).get("host") or {}))
+        rules["capacity"] = cap
+    return rules
 
 
 def parse_time(s):

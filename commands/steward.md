@@ -1,5 +1,5 @@
 ---
-description: "The always-on steward: sweep tracked repos for red PRs, stalled CI, drafts and leftover work and resume it (--install: hourly sweep and the daily 5 pm questions digest)"
+description: "The always-on steward: sweep tracked repos for red PRs, stalled CI, drafts and leftover work and resume it (--capacity: cancel stale queued runs and keep runners and boxes healthy every 10 minutes; --install: hourly sweep, the 10-minute capacity check and the daily 5 pm questions digest)"
 argument-hint: "[owner/repo ...] [--install | --dry-run | --capacity]"
 ---
 

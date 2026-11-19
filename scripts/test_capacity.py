@@ -527,6 +527,18 @@ class Sampling(unittest.TestCase):
         self.assertEqual(rep["_labels"], {("hph-ci",): 10})  # 2 sampled runs of 10, one job each
 
 
+class Rules(unittest.TestCase):
+    def test_a_custom_rules_file_without_capacity_gets_the_defaults(self):
+        import json, tempfile
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            json.dump({"capacity": {"max_cancels": 5, "host": {"min_slots": 4}}}, fh)
+        r = steward.load_rules(fh.name)
+        os.unlink(fh.name)
+        self.assertEqual((r["capacity"]["max_cancels"], r["capacity"]["host"]["min_slots"]), (5, 4))
+        self.assertEqual(r["capacity"]["sample_runs"], RULES["capacity"]["sample_runs"])
+        self.assertEqual(r["capacity"]["host"]["red_mem_pct"], RULES["capacity"]["host"]["red_mem_pct"])
+
+
 class StateFile(unittest.TestCase):
     def test_state_is_written_atomically_and_one_pass_holds_the_lock(self):
         import tempfile
