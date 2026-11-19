@@ -287,9 +287,13 @@ with this plugin and build-questions installed and GitHub access to the tracked 
    all-linked`, `--steps`, `--task-id` and `--where cloud`. The run ends with `PushNotification`, which reaches the
    person's phone through the Claude app; say in one line that notifications must be allowed for the Claude app on
    the phone, and that the digest also goes by the build-questions `email_method` if one is set.
-3. The capacity check: a trigger with the prompt `/build-autopilot:steward --capacity`, at `capacity.cron` (10
-   minutes) where the scheduler allows it, else hourly (cloud scheduled tasks run at most hourly). Replace an existing
-   one with `update_trigger`.
+3. The capacity check, in two parts. In the cloud, a trigger with the prompt `/build-autopilot:steward --capacity`,
+   hourly (cloud scheduled tasks run at most hourly): it can only find and cancel stale runs, because cloud sessions
+   can't read runners or reach the boxes and don't keep `~/.build-autopilot/capacity-state.json`. Runner and host
+   actions (restarts, pause and resume, reroutes) only work from the person's computer, where the state file
+   persists and the dashboard's box health is at `http://127.0.0.1:4517/api/data`: run it there every
+   `capacity.cron` (10 minutes) as a scheduled task on that computer, with `--hosts` set. Replace an existing one
+   instead of adding a second.
 4. Reply with the schedules in the person's local time and how to stop them (`delete_trigger`).
 
 **`--capacity`** (every 10 minutes; build rule 3, "a stalled check is restarted, not waited on", applied to the

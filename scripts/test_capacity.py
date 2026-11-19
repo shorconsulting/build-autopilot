@@ -244,6 +244,53 @@ class Hosts(unittest.TestCase):
             self.assertEqual(steward.paused_runners(steward._read_state(path)), [])
 
 
+class Owners(unittest.TestCase):
+    def setUp(self):
+        import datetime as dt
+        self.dt, self.t = dt, dt.datetime(2026, 11, 19, 14, 0, tzinfo=dt.timezone.utc)
+
+    def agg(self, labels=None, runners=(), oldest=60):
+        labels = {SH: 30} if labels is None else labels
+        return {"labels": labels, "oldest": {k: oldest for k in labels}, "runners": list(runners)}
+
+    def test_a_lean_pass_keeps_restart_counts(self):
+        org = [runner("dind-1", ["self-hosted", "hph-ci"], status="offline")]
+        state, dos = {}, []
+        for i in range(10):
+            lean = i % 2 == 1  # every other pass is lean: it must not reset anything
+            res = steward.owner_pools("o", org, {"o/r": self.agg()}, state, RULES,
+                                      self.t + self.dt.timedelta(minutes=40 * i), lean)
+            if res:
+                dos += [a["do"] for a in steward.capacity_actions([], res[2], RULES)]
+        self.assertEqual(dos.count("restart-runner"), 3)
+        self.assertIn("report", dos)
+
+    def test_a_repo_level_runner_only_serves_its_repo(self):
+        mine = runner("repo-b-runner", ["self-hosted", "hph-ci"])  # idle, belongs to o/b
+        aggs = {"o/a": self.agg(), "o/b": self.agg(labels={})}
+        aggs["o/b"]["runners"] = [mine]
+        org = [runner("hph-ci-1", ["self-hosted", "hph-ci"], busy=True)]
+        _, f, _ = steward.owner_pools("o", org, aggs, {}, RULES, self.t, False)
+        self.assertNotIn("idle-but-queued", [x["kind"] for x in f])  # o/a's jobs can't use o/b's runner
+
+    def test_unreadable_org_runners_never_read_as_a_dead_pool(self):
+        res = steward.owner_pools("o", None, {"o/a": self.agg()}, {}, RULES, self.t, False)
+        self.assertEqual(res[1], [])
+        with_own = {"o/a": self.agg(runners=[runner("own", ["self-hosted", "hph-ci"], status="offline")])}
+        _, f, _ = steward.owner_pools("o", None, with_own, {}, RULES, self.t, False)
+        self.assertEqual([x["kind"] for x in f], ["runner-offline"])
+
+    def test_unknown_host_and_missing_readings_report_once_per_cooldown(self):
+        state, T = {}, lambda m: self.t + self.dt.timedelta(minutes=m)
+        down = [{"host": "mini", "ok": False, "error": "timeout"}]
+        self.assertEqual(len(steward.host_actions(down, [], RULES, state, T(0))), 1)
+        self.assertEqual(steward.host_actions(down, [], RULES, state, T(10)), [])
+        state["hosts"]["hph-ci"] = {"paused": ["hph-ci-7"]}
+        a = steward.hosts_missing("http://127.0.0.1:4517/api/data", [], state, RULES, T(0))
+        self.assertTrue(a[0]["needs_person"])
+        self.assertEqual(steward.hosts_missing("http://127.0.0.1:4517/api/data", [], state, RULES, T(10)), [])
+
+
 class CapacityRepo(unittest.TestCase):
     def test_closed_lookups_are_cached_encoded_and_skipped_when_lean(self):
         calls = []
