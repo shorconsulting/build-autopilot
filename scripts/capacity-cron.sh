@@ -25,7 +25,11 @@ if [ -n "$DRY_RUN" ]; then
 fi
 reports=""
 
-owners="$(grep -v '^[[:space:]]*#' "$CONF/repos" | grep '/' | cut -d/ -f1 | sort -u)"
+owners="$(grep -v '^[[:space:]]*#' "$CONF/repos" | grep '/' | cut -d/ -f1 | sort -u || true)"
+if [ -z "$owners" ]; then
+  echo "no owner/repo lines in $CONF/repos: nothing to check"
+  exit 0
+fi
 for owner in $owners; do
   tok="$CONF/$owner.token"
   if [ ! -s "$tok" ]; then

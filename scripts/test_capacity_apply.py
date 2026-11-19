@@ -33,6 +33,11 @@ class Plan(unittest.TestCase):
 
 
 class Guards(unittest.TestCase):
+    def test_the_cancel_cap_is_per_repo_across_actions(self):
+        r = {"repos": [{"repo": "o/a", "actions": [{"do": "cancel-stale", "runs": [1, 2, 3]},
+                                                   {"do": "cancel-stale", "runs": [4, 5]}]}]}
+        self.assertEqual(len(capacity_apply.plan(r, "", "", max_cancels=4)), 4)
+
     def test_cancels_marked_for_a_person_are_skipped(self):
         r = {"repos": [{"repo": "o/a", "actions": [{"do": "cancel-stale", "runs": [9], "needs_person": True}]}]}
         self.assertEqual(capacity_apply.plan(r, "", ""), [])

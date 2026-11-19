@@ -25,10 +25,13 @@ def plan(report, slot_regex, restart_template, max_cancels=100, seen=None, cance
     Slots are one numbered service per box: on hph-ci, hph-ci-10 and hph-ci-light-10 are both hph-runner@10."""
     out = []
     for rep in (report.get("repos") or []) if cancel else []:
+        left = max_cancels  # per repo, across all of its cancel-stale actions
         for act in rep.get("actions") or []:
             if act.get("do") != "cancel-stale" or act.get("needs_person"):
                 continue
-            for run in (act.get("runs") or [])[:max_cancels]:
+            runs = (act.get("runs") or [])[:max(left, 0)]
+            left -= len(runs)
+            for run in runs:
                 out.append(("cancel", ["gh", "api", "-X", "POST",
                                        "repos/%s/actions/runs/%d/cancel" % (rep["repo"], int(run))],
                             "%s run %s: %s" % (rep["repo"], run, act.get("why", "stale"))))

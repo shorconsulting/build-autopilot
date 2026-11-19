@@ -404,14 +404,17 @@ useradd --system --home /var/lib/build-autopilot --create-home ba-steward
 git clone https://github.com/shorconsulting/build-autopilot /opt/build-autopilot
 git -C /opt/build-autopilot checkout --detach <reviewed commit>   # moving the pin is a person's step
 chown -R root:root /opt/build-autopilot                           # the service user can't change the code
-echo 'ba-steward ALL=(root) NOPASSWD: /usr/bin/systemctl restart hph-runner@*' > /etc/sudoers.d/ba-steward
+install -o root -g root -m 755 /opt/build-autopilot/scripts/restart-runner-slot.sh /usr/local/sbin/restart-runner-slot
+echo 'ba-steward ALL=(root) NOPASSWD: /usr/local/sbin/restart-runner-slot' > /etc/sudoers.d/ba-steward
+# the wrapper accepts one plain slot number and restarts only hph-runner@<n>
+chown root:root /etc/hph-ci/steward && chmod 755 /etc/hph-ci/steward   # root-owned: ba-steward can't edit apply.env
 # /etc/hph-ci/steward/HPortHealth.token, SConsInc.token: owner ba-steward, mode 600
 #   (fine-grained: Actions read/write, Contents and Pull requests read, Self-hosted runners read/write)
 # /etc/hph-ci/steward/repos: one owner/repo per line
-# /etc/hph-ci/steward/apply.env:
+# /etc/hph-ci/steward/apply.env (root:root, mode 644):
 #   SLOT_REGEX='^hph-ci-(?:light-)?([0-9]+)(?:-|$)'   # hph-ci-10 and hph-ci-light-10 are both hph-runner@10
-#   RESTART='sudo -n systemctl restart hph-runner@{slot}'
-#   DRY_RUN=1                                           # first pass only prints; remove it once that looks right
+#   RESTART='sudo -n /usr/local/sbin/restart-runner-slot {slot}'
+#   DRY_RUN=1    # keep until a person has read the first journal output, then remove it
 # systemd: build-autopilot-capacity.service (User=ba-steward, Type=oneshot, ExecStart=.../capacity-cron.sh)
 #          build-autopilot-capacity.timer (OnCalendar=*:0/10)
 ```
