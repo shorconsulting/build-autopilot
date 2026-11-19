@@ -298,12 +298,13 @@ reroutes, so idle runners with other labels stay idle while a pool queues for ho
 
 1. `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/steward.py" capacity --repo A --repo B ... --out <scratchpad>/capacity.json`.
    It is read-only. Per repo it lists the queued runs nobody needs: head superseded, an older duplicate of the same
-   workflow, event and head, or a closed pull request's run of a workflow that is pull-request CI (it also has runs
-   for open PRs). A workflow that only runs when a PR closes is never cancelled, nor anything matching mark-done,
+   workflow file, event, head and pull request, or a closed pull request's run of a workflow that is pull-request CI
+   (it also has runs for open PRs) that was created before the PR closed (a run the close started is kept). A workflow that only runs when a PR closes is never cancelled, nor anything matching mark-done,
    release, deploy, publish, cleanup, backport, notify or preview, or `capacity.keep_after_close`. GitHub-hosted
    label sets are never a pool. A runner finding (offline, hung, pool down) only becomes an action when it held on
    the previous pass too (state in `~/.build-autopilot/capacity-state.json`), and one runner is restarted at most
-   once per `capacity.restart_cooldown_minutes`; idle-while-queued also needs a matching job queued over
+   once per `capacity.restart_cooldown_minutes` and `capacity.max_restarts` times in all before it becomes a
+   `report` for the person; idle-while-queued also needs a matching job queued over
    `capacity.settle_minutes`. Per org, when
    runners can be read, it lists the label pools the queued jobs ask for and these findings: `runner-offline`,
    `pool-down`, `no-runner-for-labels`, `idle-but-queued` (hung), and `idle-capacity-unreachable` (online idle

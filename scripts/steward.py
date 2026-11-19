@@ -428,14 +428,16 @@ def _head_key(repo_full, ref):
     return ((repo_full or "").lower(), ref)
 
 
-def stale_runs(queued, open_prs, keep=None):
+def stale_runs(queued, open_prs, keep=None, closed_at=None):
     """Queued runs nobody needs. Returns [(run_id, reason, workflow)]:
-      closed      no open pull request has this head (repo and branch), AND the workflow is pull-request CI: it also
-                  has queued runs for an open pull request. A workflow that only runs when a PR closes (cleanup,
-                  backport, notify) never has those, so it is never cancelled, whatever its name.
+      closed      no open pull request has this head (repo and branch), the workflow is pull-request CI (it also has
+                  queued runs for an open pull request), AND the run was created before its pull request closed
+                  (`closed_at`: {(head repo, branch): ISO time}). A run the close itself started (post-merge
+                  bookkeeping on `closed`) is created after it, so it is kept; with no close time known it is kept.
       superseded  an open pull request has this head branch but its head is another commit;
-      duplicate   an older queued run of the same workflow, on the same head, from the same event.
+      duplicate   an older queued run of the same workflow file (workflow_id), event, head and pull request.
     `queued` is GitHub's workflow_runs; `open_prs` the open pulls."""
+    closed_at = closed_at or {}
     keep = keep or _keep(None)
     heads, open_shas = {}, set()
     for p in open_prs:
@@ -456,7 +458,8 @@ def stale_runs(queued, open_prs, keep=None):
             continue
         sha, k = r.get("head_sha"), key(r)
         if sha in open_shas:
-            dkey = (r.get("name"), r.get("event"), sha)
+            dkey = (r.get("workflow_id") or r.get("name"), r.get("event"), sha,
+                    tuple(sorted(p.get("number") for p in r.get("pull_requests") or [])))
             prev = newest.get(dkey)
             if prev is None or r["id"] > prev:
                 if prev is not None:
@@ -467,7 +470,10 @@ def stale_runs(queued, open_prs, keep=None):
         elif k in heads:
             out.append((r["id"], "superseded", r.get("name")))
         elif r.get("event") != "workflow_run" and r.get("name") in pr_ci:
-            out.append((r["id"], "closed", r.get("name")))
+            closed = parse_time(closed_at.get(k))
+            made = parse_time(r.get("created_at"))
+            if closed and made and made < closed:
+                out.append((r["id"], "closed", r.get("name")))
     return out
 
 
@@ -534,27 +540,39 @@ def pool_report(runners, queued_labels, min_queue, oldest_minutes=None, settle_m
     return pools, uniq
 
 
-def settle(findings, state, now, cooldown_minutes):
+def settle(findings, state, now, cooldown_minutes, max_restarts=3):
     """Act on a runner only when the finding held on the previous pass too, and not again within the cooldown.
     `state` (kept between passes): {"seen": {key: iso time}, "acted": {runner: iso time}}. Returns the findings to
     act on; updates `state` in place."""
-    def k(f):
-        return "%s|%s" % (f["kind"], f.get("runner") or ",".join(f.get("idle") or []) or ",".join(f.get("labels") or []))
+    def names(f):
+        idle = [x["runner"] if isinstance(x, dict) else x for x in f.get("idle") or []]
+        return f.get("runner") or ",".join(idle) or ",".join(f.get("labels") or [])
+
     prev = state.get("seen", {})
     acted = state.setdefault("acted", {})
+    tries = state.setdefault("restarts", {})
     keep, seen = [], {}
     for f in findings:
-        key = k(f)
+        key = "%s|%s" % (f["kind"], names(f))
         seen[key] = prev.get(key) or now.strftime("%Y-%m-%dT%H:%M:%SZ")
         if f["kind"] in ("runner-offline", "idle-but-queued", "pool-down"):
             if key not in prev:
                 continue  # first sighting: wait for the next pass
-            names = f.get("runner") or ",".join(f.get("idle") or []) or key
-            last = parse_time(acted.get(names))
+            if tries.get(key, 0) >= max_restarts:
+                # Restarting hasn't cleared it (wrong runner group, a dead machine): stop churning, tell the person.
+                keep.append(dict(f, escalate=True, restarts=tries[key]))
+                continue
+            last = parse_time(acted.get(key))
             if last and (now - last).total_seconds() < cooldown_minutes * 60:
                 continue
-            acted[names] = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+            acted[key] = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+            tries[key] = tries.get(key, 0) + 1
         keep.append(f)
+    # A finding that cleared resets its count.
+    for key in list(tries):
+        if key not in seen:
+            tries.pop(key)
+            acted.pop(key, None)
     state["seen"] = seen
     return keep
 
@@ -568,6 +586,12 @@ def capacity_actions(stale, findings, rules):
                             % (len(stale), ", ".join("%s %d" % kv for kv in sorted(_count(s[1] for s in stale).items())))})
     for f in findings:
         k = f["kind"]
+        if f.get("escalate"):
+            acts.append({"do": "report", "needs_person": True, "finding": k,
+                         "runner": f.get("runner") or f.get("idle") or f.get("labels"),
+                         "why": "%s is still there after %d restarts: a restart can't fix it (runner group, labels, "
+                                "or a dead machine). Stopped restarting; it needs a look." % (k, f["restarts"])})
+            continue
         if k == "runner-offline":
             acts.append({"do": "restart-runner", "needs_person": False, "runner": f["runner"],
                          "why": "offline with jobs queued for its labels: restart its service or container on its "
@@ -596,7 +620,21 @@ def _count(xs):
 def capacity_repo(repo, rules, sample_runs):
     queued = paged("repos/%s/actions/runs?status=queued" % repo, key="workflow_runs", cap=2000)
     open_prs = paged("repos/%s/pulls?state=open" % repo, cap=2000)
-    stale = stale_runs(queued, open_prs, _keep(rules))
+    open_keys = {_head_key((p["head"].get("repo") or {}).get("full_name"), p["head"].get("ref")) for p in open_prs}
+    closed_at = {}
+    candidates = {(r.get("head_repository") or {}).get("full_name") and
+                  _head_key(r["head_repository"]["full_name"], r.get("head_branch"))
+                  for r in queued if r.get("event") in PR_EVENTS}
+    for key in sorted(k for k in candidates if k and k not in open_keys)[:rules["capacity"]["max_close_lookups"]]:
+        full, branch = key
+        try:
+            closed = api("repos/%s/pulls?state=closed&head=%s:%s&per_page=5" % (repo, full.split("/")[0], branch)) or []
+        except GhError:
+            continue
+        times = [p.get("closed_at") for p in closed if p.get("closed_at")]
+        if times:
+            closed_at[key] = max(times)
+    stale = stale_runs(queued, open_prs, _keep(rules), closed_at)
     stale_ids = {s[0] for s in stale}
     labels, oldest = {}, {}
     now = dt.datetime.now(dt.timezone.utc)
@@ -676,7 +714,8 @@ def cmd_capacity(args):
             continue
         pools, findings = pool_report(runners, agg["labels"], cap["backed_up_jobs"], agg["oldest"],
                                       cap["settle_minutes"])
-        ready = settle(findings, state.setdefault(owner, {}), now, cap["restart_cooldown_minutes"])
+        ready = settle(findings, state.setdefault(owner, {}), now, cap["restart_cooldown_minutes"],
+                       cap["max_restarts"])
         out["owners"].append({"owner": owner, "pools": pools, "findings": findings,
                               "actions": capacity_actions([], ready, rules)})
     _write_state(args.state, state)

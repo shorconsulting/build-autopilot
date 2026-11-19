@@ -13,9 +13,13 @@ import steward  # noqa: E402
 RULES = steward.load_rules()
 
 
-def run(i, name, branch, sha, event="pull_request", repo="o/r"):
-    return {"id": i, "name": name, "head_branch": branch, "head_sha": sha, "event": event,
+def run(i, name, branch, sha, event="pull_request", repo="o/r", created="2026-11-19T10:00:00Z", wid=None, prs=()):
+    return {"id": i, "name": name, "head_branch": branch, "head_sha": sha, "event": event, "created_at": created,
+            "workflow_id": wid or name, "pull_requests": [{"number": n} for n in prs],
             "head_repository": {"full_name": repo}}
+
+
+CLOSED = {("o/r", "gone"): "2026-11-19T12:00:00Z", ("o/r", "gone2"): "2026-11-19T12:00:00Z"}
 
 
 def runner(name, labels, status="online", busy=False, rid=1):
@@ -34,8 +38,24 @@ class StaleRuns(unittest.TestCase):
     def test_closed_superseded_and_duplicates(self):
         queued = [run(1, "CI", "gone", "x"), run(2, "CI", "a", "a1"), run(3, "CI", "a", "a2"),
                   run(4, "Auto-merge", "b", "b1"), run(5, "Auto-merge", "b", "b1"), run(6, "Auto-merge", "b", "b1")]
-        got = {i: why for i, why, _ in steward.stale_runs(queued, OPEN)}
+        got = {i: why for i, why, _ in steward.stale_runs(queued, OPEN, closed_at=CLOSED)}
         self.assertEqual(got, {1: "closed", 2: "superseded", 4: "duplicate", 5: "duplicate"})
+
+    def test_a_run_the_close_itself_started_is_kept(self):
+        queued = [run(1, "CI", "gone", "x", created="2026-11-19T12:00:05Z"), run(2, "CI", "b", "b1")]
+        self.assertEqual(steward.stale_runs(queued, OPEN, closed_at=CLOSED), [])
+
+    def test_a_closed_run_with_no_known_close_time_is_kept(self):
+        queued = [run(1, "CI", "gone", "x"), run(2, "CI", "b", "b1")]
+        self.assertEqual(steward.stale_runs(queued, OPEN), [])
+
+    def test_two_workflow_files_with_the_same_name_are_not_duplicates(self):
+        queued = [run(1, "CI", "b", "b1", wid=11), run(2, "CI", "b", "b1", wid=22)]
+        self.assertEqual(steward.stale_runs(queued, OPEN), [])
+
+    def test_stacked_prs_on_one_head_are_not_duplicates(self):
+        queued = [run(1, "CI", "b", "b1", prs=(5,)), run(2, "CI", "b", "b1", prs=(6,))]
+        self.assertEqual(steward.stale_runs(queued, OPEN), [])
 
     def test_newest_duplicate_is_kept_whatever_the_order(self):
         queued = [run(9, "CI", "b", "b1"), run(7, "CI", "b", "b1")]
@@ -63,7 +83,7 @@ class StaleRuns(unittest.TestCase):
     def test_keep_list_is_configurable(self):
         queued = [run(1, "CI", "gone", "x"), run(2, "CI", "b", "b1")]
         keep = steward._keep({"capacity": {"keep_after_close": ["^CI$"]}})
-        self.assertEqual(steward.stale_runs(queued, OPEN, keep), [])
+        self.assertEqual(steward.stale_runs(queued, OPEN, keep, CLOSED), [])
 
 
 class Pools(unittest.TestCase):
@@ -74,7 +94,10 @@ class Pools(unittest.TestCase):
         self.assertEqual(pools[0]["idle"], 0)
         kinds = [x["kind"] for x in f]
         self.assertIn("idle-capacity-unreachable", kinds)
-        acts = steward.capacity_actions([], f, RULES)
+        import datetime as dt
+        state, t0 = {}, dt.datetime(2026, 11, 19, 14, 0, tzinfo=dt.timezone.utc)
+        ready = steward.settle(f, state, t0, 30)  # the finding that crashed settle() before
+        acts = steward.capacity_actions([], ready, RULES)
         self.assertEqual([a["do"] for a in acts], ["reroute"])
 
     def test_offline_runner_is_restarted_and_a_dead_pool_restored(self):
@@ -108,6 +131,19 @@ class Pools(unittest.TestCase):
         self.assertEqual(len(steward.settle(f, state, t0 + dt.timedelta(minutes=50), 30)), 1)
         steward.settle([], state, t0 + dt.timedelta(minutes=60), 30)  # it came back
         self.assertEqual(steward.settle(f, state, t0 + dt.timedelta(minutes=70), 30), [])
+
+    def test_restarts_stop_and_escalate_when_they_do_not_help(self):
+        import datetime as dt
+        f = [{"kind": "runner-offline", "runner": "dind-5", "labels": []}]
+        state, t = {}, dt.datetime(2026, 11, 19, 14, 0, tzinfo=dt.timezone.utc)
+        restarts = 0
+        for i in range(12):
+            ready = steward.settle(f, state, t + dt.timedelta(minutes=40 * i), 30, max_restarts=3)
+            acts = steward.capacity_actions([], ready, RULES)
+            restarts += sum(1 for a in acts if a["do"] == "restart-runner")
+        self.assertEqual(restarts, 3)
+        self.assertEqual(acts[0]["do"], "report")
+        self.assertTrue(acts[0]["needs_person"])
 
     def test_cancel_action_is_capped(self):
         stale = [(i, "closed", "CI") for i in range(RULES["capacity"]["max_cancels"] + 10)]
