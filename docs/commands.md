@@ -324,9 +324,11 @@ reroutes, so idle runners with other labels stay idle while a pool queues for ho
      machines are only reachable from there). Restart only that runner's own service or container. Never delete a
      registration. If the service restart doesn't bring the runner back and the action says `machine_restart_ok: true`
      (no GitHub runner on that `box` is busy), restart the runner VM (`colima restart`) without asking, as Build
-     Autopilot is self-healing, but only after `docker ps` in that VM shows nothing running except runner containers
-     (names matching that box's `capacity.host.runners` prefixes). Anything else running there makes it a `report`
-     with what is running. When `machine_restart_ok` is false, wait for the `busy` runners and try again next pass;
+     Autopilot is self-healing, but only after `docker ps` in that VM (and `colima status`: no k3s) shows nothing running except
+     runner containers (names matching that box's `capacity.host.runners` prefixes); the github-throughput dashboard
+     runs on the person's computer, not in the VM. Anything else running there makes it a `report` with what is
+     running. Drain first: `docker stop` each runner container in the VM, then re-read those runners from the GitHub
+     API; if any picked up a job in between (busy), start the stopped ones again and make it a `report` instead. When `machine_restart_ok` is false, wait for the `busy` runners and try again next pass;
      the restart cap (`capacity.max_restarts`) still turns a runner that never comes back into a `report`. Every VM
      restart and every cancel batch goes in the run's summary afterwards (what, where, why), so the person can see
      what was done. Never reboot a physical server. A box you can't reach is one `report`, naming the machine and
