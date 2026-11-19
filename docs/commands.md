@@ -390,3 +390,33 @@ reroutes, so idle runners with other labels stay idle while a pool queues for ho
 4. Reply (or `PushNotification` in a scheduled run) with one line per repo: open PRs by state, what was re-run,
    handed back and landed, the improvements started, how the health line moved since the day before (open PRs, red
    PRs, main red hours, median hours to merge), and only the items that need a person. Say nothing more when nothing needs one.
+
+### Running the capacity check on a runner box (no agent)
+
+On an always-on box (the Hetzner hph-ci server), `scripts/capacity-cron.sh` runs one pass: `steward.py capacity` per
+org with that org's fine-grained token, cancels each org's stale runs with that token, then restarts this box's own
+runner services at most once per slot per pass (`scripts/capacity_apply.py`). It never deletes a registration,
+restarts a VM or reboots. It runs as a dedicated non-root user from a pinned, reviewed commit, so nothing merged later
+runs on the box until a person moves the pin. Setup (as root, once):
+
+```
+useradd --system --home /var/lib/build-autopilot --create-home ba-steward
+git clone https://github.com/shorconsulting/build-autopilot /opt/build-autopilot
+git -C /opt/build-autopilot checkout --detach <reviewed commit>   # moving the pin is a person's step
+chown -R root:root /opt/build-autopilot                           # the service user can't change the code
+install -o root -g root -m 755 /opt/build-autopilot/scripts/restart-runner-slot.sh /usr/local/sbin/restart-runner-slot
+echo 'ba-steward ALL=(root) NOPASSWD: /usr/local/sbin/restart-runner-slot' > /etc/sudoers.d/ba-steward
+# the wrapper accepts one plain slot number and restarts only hph-runner@<n>
+chown root:root /etc/hph-ci/steward && chmod 755 /etc/hph-ci/steward   # root-owned: ba-steward can't edit apply.env
+# /etc/hph-ci/steward/HPortHealth.token, SConsInc.token: owner ba-steward, mode 600
+#   (fine-grained: Actions read/write, Contents and Pull requests read, Self-hosted runners read/write)
+# /etc/hph-ci/steward/repos: one owner/repo per line
+# /etc/hph-ci/steward/apply.env (root:root, mode 644):
+#   SLOT_REGEX='^hph-ci-(?:light-)?([0-9]+)(?:-|$)'   # hph-ci-10 and hph-ci-light-10 are both hph-runner@10
+#   RESTART='sudo -n /usr/local/sbin/restart-runner-slot {slot}'
+#   DRY_RUN=1    # keep until a person has read the first journal output, then remove it
+# systemd: build-autopilot-capacity.service (User=ba-steward, Type=oneshot, ExecStart=.../capacity-cron.sh)
+#          build-autopilot-capacity.timer (OnCalendar=*:0/10)
+```
+
+Each pass prints one line per action, so `journalctl -u build-autopilot-capacity` is the record of what it did.
