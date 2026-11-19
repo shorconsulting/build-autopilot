@@ -916,8 +916,8 @@ def read_hosts(spec):
 
 def machine_restart(names, runners, rules):
     """Whether a person could restart the VM or machine the named runners run on without killing a job: every
-    runner on that box (by `capacity.host.runners` prefix) is offline or idle. The steward never restarts a VM or
-    machine itself (other workloads, like the dashboard, run there too): it puts this in a `report`. Returns {"box", "machine_restart_ok", "busy"}; busy lists
+    runner on that box (by `capacity.host.runners` prefix) is offline or idle. When true, the steward may restart
+    the runner VM (Colima) after a service restart failed; it never reboots a physical server. Returns {"box", "machine_restart_ok", "busy"}; busy lists
     the runners a machine restart would kill."""
     boxes = rules["capacity"].get("host", {}).get("runners") or {}
     found = {box_of(n, boxes) for n in names} - {None}

@@ -322,9 +322,10 @@ reroutes, so idle runners with other labels stay idle while a pool queues for ho
      `capacity.max_cancels` per repo per pass). Any run can be re-run, so this needs nobody.
    - `restart-runner` and `restore-pool`: through Remote Control on the person's computer (runner admin and the
      machines are only reachable from there). Restart only that runner's own service or container. Never delete a
-     registration. Never restart the VM or machine it runs in (Colima, a reboot) unattended: other workloads run
-     there too. If the service restart doesn't bring the runner back, `report` it to the person with the action's
-     `box`, `machine_restart_ok` (no GitHub runner on that box is busy) and `busy`. If its machine can't be reached, say so once, with which machine and why.
+     registration. If the service restart doesn't bring the runner back and the action says `machine_restart_ok: true`
+     (no GitHub runner on that `box` is busy), restart the runner VM (`colima restart`) without asking: Build
+     Autopilot is self-healing. When it is false, wait for `busy` runners to finish and try again next pass. Never
+     reboot a physical server; that, and a box you can't reach, is a `report`. If its machine can't be reached, say so once, with which machine and why.
    - `pause-slot` and `resume-slot` (from `--hosts`, the github-throughput dashboard's box health; run on the
      person's computer with `--hosts http://127.0.0.1:4517/api/data`): keep every runner box (Hetzner, the Mac mini
      and its Colima VM) inside its limits in `capacity.host`. Each box is read on its own: the Mac's reading can pause only
