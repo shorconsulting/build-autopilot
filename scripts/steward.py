@@ -4,6 +4,7 @@
 Read-only. It never re-runs, merges, pushes or comments; the steward command acts on its output.
 
     python3 steward.py sweep --repo owner/name [--repo ...] [--out sweep.json]
+    python3 steward.py capacity --repo owner/name [--out capacity.json]   # idle/offline runners, stale queued runs
     python3 steward.py rules                 # the global build rules (rules/build-rules.json), as JSON
     python3 steward.py session-note          # SessionStart hook: a short reminder of the global rules
 
@@ -402,6 +403,203 @@ def actions_for(report, rules):
     return head + imps + [a for a in acts if a not in head]
 
 
+# ---------------------------------------------------------------- capacity (every few minutes, not hourly)
+# The hourly sweep looks at pull requests. It misses the commonest way throughput dies: runners sitting idle while
+# hundreds of jobs queue, because the queued jobs ask for labels the idle runners don't have, the runners for those
+# labels are offline, or the queue is full of runs nobody needs (closed pull requests, superseded heads, duplicates).
+# GitHub never moves a job to a runner whose labels don't match, so nothing reroutes by itself.
+# `capacity` finds all three. Cancelling unneeded runs is safe and reversible (a run can be re-run); the rest are
+# actions for the steward to take through the person's computer.
+
+PR_EVENTS = ("pull_request", "pull_request_target", "pull_request_review", "workflow_run")
+# Runs that must still happen after their pull request closed: never cancelled as stale.
+KEEP_AFTER_CLOSE = re.compile(r"mark.*done|release|deploy|publish", re.I)
+
+
+def stale_runs(queued, open_prs, keep=KEEP_AFTER_CLOSE):
+    """Queued runs nobody needs: their pull request is closed, their head is no longer the PR's head, or a newer
+    queued run of the same workflow already covers the same head. Returns [(run_id, reason, workflow)].
+    `queued` is GitHub's workflow_runs; `open_prs` the open pulls (head.ref, head.sha)."""
+    heads = {}
+    for p in open_prs:
+        heads[(p.get("head") or {}).get("ref")] = (p.get("head") or {}).get("sha")
+    out, newest = [], {}
+    for r in queued:
+        if r.get("event") not in PR_EVENTS or keep.search(r.get("name") or ""):
+            continue
+        branch, sha = r.get("head_branch"), r.get("head_sha")
+        if r.get("event") == "workflow_run" and branch not in heads:
+            continue  # a workflow_run on main or a push: not a pull request's
+        if branch not in heads:
+            out.append((r["id"], "closed", r.get("name")))
+        elif heads[branch] != sha:
+            out.append((r["id"], "superseded", r.get("name")))
+        else:
+            key = (r.get("name"), sha)
+            prev = newest.get(key)
+            if prev is None or r["id"] > prev:
+                if prev is not None:
+                    out.append((prev, "duplicate", r.get("name")))
+                newest[key] = r["id"]
+            else:
+                out.append((r["id"], "duplicate", r.get("name")))
+    return out
+
+
+def fits(job_labels, runner_labels):
+    """GitHub's rule: a runner can take a job only if it has every label the job asks for."""
+    have = {l.lower() for l in runner_labels}
+    return all(l.lower() in have for l in job_labels)
+
+
+def pool_report(runners, queued_labels, min_queue):
+    """Per label set asked for by queued jobs: how many runners could take it (online, idle, offline), and the
+    findings. `runners`: GitHub's runner objects; `queued_labels`: {tuple(labels): count of queued jobs}."""
+    def labels(r):
+        return [l["name"] for l in r.get("labels") or []]
+    pools, findings = [], []
+    used = set()
+    for want, n in sorted(queued_labels.items(), key=lambda kv: -kv[1]):
+        able = [r for r in runners if fits(want, labels(r))]
+        online = [r for r in able if r.get("status") == "online"]
+        idle = [r for r in online if not r.get("busy")]
+        offline = [r for r in able if r.get("status") != "online"]
+        used.update(r["name"] for r in able)
+        pools.append({"labels": list(want), "queued_jobs": n, "runners": len(able), "online": len(online),
+                      "idle": len(idle), "offline": [r["name"] for r in offline]})
+        if n and not able:
+            findings.append({"kind": "no-runner-for-labels", "labels": list(want), "queued_jobs": n})
+        elif n and not online:
+            findings.append({"kind": "pool-down", "labels": list(want), "queued_jobs": n,
+                             "offline": [r["name"] for r in offline]})
+        elif n and idle:
+            # Jobs queued while matching runners are idle: GitHub should hand them out within seconds, so the
+            # runners are hung or deregistered behind a stale "online".
+            findings.append({"kind": "idle-but-queued", "labels": list(want), "queued_jobs": n,
+                             "idle": [r["name"] for r in idle]})
+        for r in offline:
+            findings.append({"kind": "runner-offline", "runner": r["name"], "id": r.get("id"),
+                             "labels": labels(r)})
+    # Online runners no queued job can use, while a pool is backed up: capacity the workflows can't reach.
+    backed_up = [p for p in pools if p["queued_jobs"] >= min_queue and p["idle"] == 0]
+    spare = [r for r in runners if r.get("status") == "online" and not r.get("busy") and r["name"] not in used]
+    if backed_up and spare:
+        findings.append({"kind": "idle-capacity-unreachable",
+                         "idle": [{"runner": r["name"], "labels": labels(r)} for r in spare],
+                         "backed_up": [{"labels": p["labels"], "queued_jobs": p["queued_jobs"]} for p in backed_up]})
+    seen, uniq = set(), []
+    for f in findings:  # a runner offline in two pools is one finding
+        k = json.dumps(f, sort_keys=True)
+        if k not in seen:
+            seen.add(k)
+            uniq.append(f)
+    return pools, uniq
+
+
+def capacity_actions(stale, findings, rules):
+    cap = rules["capacity"]
+    acts = []
+    if stale:
+        acts.append({"do": "cancel-stale", "needs_person": False, "runs": [s[0] for s in stale][:cap["max_cancels"]],
+                     "why": "%d queued runs nobody needs (%s); cancelling them is safe and any can be re-run"
+                            % (len(stale), ", ".join("%s %d" % kv for kv in sorted(_count(s[1] for s in stale).items())))})
+    for f in findings:
+        k = f["kind"]
+        if k == "runner-offline":
+            acts.append({"do": "restart-runner", "needs_person": False, "runner": f["runner"],
+                         "why": "offline with jobs queued for its labels: restart its service or container on its "
+                                "machine (never delete the registration)"})
+        elif k == "idle-but-queued":
+            acts.append({"do": "restart-runner", "needs_person": False, "runner": ", ".join(f["idle"]),
+                         "why": "shown idle while %d jobs it fits are queued: hung; restart it" % f["queued_jobs"]})
+        elif k in ("pool-down", "no-runner-for-labels"):
+            acts.append({"do": "restore-pool", "needs_person": False, "labels": f["labels"],
+                         "why": "%d jobs queued and no runner online that fits %s" % (f["queued_jobs"], f["labels"])})
+        elif k == "idle-capacity-unreachable":
+            acts.append({"do": "reroute", "needs_person": False, "idle": f["idle"], "backed_up": f["backed_up"],
+                         "why": "runners idle while other pools are backed up: move the light jobs (auto-merge, "
+                                "sweeps, labelling, mark-done) to the idle label in the workflows, or give the idle "
+                                "runners the busy pool's label on their machine"})
+    return acts
+
+
+def _count(xs):
+    c = {}
+    for x in xs:
+        c[x] = c.get(x, 0) + 1
+    return c
+
+
+def capacity_repo(repo, rules, sample_runs):
+    queued = paged("repos/%s/actions/runs?status=queued" % repo, key="workflow_runs", cap=2000)
+    open_prs = paged("repos/%s/pulls?state=open" % repo, cap=2000)
+    stale = stale_runs(queued, open_prs)
+    stale_ids = {s[0] for s in stale}
+    labels = {}
+    live = [r for r in queued if r["id"] not in stale_ids]
+    for r in live[:sample_runs]:
+        try:
+            jobs = (api("repos/%s/actions/runs/%s/jobs?per_page=100" % (repo, r["id"])) or {}).get("jobs", [])
+        except GhError:
+            continue
+        for j in jobs:
+            if j.get("status") == "queued" and j.get("labels"):
+                k = tuple(sorted(j["labels"]))
+                labels[k] = labels.get(k, 0) + 1
+    oldest = min((parse_time(r.get("created_at")) for r in live), default=None)
+    return {"repo": repo, "queued_runs": len(queued), "stale": [{"run": i, "reason": why, "workflow": w}
+                                                                   for i, why, w in stale],
+            "queued_job_labels": {",".join(k): v for k, v in labels.items()}, "_labels": labels,
+            "oldest_queued_hours": hours(dt.datetime.now(dt.timezone.utc), oldest)}
+
+
+def cmd_capacity(args):
+    rules = load_rules(args.rules)
+    repos = args.repo or [current_repo()]
+    out = {"generated_at": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "owners": [],
+           "repos": [], "errors": []}
+    by_owner = {}
+    for repo in repos:
+        try:
+            rep = capacity_repo(repo, rules, rules["capacity"]["sample_runs"])
+        except GhError as exc:
+            out["errors"].append({"repo": repo, "error": str(exc)})
+            continue
+        owner = repo.split("/")[0]
+        agg = by_owner.setdefault(owner, {})
+        for k, v in rep.pop("_labels").items():
+            agg[k] = agg.get(k, 0) + v
+        stale = [(s["run"], s["reason"], s["workflow"]) for s in rep["stale"]]
+        rep["actions"] = capacity_actions(stale, [], rules)
+        out["repos"].append(rep)
+    for owner, labels in by_owner.items():
+        try:
+            runners = paged("orgs/%s/actions/runners" % owner, key="runners")
+        except GhError as exc:
+            # Listing an org's runners needs org admin, and cloud sessions are refused it: run from the person's
+            # computer (Remote Control) to see runners. Stale runs are still found and cancelled.
+            out["errors"].append({"owner": owner, "error": "runners not readable: %s" % exc})
+            continue
+        pools, findings = pool_report(runners, labels, rules["capacity"]["backed_up_jobs"])
+        out["owners"].append({"owner": owner, "pools": pools, "findings": findings,
+                              "actions": capacity_actions([], findings, rules)})
+    text = json.dumps(out, indent=2)
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as fh:
+            fh.write(text + "\n")
+        for r in out["repos"]:
+            print("%s: %d queued, oldest %sh, %d stale" % (r["repo"], r["queued_runs"], r["oldest_queued_hours"],
+                                                          len(r["stale"])))
+        for o in out["owners"]:
+            print("%s: %s" % (o["owner"], "; ".join("%s %s" % (a["do"], a.get("runner") or a.get("labels") or "")
+                                                     for a in o["actions"]) or "pools fine"))
+        for e in out["errors"]:
+            print("skipped: %s" % json.dumps(e))
+    else:
+        print(text)
+    return 0
+
+
 def cmd_sweep(args):
     rules = load_rules(args.rules)
     sw = Sweeper(rules)
@@ -471,11 +669,16 @@ def main(argv=None):
     h = sub.add_parser("health", help="the CI health history for a repo, and what it says to improve")
     h.add_argument("--repo", required=True)
     h.add_argument("--history-dir", default=HISTORY_DIR)
+    c = sub.add_parser("capacity", help="idle runners, offline runners and stale queued runs (every few minutes)")
+    c.add_argument("--repo", action="append")
+    c.add_argument("--out")
     sub.add_parser("rules")
     sub.add_parser("session-note")
     args = ap.parse_args(argv)
     if args.cmd == "sweep":
         return cmd_sweep(args)
+    if args.cmd == "capacity":
+        return cmd_capacity(args)
     if args.cmd == "health":
         hist = read_history(args.repo, args.history_dir)
         print(json.dumps({"sweeps": len(hist), "latest": hist[-1] if hist else None,

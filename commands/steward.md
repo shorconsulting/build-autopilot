@@ -1,6 +1,6 @@
 ---
 description: "The always-on steward: sweep tracked repos for red PRs, stalled CI, drafts and leftover work and resume it (--install: hourly sweep and the daily 5 pm questions digest)"
-argument-hint: "[owner/repo ...] [--install | --dry-run]"
+argument-hint: "[owner/repo ...] [--install | --dry-run | --capacity]"
 ---
 
 # /build-autopilot:steward

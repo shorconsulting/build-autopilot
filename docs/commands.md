@@ -287,7 +287,30 @@ with this plugin and build-questions installed and GitHub access to the tracked 
    all-linked`, `--steps`, `--task-id` and `--where cloud`. The run ends with `PushNotification`, which reaches the
    person's phone through the Claude app; say in one line that notifications must be allowed for the Claude app on
    the phone, and that the digest also goes by the build-questions `email_method` if one is set.
-3. Reply with both schedules in the person's local time and how to stop them (`delete_trigger`).
+3. The capacity check, every `capacity.cron` (10 minutes): a trigger with that cron and the prompt
+   `/build-autopilot:steward --capacity`. Replace an existing one with `update_trigger`.
+4. Reply with the schedules in the person's local time and how to stop them (`delete_trigger`).
+
+**`--capacity`** (every 10 minutes; build rule 3, "a stalled check is restarted, not waited on", applied to the
+runners). GitHub gives a job only to a runner in the same org that has every label the job asks for. It never
+reroutes, so idle runners with other labels stay idle while a pool queues for hours.
+
+1. `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/steward.py" capacity --repo A --repo B ... --out <scratchpad>/capacity.json`.
+   It is read-only. Per repo it lists the queued runs nobody needs (pull request closed, head superseded, or an older
+   duplicate of the same workflow on the same head; never mark-done, release, deploy or publish runs). Per org, when
+   runners can be read, it lists the label pools the queued jobs ask for and these findings: `runner-offline`,
+   `pool-down`, `no-runner-for-labels`, `idle-but-queued` (hung), and `idle-capacity-unreachable` (online idle
+   runners that no queued job can use while a pool is backed up).
+2. Act without asking:
+   - `cancel-stale`: `gh api -X POST repos/<repo>/actions/runs/<run>/cancel` for each listed run (at most
+     `capacity.max_cancels`). Any run can be re-run, so this needs nobody.
+   - `restart-runner` and `restore-pool`: through Remote Control on the person's computer (runner admin and the
+     machines are only reachable from there). Restart the runner's service or container, or the VM it runs in
+     (Colima). Never delete a registration. If its machine can't be reached, say so once, with which machine and why.
+   - `reroute`: open a pull request in the repo that moves its light jobs (auto-merge, sweeps, labelling, mark-done,
+     cancel-on-close) to the idle runners' label, or file it as the steward lane's next item. A CI-machinery or ADR
+     change follows the repo's own landing rules.
+3. Say nothing when nothing was found. Otherwise one line per repo: runs cancelled, runners restarted, PRs opened.
 
 **A sweep:**
 

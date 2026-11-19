@@ -41,5 +41,12 @@
     "recurring_sweeps": 3,
     "flaky_reruns": 2,
     "slower_merge_pct": 25
+  },
+  "capacity": {
+    "cron": "*/10 * * * *",
+    "max_cancels": 500,
+    "sample_runs": 60,
+    "backed_up_jobs": 20,
+    "why": "Every 10 minutes: cancel queued runs nobody needs, restart offline or hung runners, and flag idle runners no queued job can reach. GitHub never reroutes a job to a runner with other labels."
   }
 }
