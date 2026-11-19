@@ -47,6 +47,9 @@
     "max_cancels": 500,
     "sample_runs": 60,
     "backed_up_jobs": 20,
-    "why": "Every 10 minutes: cancel queued runs nobody needs, restart offline or hung runners, and flag idle runners no queued job can reach. GitHub never reroutes a job to a runner with other labels."
+    "why": "Every 10 minutes where the scheduler allows it (cloud scheduled tasks run at most hourly): cancel queued runs nobody needs, restart runners that stayed offline or hung for two passes in a row (once per 30 minutes at most), and flag idle runners no queued job can reach. GitHub never reroutes a job to a runner with other labels.",
+    "settle_minutes": 10,
+    "restart_cooldown_minutes": 30,
+    "keep_after_close": []
   }
 }

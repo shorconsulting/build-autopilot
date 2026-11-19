@@ -412,37 +412,62 @@ def actions_for(report, rules):
 # actions for the steward to take through the person's computer.
 
 PR_EVENTS = ("pull_request", "pull_request_target", "pull_request_review", "workflow_run")
-# Runs that must still happen after their pull request closed: never cancelled as stale.
-KEEP_AFTER_CLOSE = re.compile(r"mark.*done|release|deploy|publish", re.I)
+# Runs that must still happen after their pull request closed: never cancelled as stale. Extend with
+# `capacity.keep_after_close` in build-rules.json.
+KEEP_AFTER_CLOSE = r"mark.*done|release|deploy|publish|cleanup|clean-up|teardown|backport|changelog|notify|preview"
+# GitHub-hosted labels: queued jobs asking for these are GitHub's to start, never a self-hosted pool's.
+HOSTED = re.compile(r"^(ubuntu|windows|macos)-", re.I)
 
 
-def stale_runs(queued, open_prs, keep=KEEP_AFTER_CLOSE):
-    """Queued runs nobody needs: their pull request is closed, their head is no longer the PR's head, or a newer
-    queued run of the same workflow already covers the same head. Returns [(run_id, reason, workflow)].
-    `queued` is GitHub's workflow_runs; `open_prs` the open pulls (head.ref, head.sha)."""
-    heads = {}
+def _keep(rules):
+    extra = (rules or {}).get("capacity", {}).get("keep_after_close") or []
+    return re.compile("|".join([KEEP_AFTER_CLOSE] + list(extra)), re.I)
+
+
+def _head_key(repo_full, ref):
+    return ((repo_full or "").lower(), ref)
+
+
+def stale_runs(queued, open_prs, keep=None):
+    """Queued runs nobody needs. Returns [(run_id, reason, workflow)]:
+      closed      no open pull request has this head (repo and branch), AND the workflow is pull-request CI: it also
+                  has queued runs for an open pull request. A workflow that only runs when a PR closes (cleanup,
+                  backport, notify) never has those, so it is never cancelled, whatever its name.
+      superseded  an open pull request has this head branch but its head is another commit;
+      duplicate   an older queued run of the same workflow, on the same head, from the same event.
+    `queued` is GitHub's workflow_runs; `open_prs` the open pulls."""
+    keep = keep or _keep(None)
+    heads, open_shas = {}, set()
     for p in open_prs:
-        heads[(p.get("head") or {}).get("ref")] = (p.get("head") or {}).get("sha")
+        h = p.get("head") or {}
+        heads[_head_key((h.get("repo") or {}).get("full_name"), h.get("ref"))] = h.get("sha")
+        open_shas.add(h.get("sha"))
+
+    def key(r):
+        return _head_key((r.get("head_repository") or {}).get("full_name"), r.get("head_branch"))
+
+    def pr_run(r):
+        return r.get("event") in PR_EVENTS and not keep.search(r.get("name") or "")
+
+    pr_ci = {r.get("name") for r in queued if pr_run(r) and r.get("head_sha") in open_shas}
     out, newest = [], {}
     for r in queued:
-        if r.get("event") not in PR_EVENTS or keep.search(r.get("name") or ""):
+        if not pr_run(r):
             continue
-        branch, sha = r.get("head_branch"), r.get("head_sha")
-        if r.get("event") == "workflow_run" and branch not in heads:
-            continue  # a workflow_run on main or a push: not a pull request's
-        if branch not in heads:
-            out.append((r["id"], "closed", r.get("name")))
-        elif heads[branch] != sha:
-            out.append((r["id"], "superseded", r.get("name")))
-        else:
-            key = (r.get("name"), sha)
-            prev = newest.get(key)
+        sha, k = r.get("head_sha"), key(r)
+        if sha in open_shas:
+            dkey = (r.get("name"), r.get("event"), sha)
+            prev = newest.get(dkey)
             if prev is None or r["id"] > prev:
                 if prev is not None:
                     out.append((prev, "duplicate", r.get("name")))
-                newest[key] = r["id"]
+                newest[dkey] = r["id"]
             else:
                 out.append((r["id"], "duplicate", r.get("name")))
+        elif k in heads:
+            out.append((r["id"], "superseded", r.get("name")))
+        elif r.get("event") != "workflow_run" and r.get("name") in pr_ci:
+            out.append((r["id"], "closed", r.get("name")))
     return out
 
 
@@ -452,31 +477,44 @@ def fits(job_labels, runner_labels):
     return all(l.lower() in have for l in job_labels)
 
 
-def pool_report(runners, queued_labels, min_queue):
-    """Per label set asked for by queued jobs: how many runners could take it (online, idle, offline), and the
-    findings. `runners`: GitHub's runner objects; `queued_labels`: {tuple(labels): count of queued jobs}."""
+def self_hosted(labels):
+    return any(l.lower() == "self-hosted" for l in labels) and not any(HOSTED.match(l) for l in labels)
+
+
+def pool_report(runners, queued_labels, min_queue, oldest_minutes=None, settle_minutes=10):
+    """Per self-hosted label set asked for by queued jobs: how many runners could take it (online, idle,
+    offline), and the findings. `runners`: GitHub's runner objects (org and repo level); `queued_labels`:
+    {tuple(labels): count of queued jobs}; `oldest_minutes`: {tuple(labels): minutes the oldest such job has
+    queued}. A momentary state is not a finding: idle-but-queued needs a job queued over `settle_minutes`
+    (a runner that just finished a job looks idle for a moment), and offline runners are only candidates
+    (`settle` in cmd_capacity requires two passes in a row before acting)."""
+    oldest_minutes = oldest_minutes or {}
+
     def labels(r):
         return [l["name"] for l in r.get("labels") or []]
     pools, findings = [], []
     used = set()
     for want, n in sorted(queued_labels.items(), key=lambda kv: -kv[1]):
+        if not self_hosted(want):
+            continue  # GitHub-hosted: not ours to restore
         able = [r for r in runners if fits(want, labels(r))]
         online = [r for r in able if r.get("status") == "online"]
         idle = [r for r in online if not r.get("busy")]
         offline = [r for r in able if r.get("status") != "online"]
         used.update(r["name"] for r in able)
+        waited = oldest_minutes.get(want)
         pools.append({"labels": list(want), "queued_jobs": n, "runners": len(able), "online": len(online),
-                      "idle": len(idle), "offline": [r["name"] for r in offline]})
+                      "idle": len(idle), "offline": [r["name"] for r in offline], "oldest_minutes": waited})
         if n and not able:
             findings.append({"kind": "no-runner-for-labels", "labels": list(want), "queued_jobs": n})
         elif n and not online:
             findings.append({"kind": "pool-down", "labels": list(want), "queued_jobs": n,
                              "offline": [r["name"] for r in offline]})
-        elif n and idle:
-            # Jobs queued while matching runners are idle: GitHub should hand them out within seconds, so the
+        elif n and idle and waited is not None and waited >= settle_minutes:
+            # Jobs queued for minutes while matching runners are idle: GitHub hands work out within seconds, so the
             # runners are hung or deregistered behind a stale "online".
             findings.append({"kind": "idle-but-queued", "labels": list(want), "queued_jobs": n,
-                             "idle": [r["name"] for r in idle]})
+                             "idle": [r["name"] for r in idle], "oldest_minutes": waited})
         for r in offline:
             findings.append({"kind": "runner-offline", "runner": r["name"], "id": r.get("id"),
                              "labels": labels(r)})
@@ -494,6 +532,31 @@ def pool_report(runners, queued_labels, min_queue):
             seen.add(k)
             uniq.append(f)
     return pools, uniq
+
+
+def settle(findings, state, now, cooldown_minutes):
+    """Act on a runner only when the finding held on the previous pass too, and not again within the cooldown.
+    `state` (kept between passes): {"seen": {key: iso time}, "acted": {runner: iso time}}. Returns the findings to
+    act on; updates `state` in place."""
+    def k(f):
+        return "%s|%s" % (f["kind"], f.get("runner") or ",".join(f.get("idle") or []) or ",".join(f.get("labels") or []))
+    prev = state.get("seen", {})
+    acted = state.setdefault("acted", {})
+    keep, seen = [], {}
+    for f in findings:
+        key = k(f)
+        seen[key] = prev.get(key) or now.strftime("%Y-%m-%dT%H:%M:%SZ")
+        if f["kind"] in ("runner-offline", "idle-but-queued", "pool-down"):
+            if key not in prev:
+                continue  # first sighting: wait for the next pass
+            names = f.get("runner") or ",".join(f.get("idle") or []) or key
+            last = parse_time(acted.get(names))
+            if last and (now - last).total_seconds() < cooldown_minutes * 60:
+                continue
+            acted[names] = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+        keep.append(f)
+    state["seen"] = seen
+    return keep
 
 
 def capacity_actions(stale, findings, rules):
@@ -533,9 +596,10 @@ def _count(xs):
 def capacity_repo(repo, rules, sample_runs):
     queued = paged("repos/%s/actions/runs?status=queued" % repo, key="workflow_runs", cap=2000)
     open_prs = paged("repos/%s/pulls?state=open" % repo, cap=2000)
-    stale = stale_runs(queued, open_prs)
+    stale = stale_runs(queued, open_prs, _keep(rules))
     stale_ids = {s[0] for s in stale}
-    labels = {}
+    labels, oldest = {}, {}
+    now = dt.datetime.now(dt.timezone.utc)
     live = [r for r in queued if r["id"] not in stale_ids]
     for r in live[:sample_runs]:
         try:
@@ -546,11 +610,35 @@ def capacity_repo(repo, rules, sample_runs):
             if j.get("status") == "queued" and j.get("labels"):
                 k = tuple(sorted(j["labels"]))
                 labels[k] = labels.get(k, 0) + 1
-    oldest = min((parse_time(r.get("created_at")) for r in live), default=None)
-    return {"repo": repo, "queued_runs": len(queued), "stale": [{"run": i, "reason": why, "workflow": w}
+                waited = (now - parse_time(j.get("created_at"))).total_seconds() / 60 if j.get("created_at") else None
+                if waited is not None:
+                    oldest[k] = max(oldest.get(k, 0), round(waited))
+    first = min((parse_time(r.get("created_at")) for r in live), default=None)
+    try:  # repo-level runners also serve these jobs; the org list doesn't show them
+        repo_runners = paged("repos/%s/actions/runners" % repo, key="runners")
+    except GhError:
+        repo_runners = []
+    return {"_oldest": oldest, "_runners": repo_runners, "repo": repo, "queued_runs": len(queued), "stale": [{"run": i, "reason": why, "workflow": w}
                                                                    for i, why, w in stale],
             "queued_job_labels": {",".join(k): v for k, v in labels.items()}, "_labels": labels,
-            "oldest_queued_hours": hours(dt.datetime.now(dt.timezone.utc), oldest)}
+            "oldest_queued_hours": hours(now, first)}
+
+
+def _read_state(path):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_state(path, state):
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(state, fh, indent=1)
+    except OSError:
+        pass
 
 
 def cmd_capacity(args):
@@ -566,23 +654,32 @@ def cmd_capacity(args):
             out["errors"].append({"repo": repo, "error": str(exc)})
             continue
         owner = repo.split("/")[0]
-        agg = by_owner.setdefault(owner, {})
+        agg = by_owner.setdefault(owner, {"labels": {}, "oldest": {}, "runners": []})
         for k, v in rep.pop("_labels").items():
-            agg[k] = agg.get(k, 0) + v
+            agg["labels"][k] = agg["labels"].get(k, 0) + v
+        for k, v in rep.pop("_oldest").items():
+            agg["oldest"][k] = max(agg["oldest"].get(k, 0), v)
+        agg["runners"].extend(rep.pop("_runners"))
         stale = [(s["run"], s["reason"], s["workflow"]) for s in rep["stale"]]
         rep["actions"] = capacity_actions(stale, [], rules)
         out["repos"].append(rep)
-    for owner, labels in by_owner.items():
+    state = _read_state(args.state)
+    now = dt.datetime.now(dt.timezone.utc)
+    cap = rules["capacity"]
+    for owner, agg in by_owner.items():
         try:
-            runners = paged("orgs/%s/actions/runners" % owner, key="runners")
+            runners = paged("orgs/%s/actions/runners" % owner, key="runners") + agg["runners"]
         except GhError as exc:
             # Listing an org's runners needs org admin, and cloud sessions are refused it: run from the person's
             # computer (Remote Control) to see runners. Stale runs are still found and cancelled.
             out["errors"].append({"owner": owner, "error": "runners not readable: %s" % exc})
             continue
-        pools, findings = pool_report(runners, labels, rules["capacity"]["backed_up_jobs"])
+        pools, findings = pool_report(runners, agg["labels"], cap["backed_up_jobs"], agg["oldest"],
+                                      cap["settle_minutes"])
+        ready = settle(findings, state.setdefault(owner, {}), now, cap["restart_cooldown_minutes"])
         out["owners"].append({"owner": owner, "pools": pools, "findings": findings,
-                              "actions": capacity_actions([], findings, rules)})
+                              "actions": capacity_actions([], ready, rules)})
+    _write_state(args.state, state)
     text = json.dumps(out, indent=2)
     if args.out:
         with open(args.out, "w", encoding="utf-8") as fh:
@@ -672,6 +769,8 @@ def main(argv=None):
     c = sub.add_parser("capacity", help="idle runners, offline runners and stale queued runs (every few minutes)")
     c.add_argument("--repo", action="append")
     c.add_argument("--out")
+    c.add_argument("--state", default=os.path.join(os.path.expanduser("~"), ".build-autopilot", "capacity-state.json"),
+                   help="findings seen on the last pass and runners restarted, so one snapshot never acts")
     sub.add_parser("rules")
     sub.add_parser("session-note")
     args = ap.parse_args(argv)
