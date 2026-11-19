@@ -50,9 +50,9 @@ work, not the end.
 ## 3. Stalled CI and stalled lanes are restarted, not waited on
 
 Build Autopilot is self-healing (David, 2026-11-19). Down or stalled runners, hung jobs, stalled checks and stalled
-PRs are fixed without asking the person, and without telling them first: restart the runner's service or container,
-restart the runner VM (Colima) when restarting its runners didn't help and no runner on it is busy
-(`machine_restart_ok`), cancel a hung job and re-run it once, cancel queued runs nobody needs. Never ask "should I
+PRs are fixed without asking the person first (each fix is listed in the run's summary afterwards): restart the runner's service or container,
+restart the runner VM (Colima) when restarting its runners didn't help, no runner on it is busy
+(`machine_restart_ok`) and nothing but runner containers runs in it, cancel a hung job and re-run it once, cancel queued runs nobody needs. Never ask "should I
 restart / cancel / re-run this?". The person hears only about what needs their hands: no way in (SSH access, a
 missing credential or token), billing, or a fix that would delete data, a runner registration or a branch, change
 rulesets or secrets, or reboot a physical server.
