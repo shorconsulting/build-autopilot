@@ -390,3 +390,21 @@ reroutes, so idle runners with other labels stay idle while a pool queues for ho
 4. Reply (or `PushNotification` in a scheduled run) with one line per repo: open PRs by state, what was re-run,
    handed back and landed, the improvements started, how the health line moved since the day before (open PRs, red
    PRs, main red hours, median hours to merge), and only the items that need a person. Say nothing more when nothing needs one.
+
+### Running the capacity check on a runner box (no agent)
+
+On an always-on box (the Hetzner hph-ci server), `scripts/capacity-cron.sh` runs one pass: `steward.py capacity` per
+org with that org's fine-grained token, then `scripts/capacity_apply.py`, which cancels the stale runs and restarts
+only this box's own runner services. It never deletes a registration, restarts a VM or reboots. Setup:
+
+```
+git clone https://github.com/shorconsulting/build-autopilot /opt/build-autopilot
+# /etc/hph-ci/steward/HPortHealth.token, SConsInc.token  (mode 600; Actions read/write, Self-hosted runners read/write)
+# /etc/hph-ci/steward/repos: one owner/repo per line
+# /etc/hph-ci/steward/apply.env:
+#   SLOT_REGEX='^hph-ci-(?:light-)?([0-9]+)(?:-|$)'
+#   RESTART='systemctl restart hph-runner@{slot}'
+# systemd timer (or cron */10): /opt/build-autopilot/scripts/capacity-cron.sh; git -C /opt/build-autopilot pull daily
+```
+
+Each pass prints one line per action, so `journalctl -u build-autopilot-capacity` is the record of what it did.
