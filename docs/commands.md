@@ -327,8 +327,9 @@ reroutes, so idle runners with other labels stay idle while a pool queues for ho
      Autopilot is self-healing, but only after `docker ps` in that VM (and `colima status`: no k3s) shows nothing running except
      runner containers (names matching that box's `capacity.host.runners` prefixes); the github-throughput dashboard
      runs on the person's computer, not in the VM. Anything else running there makes it a `report` with what is
-     running. Drain first: `docker stop` each runner container in the VM, then re-read those runners from the GitHub
-     API; if any picked up a job in between (busy), start the stopped ones again and make it a `report` instead. When `machine_restart_ok` is false, wait for the `busy` runners and try again next pass;
+     running. Drain one runner at a time: read it from the GitHub API right before stopping it, and `docker stop` it
+     only if it is not busy; if one is busy, start the ones already stopped again and make it a `report`. Once all are
+     stopped (a stopped runner takes no new job), restart the VM. If a job was interrupted anyway, re-run it once. When `machine_restart_ok` is false, wait for the `busy` runners and try again next pass;
      the restart cap (`capacity.max_restarts`) still turns a runner that never comes back into a `report`. Every VM
      restart and every cancel batch goes in the run's summary afterwards (what, where, why), so the person can see
      what was done. Never reboot a physical server. A box you can't reach is one `report`, naming the machine and
