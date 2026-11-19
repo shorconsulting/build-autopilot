@@ -19,19 +19,21 @@ import sys
 RESTART_ACTIONS = ("restart-runner", "restore-pool")
 
 
-def plan(report, slot_regex, restart_template, max_cancels=100):
-    """[(kind, argv, why)] for this box: cancels for every repo's cancel-stale, restarts for this box's slots."""
+def plan(report, slot_regex, restart_template, max_cancels=100, seen=None, cancel=True):
+    """[(kind, argv, why)] for this box: cancels for every repo's cancel-stale, restarts for this box's slots.
+    `seen`: slots already planned this pass (shared across reports, so a slot restarts at most once per pass).
+    Slots are one numbered service per box: on hph-ci, hph-ci-10 and hph-ci-light-10 are both hph-runner@10."""
     out = []
-    for rep in report.get("repos") or []:
+    for rep in (report.get("repos") or []) if cancel else []:
         for act in rep.get("actions") or []:
-            if act.get("do") != "cancel-stale":
+            if act.get("do") != "cancel-stale" or act.get("needs_person"):
                 continue
             for run in (act.get("runs") or [])[:max_cancels]:
                 out.append(("cancel", ["gh", "api", "-X", "POST",
                                        "repos/%s/actions/runs/%d/cancel" % (rep["repo"], int(run))],
                             "%s run %s: %s" % (rep["repo"], run, act.get("why", "stale"))))
     rx = re.compile(slot_regex) if slot_regex else None
-    seen = set()
+    seen = set() if seen is None else seen
     for owner in report.get("owners") or []:
         for act in owner.get("actions") or []:
             if act.get("do") not in RESTART_ACTIONS or act.get("needs_person") or not rx or not restart_template:
@@ -52,16 +54,22 @@ def plan(report, slot_regex, restart_template, max_cancels=100):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("report")
+    ap.add_argument("report", nargs="+", help="one or more capacity reports (one per org)")
     ap.add_argument("--slot-regex", default="", help="regex whose group 1 is this box's slot number")
     ap.add_argument("--restart", default="", help="command template to restart a slot, with {slot}")
     ap.add_argument("--max-cancels", type=int, default=100)
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--no-cancel", action="store_true", help="restarts only (cancels need that org's token)")
+    ap.add_argument("--no-restart", action="store_true", help="cancels only")
     a = ap.parse_args(argv)
-    with open(a.report, encoding="utf-8") as fh:
-        report = json.load(fh)
+    steps, seen = [], set()
+    for path in a.report:
+        with open(path, encoding="utf-8") as fh:
+            report = json.load(fh)
+        steps += plan(report, a.slot_regex, "" if a.no_restart else a.restart, a.max_cancels, seen,
+                      cancel=not a.no_cancel)
     failed = 0
-    for kind, cmd, why in plan(report, a.slot_regex, a.restart, a.max_cancels):
+    for kind, cmd, why in steps:
         if a.dry_run:
             print("would %s: %s" % (kind, why))
             continue

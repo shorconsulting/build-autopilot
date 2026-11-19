@@ -3,7 +3,8 @@
 # Config dir (default /etc/hph-ci/steward):
 #   <Owner>.token   a fine-grained GitHub token for that org (mode 600), one per org
 #   repos           one owner/repo per line (# comments allowed)
-#   apply.env       optional: SLOT_REGEX and RESTART (see capacity_apply.py) for this box's own runners
+#   apply.env       optional: SLOT_REGEX and RESTART (see capacity_apply.py) for this box's own runners,
+#                   DRY_RUN=1 to only print what it would do (do one dry pass first)
 # Each org's repos are checked with that org's token; this box's runners are restarted, stale runs cancelled.
 set -euo pipefail
 
@@ -12,11 +13,17 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 STATE="${CAPACITY_STATE:-/var/lib/build-autopilot}"
 SLOT_REGEX=""
 RESTART=""
+DRY_RUN=""
 if [ -f "$CONF/apply.env" ]; then
   # shellcheck disable=SC1091
   . "$CONF/apply.env"
 fi
 mkdir -p -m 700 "$STATE"
+dry=""
+if [ -n "$DRY_RUN" ]; then
+  dry="--dry-run"
+fi
+reports=""
 
 owners="$(grep -v '^[[:space:]]*#' "$CONF/repos" | grep '/' | cut -d/ -f1 | sort -u)"
 for owner in $owners; do
@@ -33,9 +40,16 @@ for owner in $owners; do
   # shellcheck disable=SC2086
   if GH_TOKEN="$(cat "$tok")" python3 "$HERE/steward.py" capacity $args --out "$out" \
       --state "$STATE/capacity-state-$owner.json"; then
-    GH_TOKEN="$(cat "$tok")" python3 "$HERE/capacity_apply.py" "$out" \
-      --slot-regex "$SLOT_REGEX" --restart "$RESTART" || echo "$owner: some actions failed (see above)"
+    # Cancels with this org's token; restarts once per pass over every org's report, below.
+    GH_TOKEN="$(cat "$tok")" python3 "$HERE/capacity_apply.py" "$out" --no-restart $dry \
+      || echo "$owner: some cancels failed (see above)"
+    reports="$reports $out"
   else
     echo "$owner: capacity check failed"
   fi
 done
+if [ -n "$reports" ] && [ -n "$RESTART" ]; then
+  # shellcheck disable=SC2086
+  python3 "$HERE/capacity_apply.py" $reports --no-cancel --slot-regex "$SLOT_REGEX" --restart "$RESTART" $dry \
+    || echo "some restarts failed (see above)"
+fi

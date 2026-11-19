@@ -32,5 +32,18 @@ class Plan(unittest.TestCase):
         self.assertEqual({k for k, _, _ in p}, {"cancel"})
 
 
+class Guards(unittest.TestCase):
+    def test_cancels_marked_for_a_person_are_skipped(self):
+        r = {"repos": [{"repo": "o/a", "actions": [{"do": "cancel-stale", "runs": [9], "needs_person": True}]}]}
+        self.assertEqual(capacity_apply.plan(r, "", ""), [])
+
+    def test_a_slot_restarts_once_per_pass_across_org_reports(self):
+        seen = set()
+        a = capacity_apply.plan(REPORT, RX, "systemctl restart hph-runner@{slot}", seen=seen, cancel=False)
+        b = capacity_apply.plan(REPORT, RX, "systemctl restart hph-runner@{slot}", seen=seen, cancel=False)
+        self.assertEqual(len([x for x in a if x[0] == "restart"]), 2)
+        self.assertEqual(b, [])
+
+
 if __name__ == "__main__":
     unittest.main()

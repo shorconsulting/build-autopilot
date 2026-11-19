@@ -394,17 +394,26 @@ reroutes, so idle runners with other labels stay idle while a pool queues for ho
 ### Running the capacity check on a runner box (no agent)
 
 On an always-on box (the Hetzner hph-ci server), `scripts/capacity-cron.sh` runs one pass: `steward.py capacity` per
-org with that org's fine-grained token, then `scripts/capacity_apply.py`, which cancels the stale runs and restarts
-only this box's own runner services. It never deletes a registration, restarts a VM or reboots. Setup:
+org with that org's fine-grained token, cancels each org's stale runs with that token, then restarts this box's own
+runner services at most once per slot per pass (`scripts/capacity_apply.py`). It never deletes a registration,
+restarts a VM or reboots. It runs as a dedicated non-root user from a pinned, reviewed commit, so nothing merged later
+runs on the box until a person moves the pin. Setup (as root, once):
 
 ```
+useradd --system --home /var/lib/build-autopilot --create-home ba-steward
 git clone https://github.com/shorconsulting/build-autopilot /opt/build-autopilot
-# /etc/hph-ci/steward/HPortHealth.token, SConsInc.token  (mode 600; Actions read/write, Self-hosted runners read/write)
+git -C /opt/build-autopilot checkout --detach <reviewed commit>   # moving the pin is a person's step
+chown -R root:root /opt/build-autopilot                           # the service user can't change the code
+echo 'ba-steward ALL=(root) NOPASSWD: /usr/bin/systemctl restart hph-runner@*' > /etc/sudoers.d/ba-steward
+# /etc/hph-ci/steward/HPortHealth.token, SConsInc.token: owner ba-steward, mode 600
+#   (fine-grained: Actions read/write, Contents and Pull requests read, Self-hosted runners read/write)
 # /etc/hph-ci/steward/repos: one owner/repo per line
 # /etc/hph-ci/steward/apply.env:
-#   SLOT_REGEX='^hph-ci-(?:light-)?([0-9]+)(?:-|$)'
-#   RESTART='systemctl restart hph-runner@{slot}'
-# systemd timer (or cron */10): /opt/build-autopilot/scripts/capacity-cron.sh; git -C /opt/build-autopilot pull daily
+#   SLOT_REGEX='^hph-ci-(?:light-)?([0-9]+)(?:-|$)'   # hph-ci-10 and hph-ci-light-10 are both hph-runner@10
+#   RESTART='sudo -n systemctl restart hph-runner@{slot}'
+#   DRY_RUN=1                                           # first pass only prints; remove it once that looks right
+# systemd: build-autopilot-capacity.service (User=ba-steward, Type=oneshot, ExecStart=.../capacity-cron.sh)
+#          build-autopilot-capacity.timer (OnCalendar=*:0/10)
 ```
 
 Each pass prints one line per action, so `journalctl -u build-autopilot-capacity` is the record of what it did.
