@@ -36,6 +36,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RULES_PATH = os.path.join(os.path.dirname(HERE), "rules", "build-rules.json")
@@ -562,10 +563,11 @@ def pool_report(runners, queued_labels, min_queue, oldest_minutes=None, settle_m
     return pools, uniq
 
 
-def settle(findings, state, now, cooldown_minutes, max_restarts=3, report_cooldown_minutes=240):
+def settle(findings, state, now, cooldown_minutes, max_restarts=3, report_cooldown_minutes=240, online=None):
     """Act on a runner only when the finding held on the previous pass too, and not again within the cooldown.
     `state` (kept between passes): {"seen": {key: iso time}, "acted": {runner: iso time}}. Returns the findings to
-    act on; updates `state` in place."""
+    act on; updates `state` in place. `online`: names of runners seen online and not busy-hung this pass, whose
+    runner-offline history can be cleared at once."""
     def names(f):
         if f["kind"] == "idle-capacity-unreachable":
             # Keyed on what is backed up, not on which runners happen to be idle this pass.
@@ -576,10 +578,13 @@ def settle(findings, state, now, cooldown_minutes, max_restarts=3, report_cooldo
     prev = state.get("seen", {})
     acted = state.setdefault("acted", {})
     tries = state.setdefault("restarts", {})
+    last_seen = state.setdefault("last_seen", {})
+    stamp = now.strftime("%Y-%m-%dT%H:%M:%SZ")
     keep, seen = [], {}
     for f in findings:
         key = "%s|%s" % (f["kind"], names(f))
-        seen[key] = prev.get(key) or now.strftime("%Y-%m-%dT%H:%M:%SZ")
+        seen[key] = prev.get(key) or stamp
+        last_seen[key] = stamp
         if f["kind"] in ("idle-capacity-unreachable", "no-runner-for-labels"):
             # A reroute PR or a report: once per report cooldown, not every pass.
             last = parse_time(acted.get(key))
@@ -606,12 +611,20 @@ def settle(findings, state, now, cooldown_minutes, max_restarts=3, report_cooldo
             acted[key] = now.strftime("%Y-%m-%dT%H:%M:%SZ")
             tries[key] = tries.get(key, 0) + 1
         keep.append(f)
-    # A finding that cleared resets its count.
-    for key in list(acted):
+    # A finding that vanishes for a pass or two (a sampled queue, a flapping runner, a skipped repo) keeps its restart
+    # count and cooldown; only one absent for `forget` minutes, or whose runner is seen online and fine, is forgotten.
+    forget = max(report_cooldown_minutes, cooldown_minutes * 3) * 60
+    healthy = set(online or ())
+    for key in set(acted) | set(tries) | set(last_seen):
         base = key[len("report|"):] if key.startswith("report|") else key
-        if base not in seen:
-            acted.pop(key)
+        if base in seen:
+            continue
+        gone = parse_time(last_seen.get(base))
+        runner = base.split("|", 1)[1] if base.startswith("runner-offline|") else None
+        if (runner and runner in healthy) or not gone or (now - gone).total_seconds() >= forget:
+            acted.pop(key, None)
             tries.pop(base, None)
+            last_seen.pop(base, None)
     state["seen"] = seen
     return keep
 
@@ -762,16 +775,32 @@ def paused_runners(state):
 
 
 def cmd_capacity_note(args):
-    """Record what the steward did on a box, so the next pass knows which slots are paused on purpose."""
-    state = _read_state(args.state)
-    st = state.setdefault("hosts", {}).setdefault(args.host, {})
-    if not isinstance(st.get("paused"), list):
-        st["paused"] = []
-    if args.paused and args.paused not in st["paused"]:
-        st["paused"].append(args.paused)
-    if args.resumed and args.resumed in st["paused"]:
-        st["paused"].remove(args.resumed)
-    _write_state(args.state, state)
+    """Record what the steward did on a box, so the next pass knows which slots are paused on purpose. Waits up to
+    two minutes for a running capacity pass, so neither overwrites the other's state."""
+    lock, deadline = None, time.time() + 120
+    while lock is None:
+        lock = _take_lock(args.state)
+        if lock is None:
+            if time.time() >= deadline:
+                print("capacity state is locked (%s.lock); note not recorded, run it again" % args.state,
+                      file=sys.stderr)
+                return 1
+            time.sleep(2)
+    try:
+        state = _read_state(args.state)
+        st = state.setdefault("hosts", {}).setdefault(args.host, {})
+        if not isinstance(st.get("paused"), list):
+            st["paused"] = []
+        if args.paused and args.paused not in st["paused"]:
+            st["paused"].append(args.paused)
+        if args.resumed and args.resumed in st["paused"]:
+            st["paused"].remove(args.resumed)
+        _write_state(args.state, state)
+    finally:
+        try:
+            os.unlink(lock)
+        except OSError:
+            pass
     print(json.dumps({"host": args.host, "paused": st["paused"]}))
     return 0
 
@@ -795,7 +824,21 @@ def read_hosts(spec):
     return (data.get("ci") or {}).get("hosts") or data.get("hosts") or []
 
 
-def capacity_actions(stale, findings, rules):
+def machine_restart(names, runners, rules):
+    """Whether restarting the VM or machine the named runners run on is safe: every runner on that box (by
+    `capacity.host.runners` prefix) is offline or idle. Returns {"box", "machine_restart_ok", "busy"}; busy lists
+    the runners a machine restart would kill."""
+    boxes = rules["capacity"].get("host", {}).get("runners") or {}
+    found = {box_of(n, boxes) for n in names} - {None}
+    if len(found) != 1 or runners is None:
+        return {"box": ",".join(sorted(found)) or None, "machine_restart_ok": False, "busy": None}
+    box = found.pop()
+    busy = sorted(r.get("name") for r in runners if box_of(r.get("name"), boxes) == box and r.get("busy"))
+    return {"box": box, "machine_restart_ok": not busy, "busy": busy}
+
+
+def capacity_actions(stale, findings, rules, runners=None):
+    """`runners`: the owner's runners this pass, to decide whether a restart may go as far as the machine."""
     cap = rules["capacity"]
     acts = []
     if stale:
@@ -811,16 +854,21 @@ def capacity_actions(stale, findings, rules):
                                 "or a dead machine). Stopped restarting; it needs a look." % (k, f["restarts"])})
             continue
         if k == "runner-offline":
-            acts.append({"do": "restart-runner", "needs_person": False, "runner": f["runner"],
-                         "why": "offline with jobs queued for its labels: restart its service or container on its "
-                                "machine (never delete the registration)"})
+            acts.append(dict({"do": "restart-runner", "needs_person": False, "runner": f["runner"],
+                              "why": "offline with jobs queued for its labels: restart its service or container on "
+                                     "its machine (never delete the registration)"},
+                             **machine_restart([f["runner"]], runners, rules)))
         elif k == "idle-but-queued":
-            acts.append({"do": "restart-runner", "needs_person": False, "runner": ", ".join(f["idle"]),
-                         "why": "shown idle while %d jobs it fits are queued: hung; restart it" % f["queued_jobs"]})
+            idle = [x if isinstance(x, str) else x.get("runner") for x in f["idle"]]
+            acts.append(dict({"do": "restart-runner", "needs_person": False, "runner": ", ".join(idle),
+                              "why": "shown idle while %d jobs it fits are queued: hung; restart it"
+                                     % f["queued_jobs"]}, **machine_restart(idle, runners, rules)))
         elif k == "pool-down":
-            acts.append({"do": "restore-pool", "needs_person": False, "labels": f["labels"],
-                         "why": "%d jobs queued and every runner that fits %s is offline: restart them"
-                                % (f["queued_jobs"], f["labels"])})
+            acts.append(dict({"do": "restore-pool", "needs_person": False, "labels": f["labels"],
+                              "runner": ", ".join(f.get("offline") or []),
+                              "why": "%d jobs queued and every runner that fits %s is offline: restart them"
+                                     % (f["queued_jobs"], f["labels"])},
+                             **machine_restart(f.get("offline") or [], runners, rules)))
         elif k == "no-runner-for-labels":
             # Nothing to restart: a mistyped runs-on, a larger-runner label, or a runner never registered.
             acts.append({"do": "report", "needs_person": True, "labels": f["labels"], "repos": f.get("repos"),
@@ -934,12 +982,46 @@ def _read_state(path):
 
 
 def _write_state(path, state):
+    """Write to a temp file beside it and rename, so a crash mid-write never leaves half a state file."""
+    tmp = "%s.%d.tmp" % (path, os.getpid())
     try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as fh:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(state, fh, indent=1)
+        os.replace(tmp, path)
     except OSError:
-        pass
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+LOCK_STALE_MINUTES = 60
+
+
+def _take_lock(path):
+    """One capacity pass per state file at a time. A lock older than LOCK_STALE_MINUTES is from a run that died
+    and is taken over. Returns the lock path, or None when another pass holds it."""
+    lock = path + ".lock"
+    os.makedirs(os.path.dirname(lock) or ".", exist_ok=True)
+    for _ in range(2):
+        try:
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            os.write(fd, str(os.getpid()).encode())
+            os.close(fd)
+            return lock
+        except FileExistsError:
+            try:
+                age = time.time() - os.path.getmtime(lock)
+            except OSError:
+                continue
+            if age < LOCK_STALE_MINUTES * 60:
+                return None
+            try:
+                os.unlink(lock)
+            except OSError:
+                return None
+    return None
 
 
 def runner_groups(owner):
@@ -1022,12 +1104,31 @@ def owner_pools(owner, org_runners, aggs, state, rules, now, lean, groups=None):
         every = org_runners + [r for a in aggs.values() for r in a["runners"]]
         _, f = pool_report(every, allm, cap["backed_up_jobs"], oldest, cap["settle_minutes"], paused)
         findings.extend(x for x in f if x["kind"] == "idle-capacity-unreachable")
+    online = None
+    if org_runners is not None:
+        hung = {x if isinstance(x, str) else x.get("runner") for f in findings if f["kind"] == "idle-but-queued"
+                for x in f.get("idle") or []}
+        online = {r.get("name") for r in org_runners if r.get("status") == "online" and r.get("name") not in hung}
     ready = settle(findings, state.setdefault(owner, {}), now, cap["restart_cooldown_minutes"],
-                   cap["max_restarts"], cap["report_cooldown_minutes"])
+                   cap["max_restarts"], cap["report_cooldown_minutes"], online)
     return pools, findings, ready
 
 
 def cmd_capacity(args):
+    lock = _take_lock(args.state)
+    if lock is None:
+        print("another capacity pass holds %s.lock; skipping this one" % args.state, file=sys.stderr)
+        return 0
+    try:
+        return _capacity_pass(args)
+    finally:
+        try:
+            os.unlink(lock)
+        except OSError:
+            pass
+
+
+def _capacity_pass(args):
     rules = load_rules(args.rules)
     repos = args.repo or [current_repo()]
     out = {"generated_at": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "owners": [],
@@ -1069,7 +1170,7 @@ def cmd_capacity(args):
         pools, findings, ready = res
         all_pools.extend(pools)
         out["owners"].append({"owner": owner, "pools": pools, "findings": findings,
-                              "actions": capacity_actions([], ready, rules)})
+                              "actions": capacity_actions([], ready, rules, org_runners)})
     hosts = read_hosts(args.hosts)
     out["hosts"] = []
     for h in hosts:

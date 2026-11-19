@@ -3,7 +3,9 @@
 No network. Run:
     python3 -m unittest scripts/test_capacity.py -v
 """
+import os
 import sys
+import time
 import unittest
 from pathlib import Path
 
@@ -165,6 +167,51 @@ class Pools(unittest.TestCase):
         self.assertEqual(dos.count("restart-runner"), 3)
         self.assertEqual(dos.count("report"), 2)  # once, then again only after the 4-hour report cooldown
         self.assertEqual(dos[3], "report")
+
+    def test_a_finding_missing_for_one_pass_keeps_its_restart_count_and_cooldown(self):
+        import datetime as dt
+        t = dt.datetime(2026, 11, 19, 14, 0, tzinfo=dt.timezone.utc)
+        f2 = [{"kind": "runner-offline", "runner": "dind-1", "labels": []}]
+        state, acts = {}, 0
+        steward.settle(f2, state, t, 30)
+        acts += len(steward.settle(f2, state, t + dt.timedelta(minutes=10), 30))  # restart 1
+        steward.settle([], state, t + dt.timedelta(minutes=20), 30)  # missing once
+        steward.settle(f2, state, t + dt.timedelta(minutes=30), 30)  # first sighting again
+        acts += len(steward.settle(f2, state, t + dt.timedelta(minutes=35), 30))  # inside the 30-minute cooldown
+        self.assertEqual(acts, 1)
+        self.assertEqual(state["restarts"]["runner-offline|dind-1"], 1)
+
+    def test_restart_history_is_forgotten_when_the_runner_is_online_or_long_gone(self):
+        import datetime as dt
+        f = [{"kind": "runner-offline", "runner": "dind-1", "labels": []}]
+        t = dt.datetime(2026, 11, 19, 14, 0, tzinfo=dt.timezone.utc)
+        state = {}
+        steward.settle(f, state, t, 30)
+        steward.settle(f, state, t + dt.timedelta(minutes=10), 30)
+        steward.settle([], state, t + dt.timedelta(minutes=20), 30, online={"dind-1"})
+        self.assertNotIn("runner-offline|dind-1", state["restarts"])
+        state = {}
+        steward.settle(f, state, t, 30)
+        steward.settle(f, state, t + dt.timedelta(minutes=10), 30)
+        steward.settle([], state, t + dt.timedelta(minutes=60), 30)
+        self.assertIn("runner-offline|dind-1", state["restarts"])
+        steward.settle([], state, t + dt.timedelta(minutes=10 + 241), 30)
+        self.assertNotIn("runner-offline|dind-1", state["restarts"])
+
+    def test_machine_restart_only_when_every_runner_on_the_box_is_idle(self):
+        rules = dict(RULES, capacity=dict(RULES["capacity"], host=dict(RULES["capacity"]["host"],
+                     runners={"colima": ["davids-mac-mini-dind-"], "mini": ["davids-mac-mini-"]})))
+        f = [{"kind": "runner-offline", "runner": "davids-mac-mini-dind-sconsinc-1", "labels": []}]
+        runners = [{"name": "davids-mac-mini-dind-sconsinc-1", "status": "offline", "busy": False},
+                   {"name": "davids-mac-mini-dind-sconsinc-2", "status": "online", "busy": True},
+                   {"name": "davids-mac-mini-hph-1", "status": "online", "busy": True}]
+        a = steward.capacity_actions([], f, rules, runners)[0]
+        self.assertEqual((a["box"], a["machine_restart_ok"], a["busy"]),
+                         ("colima", False, ["davids-mac-mini-dind-sconsinc-2"]))
+        runners[1]["busy"] = False
+        a = steward.capacity_actions([], f, rules, runners)[0]
+        self.assertTrue(a["machine_restart_ok"])  # the busy runner is on the Mac itself, not in the VM
+        self.assertFalse(steward.capacity_actions([], f, rules, None)[0]["machine_restart_ok"])
 
     def test_no_runner_with_the_labels_is_a_report_for_a_person(self):
         _, f = steward.pool_report([], {("self-hosted", "linux-large"): 4}, 20)
@@ -411,6 +458,23 @@ class Sampling(unittest.TestCase):
         finally:
             steward.paged, steward.api = old
         self.assertEqual(rep["_labels"], {("hph-ci",): 10})  # 2 sampled runs of 10, one job each
+
+
+class StateFile(unittest.TestCase):
+    def test_state_is_written_atomically_and_one_pass_holds_the_lock(self):
+        import tempfile
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, "state.json")
+        steward._write_state(path, {"a": 1})
+        self.assertEqual(steward._read_state(path), {"a": 1})
+        self.assertEqual([n for n in os.listdir(d) if n.endswith(".tmp")], [])
+        lock = steward._take_lock(path)
+        self.assertIsNotNone(lock)
+        self.assertIsNone(steward._take_lock(path))
+        old = time.time() - (steward.LOCK_STALE_MINUTES + 1) * 60
+        os.utime(lock, (old, old))
+        self.assertIsNotNone(steward._take_lock(path))  # a lock from a run that died is taken over
+        os.unlink(lock)
 
 
 if __name__ == "__main__":

@@ -322,8 +322,9 @@ reroutes, so idle runners with other labels stay idle while a pool queues for ho
    - `restart-runner` and `restore-pool`: through Remote Control on the person's computer (runner admin and the
      machines are only reachable from there). Restart only that runner's own service or container. Never delete a
      registration. Restarting the VM or machine it runs in (Colima, a reboot) takes down every slot on it, so do it
-     only when no runner on that VM is busy and Colima itself is stopped or unresponsive; otherwise make it a
-     `report`. If its machine can't be reached, say so once, with which machine and why.
+     only when the action says `machine_restart_ok: true` (the check found every runner on that `box` offline or
+     idle) and the runner's own service restart didn't bring it back; when it is false, `busy` lists the runners a
+     machine restart would kill, and it becomes a `report`. If its machine can't be reached, say so once, with which machine and why.
    - `pause-slot` and `resume-slot` (from `--hosts`, the github-throughput dashboard's box health; run on the
      person's computer with `--hosts http://127.0.0.1:4517/api/data`): keep every runner box (Hetzner, the Mac mini
      and its Colima VM) inside its limits in `capacity.host`. On `pause-slot`, stop ONE idle runner slot on that box
