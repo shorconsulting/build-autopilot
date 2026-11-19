@@ -38,8 +38,18 @@ class StaleRuns(unittest.TestCase):
     def test_closed_superseded_and_duplicates(self):
         queued = [run(1, "CI", "gone", "x"), run(2, "CI", "a", "a1"), run(3, "CI", "a", "a2"),
                   run(4, "Auto-merge", "b", "b1"), run(5, "Auto-merge", "b", "b1"), run(6, "Auto-merge", "b", "b1")]
-        got = {i: why for i, why, _ in steward.stale_runs(queued, OPEN, closed_at=CLOSED)}
+        got = {i: why for i, why, _ in steward.stale_runs(queued, OPEN, closed_at=CLOSED, dedupe={"Auto-merge"})}
         self.assertEqual(got, {1: "closed", 2: "superseded", 4: "duplicate", 5: "duplicate"})
+
+    def test_only_listed_workflows_are_deduplicated(self):
+        queued = [run(4, "Label sync", "b", "b1"), run(5, "Label sync", "b", "b1"), run(6, "CI", "b", "b1"),
+                  run(7, "CI", "b", "b1")]
+        self.assertEqual([x[0] for x in steward.stale_runs(queued, OPEN)], [6])
+
+    def test_dedupe_list_can_name_one_repo(self):
+        rules = {"capacity": {"dedupe_workflows": ["CI", "o/app:Auto-merge"]}}
+        self.assertEqual(steward._dedupe(rules, "o/app"), {"CI", "Auto-merge"})
+        self.assertEqual(steward._dedupe(rules, "o/other"), {"CI"})
 
     def test_a_run_the_close_itself_started_is_kept(self):
         queued = [run(1, "CI", "gone", "x", created="2026-11-19T12:00:05Z"), run(2, "CI", "b", "b1")]
@@ -87,6 +97,13 @@ class StaleRuns(unittest.TestCase):
 
 
 class Pools(unittest.TestCase):
+    def test_runs_on_a_bare_custom_label_is_self_hosted(self):
+        runners = [runner("hph-ci-1", ["self-hosted", "hph-ci"])]
+        _, f = steward.pool_report(runners, {("hph-ci",): 9}, 20, {("hph-ci",): 30})
+        self.assertEqual(f[0]["kind"], "idle-but-queued")
+        self.assertFalse(steward.self_hosted(["ubuntu-latest"]))
+        self.assertTrue(steward.self_hosted(["hph-ci"]))
+
     def test_idle_capacity_that_no_queued_job_can_reach(self):
         runners = [runner("hph-ci-1", ["self-hosted", "hph-ci"], busy=True),
                    runner("hph-ci-10", ["self-hosted", "hph-ci-light"])]
@@ -96,9 +113,13 @@ class Pools(unittest.TestCase):
         self.assertIn("idle-capacity-unreachable", kinds)
         import datetime as dt
         state, t0 = {}, dt.datetime(2026, 11, 19, 14, 0, tzinfo=dt.timezone.utc)
-        ready = steward.settle(f, state, t0, 30)  # the finding that crashed settle() before
+        self.assertEqual(steward.settle(f, state, t0, 30), [])  # the finding that crashed settle() before
+        ready = steward.settle(f, state, t0 + dt.timedelta(minutes=10), 30)
         acts = steward.capacity_actions([], ready, RULES)
         self.assertEqual([a["do"] for a in acts], ["reroute"])
+        # A lasting mismatch is one reroute per report cooldown, not a PR every pass.
+        self.assertEqual(steward.settle(f, state, t0 + dt.timedelta(minutes=20), 30), [])
+        self.assertEqual(len(steward.settle(f, state, t0 + dt.timedelta(minutes=260), 30)), 1)
 
     def test_offline_runner_is_restarted_and_a_dead_pool_restored(self):
         runners = [runner("dind-1", ["self-hosted", "shorconsulting-ci"], status="offline")]
@@ -136,20 +157,94 @@ class Pools(unittest.TestCase):
         import datetime as dt
         f = [{"kind": "runner-offline", "runner": "dind-5", "labels": []}]
         state, t = {}, dt.datetime(2026, 11, 19, 14, 0, tzinfo=dt.timezone.utc)
-        restarts = 0
+        dos = []
         for i in range(12):
             ready = steward.settle(f, state, t + dt.timedelta(minutes=40 * i), 30, max_restarts=3)
-            acts = steward.capacity_actions([], ready, RULES)
-            restarts += sum(1 for a in acts if a["do"] == "restart-runner")
-        self.assertEqual(restarts, 3)
-        self.assertEqual(acts[0]["do"], "report")
-        self.assertTrue(acts[0]["needs_person"])
+            dos += [a["do"] for a in steward.capacity_actions([], ready, RULES)]
+        self.assertEqual(dos.count("restart-runner"), 3)
+        self.assertEqual(dos.count("report"), 2)  # once, then again only after the 4-hour report cooldown
+        self.assertEqual(dos[3], "report")
 
     def test_cancel_action_is_capped(self):
         stale = [(i, "closed", "CI") for i in range(RULES["capacity"]["max_cancels"] + 10)]
         a = steward.capacity_actions(stale, [], RULES)[0]
         self.assertEqual(len(a["runs"]), RULES["capacity"]["max_cancels"])
         self.assertFalse(a["needs_person"])
+
+
+def host(name, load5, cpus=32, mem_avail=100, mem_total=128, disk=0.05):
+    g = 1 << 30
+    return {"host": name, "ok": True, "cpus": cpus, "load5": load5, "MemTotal": mem_total * g,
+            "MemAvailable": mem_avail * g, "disks": [{"mount": "/", "size": 1000, "used": int(disk * 1000)}]}
+
+
+BACKED = [{"labels": ["hph-ci"], "queued_jobs": 100, "idle": 0}]
+
+
+class Hosts(unittest.TestCase):
+    def setUp(self):
+        import datetime as dt
+        self.t = dt.datetime(2026, 11, 19, 14, 0, tzinfo=dt.timezone.utc)
+        self.dt = dt
+
+    def test_levels(self):
+        self.assertEqual(steward.host_pressure(host("h", 52), RULES)[0], "red")       # 1.6 per core
+        self.assertEqual(steward.host_pressure(host("h", 20, mem_avail=4), RULES)[0], "red")  # memory 97%
+        self.assertEqual(steward.host_pressure(host("h", 20, disk=0.92), RULES)[0], "red")
+        self.assertEqual(steward.host_pressure(host("h", 30), RULES)[0], "ok")         # 0.94 per core
+        self.assertEqual(steward.host_pressure(host("h", 16), RULES)[0], "headroom")
+        self.assertEqual(steward.host_pressure({"host": "h", "ok": False}, RULES)[0], "unknown")
+
+    def test_pause_under_pressure_then_resume_with_headroom_one_slot_at_a_time(self):
+        state = {}
+        a = steward.host_actions([host("hph-ci", 52)], BACKED, RULES, state, self.t)
+        self.assertEqual([x["do"] for x in a], ["pause-slot"])
+        # still hot 5 minutes later: inside the cooldown, nothing more
+        self.assertEqual(steward.host_actions([host("hph-ci", 52)], BACKED, RULES, state,
+                                              self.t + self.dt.timedelta(minutes=5)), [])
+        a = steward.host_actions([host("hph-ci", 16)], BACKED, RULES, state, self.t + self.dt.timedelta(minutes=30))
+        self.assertEqual([x["do"] for x in a], ["resume-slot"])
+        # nothing left that this check paused: headroom alone never adds slots it didn't take out
+        self.assertEqual(steward.host_actions([host("hph-ci", 16)], BACKED, RULES, state,
+                                              self.t + self.dt.timedelta(minutes=60)), [])
+
+    def test_no_resume_without_a_backlog(self):
+        state = {"hosts": {"hph-ci": {"paused": 1}}}
+        self.assertEqual(steward.host_actions([host("hph-ci", 16)], [], RULES, state, self.t), [])
+
+
+class CapacityRepo(unittest.TestCase):
+    def test_closed_lookups_are_cached_encoded_and_skipped_when_lean(self):
+        calls = []
+        queued = [run(1, "CI", "fix#1", "x", created="2026-11-19T09:00:00Z"), run(2, "CI", "b", "b1")]
+
+        def fake_paged(path, key=None, cap=1000, per_page=100):
+            if "actions/runs" in path:
+                return queued
+            if "/pulls" in path:
+                return OPEN
+            return []
+
+        def fake_api(path):
+            calls.append(path)
+            if "state=closed" in path:
+                return [{"closed_at": "2026-11-19T12:00:00Z"}]
+            return {"jobs": []}
+        old = steward.paged, steward.api
+        steward.paged, steward.api = fake_paged, fake_api
+        try:
+            cache = {}
+            rep = steward.capacity_repo("o/r", RULES, 5, cache)
+            self.assertEqual([x["run"] for x in rep["stale"]], [1])
+            self.assertTrue(any("head=o%3Afix%231" in c for c in calls))
+            n = len(calls)
+            steward.capacity_repo("o/r", RULES, 5, cache)
+            self.assertFalse(any("state=closed" in c for c in calls[n:]))  # cached
+            calls.clear()
+            steward.capacity_repo("o/r", RULES, 5, {}, lean=True)
+            self.assertEqual([c for c in calls if "state=closed" in c or "/jobs" in c], [])
+        finally:
+            steward.paged, steward.api = old
 
 
 if __name__ == "__main__":

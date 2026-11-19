@@ -305,7 +305,10 @@ reroutes, so idle runners with other labels stay idle while a pool queues for ho
    the previous pass too (state in `~/.build-autopilot/capacity-state.json`), and one runner is restarted at most
    once per `capacity.restart_cooldown_minutes` and `capacity.max_restarts` times in all before it becomes a
    `report` for the person; idle-while-queued also needs a matching job queued over
-   `capacity.settle_minutes`. Per org, when
+   `capacity.settle_minutes`. Reroute and report findings repeat at most once per `capacity.report_cooldown_minutes`.
+   Duplicates are only cancelled for `capacity.dedupe_workflows` (workflows that do the same work whatever started
+   them). Below `capacity.min_rate_remaining` API calls left it runs lean (no close-time lookups or job sampling);
+   close times are cached in the state file, so each closed branch is looked up once. Per org, when
    runners can be read, it lists the label pools the queued jobs ask for and these findings: `runner-offline`,
    `pool-down`, `no-runner-for-labels`, `idle-but-queued` (hung), and `idle-capacity-unreachable` (online idle
    runners that no queued job can use while a pool is backed up).
@@ -315,7 +318,14 @@ reroutes, so idle runners with other labels stay idle while a pool queues for ho
    - `restart-runner` and `restore-pool`: through Remote Control on the person's computer (runner admin and the
      machines are only reachable from there). Restart the runner's service or container, or the VM it runs in
      (Colima). Never delete a registration. If its machine can't be reached, say so once, with which machine and why.
-   - `reroute`: open a pull request in the repo that moves its light jobs (auto-merge, sweeps, labelling, mark-done,
+   - `pause-slot` and `resume-slot` (from `--hosts`, the github-throughput dashboard's box health; run on the
+     person's computer with `--hosts http://127.0.0.1:4517/api/data`): keep every runner box (Hetzner, the Mac mini
+     and its Colima VM) inside its limits in `capacity.host`. On `pause-slot`, stop ONE idle runner slot on that box
+     (its service or container; never a busy one, never below `min_slots` running, never delete a registration) and
+     note which one in the state file; on `resume-slot`, start the slot this check paused most recently. One change
+     per box per `cooldown_minutes`. A box at red with no idle slot left is a `report`.
+   - `reroute`: before opening a pull request, look for an open one from the steward for the same labels and
+     update it instead. Open a pull request in the repo that moves its light jobs (auto-merge, sweeps, labelling, mark-done,
      cancel-on-close) to the idle runners' label, or file it as the steward lane's next item. A CI-machinery or ADR
      change follows the repo's own landing rules.
 3. Say nothing when nothing was found. Otherwise one line per repo: runs cancelled, runners restarted, PRs opened.

@@ -45,13 +45,35 @@
   "capacity": {
     "cron": "*/10 * * * *",
     "max_cancels": 500,
-    "sample_runs": 60,
+    "sample_runs": 30,
     "backed_up_jobs": 20,
     "why": "Every 10 minutes where the scheduler allows it (cloud scheduled tasks run at most hourly): cancel queued runs nobody needs, restart runners that stayed offline or hung for two passes in a row (once per 30 minutes at most), and flag idle runners no queued job can reach. GitHub never reroutes a job to a runner with other labels.",
     "settle_minutes": 10,
     "restart_cooldown_minutes": 30,
     "keep_after_close": [],
     "max_restarts": 3,
-    "max_close_lookups": 300
+    "max_close_lookups": 100,
+    "min_rate_remaining": 1500,
+    "report_cooldown_minutes": 240,
+    "dedupe_workflows": [
+      "CI",
+      "test",
+      "security",
+      "backend-ci",
+      "shell-ci",
+      "app-ci",
+      "repo-hygiene",
+      "Qwen review",
+      "HPortHealth/app:Auto-merge"
+    ],
+    "host": {
+      "red_load_per_core": 1.5,
+      "red_mem_pct": 95,
+      "red_disk_pct": 90,
+      "headroom_load_per_core": 0.8,
+      "headroom_mem_pct": 75,
+      "cooldown_minutes": 20,
+      "min_slots": 2
+    }
   }
 }
