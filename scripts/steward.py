@@ -142,10 +142,15 @@ class Sweeper:
         runs = (api("repos/%s/commits/%s/check-runs?per_page=100" % (repo, sha)) or {}).get("check_runs", [])
         stall = self.rules["stall"]
         out = {"total": len(runs), "failed": [], "infra": [], "stalled": [], "pending": 0}
-        # A check cancelled because another run of it took over (a duplicate trigger, a concurrency group) is not a
-        # failure: the live one decides. Only a cancel with nothing else of that name is a machine failure.
-        live = {r.get("name") for r in runs if not (r.get("status") == "completed"
-                                                   and r.get("conclusion") == "cancelled")}
+        # A check cancelled because a later run of it took over (a duplicate trigger, a concurrency group) is not a
+        # failure: the later one decides. Only a cancel nothing of that name started after is a machine failure.
+        later = {}
+        for r in runs:
+            if not (r.get("status") == "completed" and r.get("conclusion") == "cancelled"):
+                later[r.get("name")] = max(later.get(r.get("name")) or "", r.get("started_at") or "")
+
+        def superseded(r):
+            return r.get("name") in later and later[r["name"]] > (r.get("started_at") or "")
         for r in runs:
             if r.get("status") != "completed":
                 started = parse_time(r.get("started_at"))
@@ -161,7 +166,7 @@ class Sweeper:
                 else:
                     out["pending"] += 1
                 continue
-            if r.get("conclusion") == "cancelled" and r.get("name") in live:
+            if r.get("conclusion") == "cancelled" and superseded(r):
                 continue
             if r.get("conclusion") in FAILED or r.get("conclusion") == "cancelled":
                 entry = {"name": r.get("name"), "conclusion": r.get("conclusion"), "job": job_id(r)}

@@ -79,8 +79,14 @@ class SweepCarriesRunIds(unittest.TestCase):
 
     def test_a_cancel_superseded_by_a_live_run_is_not_a_failure(self):
         fake = FakeGitHub(pulls=[pr(1, "a")],
-                          checks={"a": [run(21, "build", conclusion="cancelled"), run(22, "build")]})
+                          checks={"a": [run(21, "build", conclusion="cancelled"), run(22, "build", started="2026-11-15T20:30:00Z")]})
         self.assertEqual(self.sweep(fake)["pull_requests"][0]["state"], "green")
+
+    def test_a_cancel_beside_an_earlier_finished_check_of_that_name_is_still_infra(self):
+        fake = FakeGitHub(pulls=[pr(1, "a")],
+                          checks={"a": [run(21, "build", conclusion="cancelled", started="2026-11-15T20:30:00Z"),
+                                        run(22, "build", started="2026-11-15T20:00:00Z")]})
+        self.assertEqual(self.sweep(fake)["pull_requests"][0]["state"], "red-infra")
 
 
 if __name__ == "__main__":
