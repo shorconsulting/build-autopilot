@@ -39,11 +39,18 @@ mkdir -p -m 700 "$STATE"
 # The token for one org: minted from its app when there is one, else its token file. Empty when neither works.
 token_for() {
   local app="$CONF/$1.app" APP_ID="" KEY=""
+  local minted=""
   if [ -f "$app" ]; then
     APP_ID="$(sed -n 's/^APP_ID=//p' "$app")"
     KEY="$(sed -n 's/^KEY=//p' "$app")"
-    "$HERE/app-token.sh" "$APP_ID" "$KEY" "$1" 2>/dev/null || true
-  elif [ -s "$CONF/$1.token" ]; then
+    # Its errors go to the journal (stderr); the token alone goes to stdout.
+    if minted="$("$HERE/app-token.sh" "$APP_ID" "$KEY" "$1")" && [ -n "$minted" ]; then
+      printf '%s' "$minted"
+      return 0
+    fi
+    echo "$1: could not mint a token from $app (app id, key or installation); trying $1.token" >&2
+  fi
+  if [ -s "$CONF/$1.token" ]; then
     cat "$CONF/$1.token"
   fi
 }
