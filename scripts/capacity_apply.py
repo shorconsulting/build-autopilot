@@ -2,7 +2,8 @@
 """Act on a `steward.py capacity --out` report without an agent, on an always-on runner box (cron / systemd timer).
 
 Self-healing (build rules, rule 3): cancel the stale queued runs it lists and restart this box's own runner services
-it names. It never deletes a registration, never restarts a VM or reboots the box, and touches only runners whose
+it names, and start one more slot when the report says `add-slot` for this box (--host), at the lowest slot number
+no runner of this box uses. It never deletes a registration, never restarts a VM or reboots the box, and touches only runners whose
 names match --slot-regex (runners of other boxes are left to the steward on their own box). Every action is printed
 as one line, so the timer's journal is the after-the-fact record.
 
@@ -19,7 +20,7 @@ import sys
 RESTART_ACTIONS = ("restart-runner", "restore-pool")
 
 
-def plan(report, slot_regex, restart_template, max_cancels=100, seen=None, cancel=True):
+def plan(report, slot_regex, restart_template, max_cancels=100, seen=None, cancel=True, host=""):
     """[(kind, argv, why)] for this box: cancels for every repo's cancel-stale, restarts for this box's slots.
     `seen`: slots already planned this pass (shared across reports, so a slot restarts at most once per pass).
     Slots are one numbered service per box: on hph-ci, hph-ci-10 and hph-ci-light-10 are both hph-runner@10."""
@@ -52,6 +53,18 @@ def plan(report, slot_regex, restart_template, max_cancels=100, seen=None, cance
                 seen.add(slot)
                 argv = shlex.split(restart_template.format(slot=slot))
                 out.append(("restart", argv, "%s (%s): %s" % (name, owner.get("owner"), act.get("why", ""))))
+    for act in report.get("host_actions") or []:
+        if act.get("do") != "add-slot" or act.get("needs_person") or not host or act.get("host") != host:
+            continue
+        if not rx or not restart_template or "add-slot" in seen:
+            continue
+        used = {int(m.group(1)) for m in (rx.search(n or "") for n in act.get("slots") or []) if m}
+        slot = next(i for i in range(1, len(used) + 2) if i not in used)
+        if len(used) >= int(act.get("max") or 0) or str(slot) in seen:
+            continue
+        seen.update({"add-slot", str(slot)})
+        out.append(("add-slot", shlex.split(restart_template.format(slot=slot)),
+                    "%s slot %d: %s" % (host, slot, act.get("why", ""))))
     return out
 
 
@@ -61,6 +74,7 @@ def main(argv=None):
     ap.add_argument("--slot-regex", default="", help="regex whose group 1 is this box's slot number")
     ap.add_argument("--restart", default="", help="command template to restart a slot, with {slot}")
     ap.add_argument("--max-cancels", type=int, default=100)
+    ap.add_argument("--host", default="", help="this box's name in capacity.host.runners, for add-slot")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--no-cancel", action="store_true", help="restarts only (cancels need that org's token)")
     ap.add_argument("--no-restart", action="store_true", help="cancels only")
@@ -70,7 +84,7 @@ def main(argv=None):
         with open(path, encoding="utf-8") as fh:
             report = json.load(fh)
         steps += plan(report, a.slot_regex, "" if a.no_restart else a.restart, a.max_cancels, seen,
-                      cancel=not a.no_cancel)
+                      cancel=not a.no_cancel, host=a.host)
     failed = 0
     for kind, cmd, why in steps:
         if a.dry_run:
