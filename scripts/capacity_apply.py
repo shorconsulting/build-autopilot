@@ -17,6 +17,9 @@ import subprocess
 import sys
 
 RESTART_ACTIONS = ("restart-runner", "restore-pool")
+# GitHub answers 409 "has not been queued yet" for a ghost run it lists as queued but can neither run nor cancel
+# (seen on runs over a week old). Nothing waits on it, so it is reported as skipped, never as a failure.
+GHOST_CANCEL = "has not been queued yet"
 
 
 def plan(report, slot_regex, restart_template, max_cancels=100, seen=None, cancel=True):
@@ -78,9 +81,13 @@ def main(argv=None):
             continue
         res = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
         ok = res.returncode == 0
+        err = (res.stderr or res.stdout).strip()
+        if not ok and kind == "cancel" and GHOST_CANCEL in err:
+            print("cancel skipped: %s (GitHub cannot cancel this ghost run; nothing waits on it)" % why)
+            continue
         failed += 0 if ok else 1
         print("%s %s: %s%s" % (kind, "ok" if ok else "FAILED", why,
-                               "" if ok else " (%s)" % (res.stderr or res.stdout).strip()[:200]))
+                               "" if ok else " (%s)" % err[:200]))
     return 1 if failed else 0
 
 
