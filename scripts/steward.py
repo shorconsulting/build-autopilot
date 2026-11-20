@@ -738,6 +738,9 @@ def host_actions(hosts, pools, rules, state, now, runners=None):
                  paused list stays true and pool checks don't restart it.
     red on disk only -> report: pausing runners frees no disk.
     headroom while a pool is backed up -> resume-slot: start the slot this check paused most recently.
+    headroom while a pool it serves is backed up, nothing paused, every slot on it busy, and fewer online than
+                 `capacity.host.max_slots[box]` -> add-slot: start ONE more slot (2026-11-20: 12 busy slots against
+                 ~2,000 queued runs, and nothing could grow the pool). Off for a box with no max_slots entry.
     One change per box per `capacity.host.cooldown_minutes`. `state["hosts"][box]`: {"paused": [names],
     "red_seen": iso, "changed": iso}."""
     t = rules["capacity"]["host"]
@@ -824,6 +827,16 @@ def host_actions(hosts, pools, rules, state, now, runners=None):
                                 "again, then record it with capacity-note --resumed"
                                 % (h["host"], m["load_per_core"], m["mem_pct"], st["paused"][-1])})
             st["changed"] = stamp
+        elif level == "headroom" and backed_up and not st["paused"] and not cooling:
+            add = add_slot(h["host"], runners, rules, wanted)
+            if add:
+                acts.append(dict({"do": "add-slot", "needs_person": False, "host": h["host"], "metrics": m,
+                                  "why": "%s has headroom (load %.2f per core, memory %d%%), all %d of its slots are "
+                                         "busy and %d jobs it fits are queued: start one more slot (ceiling %d); "
+                                         "the next pass counts it from GitHub, nothing to record"
+                                         % (h["host"], m["load_per_core"], m["mem_pct"], add["online"],
+                                            add["queued_jobs"], add["max"])}, **add))
+                st["changed"] = stamp
         elif level == "unknown" and h.get("host"):
             last_r = parse_time(st.get("reported"))
             if not last_r or (now - last_r).total_seconds() >= rules["capacity"]["report_cooldown_minutes"] * 60:
@@ -876,6 +889,27 @@ def pick_idle_slot(host, runners, rules, paused):
     if not idle:
         return None, "every online slot is busy"
     return sorted(r["name"] for r in idle)[-1], len(online)
+
+
+def add_slot(host, runners, rules, wanted):
+    """Whether `host` may start one more runner slot: it has a `capacity.host.max_slots` ceiling, runners are
+    readable, every online slot on it is busy, fewer than the ceiling are online, and a backed-up pool's labels fit
+    its slots. Returns {"online", "max", "queued_jobs", "labels"} or None."""
+    t = rules["capacity"]["host"]
+    ceiling = (t.get("max_slots") or {}).get(host)
+    if not ceiling or runners is None:
+        return None
+    mine = [r for r in runners if box_of(r.get("name"), t.get("runners") or {}) == host]
+    online = [r for r in mine if r.get("status") == "online"]
+    if not online or len(online) >= ceiling or any(not r.get("busy") for r in online):
+        return None
+    have = [[l["name"] if isinstance(l, dict) else l for l in r.get("labels") or []] for r in online]
+    fit = [p for p in wanted if any(fits(p["labels"], h) for h in have)]
+    if not fit:
+        return None
+    top = max(fit, key=lambda p: p["queued_jobs"])
+    return {"online": len(online), "max": ceiling, "queued_jobs": top["queued_jobs"], "labels": top["labels"],
+            "slots": sorted(r.get("name") for r in mine)}
 
 
 PENDING_PAUSE_HOURS = 4

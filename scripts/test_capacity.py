@@ -581,5 +581,38 @@ class StackedWorkflowTest(unittest.TestCase):
         self.assertEqual(steward.stacked_workflows(gone, self.prs(1)), [])
 
 
+class AddSlot(unittest.TestCase):
+    """add-slot (2026-11-20): every slot busy, headroom, a backlog it fits, under the box's ceiling."""
+
+    def setUp(self):
+        import copy
+        import datetime as dt
+        self.t = dt.datetime(2026, 11, 20, 20, 0, tzinfo=dt.timezone.utc)
+        self.rules = copy.deepcopy(RULES)
+        self.rules["capacity"]["host"]["max_slots"] = {"hph-ci": 4}
+
+    def slots(self, n, busy=True):
+        return [runner("hph-ci-%d" % i, ["self-hosted", "hph-ci"], status="online", busy=busy) for i in range(1, n + 1)]
+
+    def test_adds_one_slot_when_all_busy_with_headroom_and_a_fitting_backlog(self):
+        a = steward.host_actions([host("hph-ci", 16)], BACKED, self.rules, {}, self.t, self.slots(3))
+        self.assertEqual([x["do"] for x in a], ["add-slot"])
+        self.assertEqual((a[0]["online"], a[0]["max"]), (3, 4))
+
+    def test_never_past_the_ceiling_nor_with_an_idle_slot_nor_without_a_ceiling(self):
+        self.assertEqual(steward.host_actions([host("hph-ci", 16)], BACKED, self.rules, {}, self.t, self.slots(4)), [])
+        idle = self.slots(2) + [runner("hph-ci-3", ["self-hosted", "hph-ci"], status="online", busy=False)]
+        self.assertEqual(steward.host_actions([host("hph-ci", 16)], BACKED, self.rules, {}, self.t, idle), [])
+        self.assertEqual(steward.host_actions([host("hph-ci", 16)], BACKED, RULES, {}, self.t, self.slots(3)), [])
+
+    def test_no_add_under_load_and_one_change_per_cooldown(self):
+        self.assertNotIn("add-slot", [x["do"] for x in steward.host_actions(
+            [host("hph-ci", 30)], BACKED, self.rules, {}, self.t, self.slots(3))])  # ok, not headroom
+        state = {}
+        steward.host_actions([host("hph-ci", 16)], BACKED, self.rules, state, self.t, self.slots(3))
+        later = self.t + __import__("datetime").timedelta(minutes=5)
+        self.assertEqual(steward.host_actions([host("hph-ci", 16)], BACKED, self.rules, state, later, self.slots(3)), [])
+
+
 if __name__ == "__main__":
     unittest.main()

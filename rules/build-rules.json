@@ -76,6 +76,8 @@
       "cooldown_minutes": 20,
       "min_slots": 2,
       "paused_report_hours": 12,
+      "max_slots": {},
+      "max_slots_note": "Ceiling of online runner slots per box for add-slot, e.g. {\"hph-ci\": 16, \"colima\": 8}. A box with no entry never grows.",
       "runners": {
         "hph-ci": [
           "hph-ci-"

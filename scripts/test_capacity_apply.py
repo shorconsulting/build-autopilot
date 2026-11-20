@@ -50,5 +50,21 @@ class Guards(unittest.TestCase):
         self.assertEqual(b, [])
 
 
+class AddSlot(unittest.TestCase):
+    RX = r"^hph-ci-(?:light-)?([0-9]+)(?:-|$)"
+
+    def rep(self, host="hph-ci", slots=("hph-ci-1-9", "hph-ci-2-9", "hph-ci-light-4-9"), mx=6):
+        return {"host_actions": [{"do": "add-slot", "needs_person": False, "host": host, "max": mx,
+                                  "slots": list(slots), "why": "backed up"}]}
+
+    def test_starts_the_lowest_free_slot_on_this_box_once(self):
+        steps = capacity_apply.plan(self.rep(), self.RX, "sudo -n restart-runner-slot {slot}", host="hph-ci", cancel=False)
+        self.assertEqual([(k, a) for k, a, _ in steps], [("add-slot", ["sudo", "-n", "restart-runner-slot", "3"])])
+
+    def test_other_box_no_host_or_at_ceiling_starts_nothing(self):
+        for rep, host in ((self.rep(host="colima"), "hph-ci"), (self.rep(), ""), (self.rep(mx=3), "hph-ci")):
+            self.assertEqual(capacity_apply.plan(rep, self.RX, "x {slot}", host=host, cancel=False), [])
+
+
 if __name__ == "__main__":
     unittest.main()
