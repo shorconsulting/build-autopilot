@@ -36,6 +36,9 @@ Done means `lanes.done_means`: every pull request the lane opened is merged (or 
 its CI is green, and nothing it started is left on a branch without a pull request. Opening a PR is the middle of the
 work, not the end.
 
+- Push a PR's branch only when the change is ready for CI: commit work in progress locally and push once. Every push
+  cancels the PR's running CI and puts it at the back of the queue, so a lane that pushes every 15 minutes on a busy
+  pool never gets a green run (ranch-rides, 2026-11-20: 78% of CI minutes went to runs a newer push cancelled).
 - After you push, wait for the checks (`gh run watch`, or `$FB pr-wait <n> --seconds 540`), never by re-reading the PR
   in a loop. Green and allowed to merge by the policy: land it. Red: read the first error lines and fix it on the
   same branch. Behind or in conflict: update or rebase it.
