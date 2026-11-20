@@ -38,8 +38,8 @@ def pr(n, sha, base="main", head=None, draft=False, created="2026-11-10T00:00:00
 class FakeGitHub:
     """Answers the REST paths the steward reads, from dictionaries."""
 
-    def __init__(self, pulls, checks, jobs=None, mergeable=None, main_runs=(), wip=(), runs=()):
-        self.pulls, self.checks, self.jobs = pulls, checks, jobs or {}
+    def __init__(self, pulls, checks, jobs=None, mergeable=None, main_runs=(), wip=(), runs=(), workflows=()):
+        self.pulls, self.checks, self.jobs, self.workflows = pulls, checks, jobs or {}, list(workflows)
         self.mergeable, self.main_runs, self.wip, self.runs = mergeable or {}, list(main_runs), list(wip), list(runs)
         self.calls, self.closed, self.attempts = [], [], {}
 
@@ -59,6 +59,8 @@ class FakeGitHub:
             return {"check_runs": self.checks.get(base.split("/")[-2], [])}
         if base.startswith("repos/%s/actions/jobs/" % REPO):
             return self.jobs.get(int(base.rsplit("/", 1)[1]), {})
+        if base == "repos/%s/actions/workflows" % REPO:
+            return {"workflows": self.workflows}
         if base == "repos/%s/actions/runs" % REPO:
             if "event=push" in path:
                 return {"workflow_runs": self.main_runs}
@@ -133,6 +135,18 @@ class Sweep(unittest.TestCase):
         self.assertEqual(rep["main"]["red_hours"], 6.0)
         self.assertEqual(acts[0]["do"], "fix-main")
         self.assertTrue(acts[0]["needs_person"])  # over main_red_hours
+
+    def test_deleted_or_disabled_workflow_does_not_keep_main_red(self):
+        main_runs = [{"name": "CI", "workflow_id": 1, "conclusion": "success", "created_at": "2026-11-15T18:00:00Z"},
+                     {"name": "", "workflow_id": 2, "conclusion": "startup_failure",
+                      "created_at": "2026-11-09T19:08:38Z"},
+                     {"name": "Old", "workflow_id": 3, "conclusion": "failure", "created_at": "2026-11-09T10:00:00Z"}]
+        workflows = [{"id": 1, "state": "active"}, {"id": 2, "state": "deleted"},
+                     {"id": 3, "state": "disabled_manually"}]
+        rep, acts = self.sweep(FakeGitHub(pulls=[], checks={}, main_runs=main_runs, workflows=workflows))
+        self.assertEqual(rep["main"]["state"], "green")
+        self.assertEqual(rep["main"]["failed"], [])
+        self.assertNotIn("fix-main", [a["do"] for a in acts])
 
     def test_health_line_counts_flaky_jobs_and_merges(self):
         runs = [({"id": 5, "name": "CI", "run_attempt": 2, "conclusion": "success"}, [job(50, "hph-ci-1")])]

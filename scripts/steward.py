@@ -235,9 +235,18 @@ class Sweeper:
         commit are not used: review and retry bots attach their own results there."""
         runs = (api("repos/%s/actions/runs?branch=%s&event=push&status=completed&per_page=100" % (repo, branch))
                 or {}).get("workflow_runs", [])
+        # A run of a workflow whose file was deleted or that was disabled can never run again, so its last
+        # failure (often a startup_failure with no name) would keep main "red" forever.
+        try:
+            gone = {w.get("id") for w in (api("repos/%s/actions/workflows?per_page=100" % repo) or {})
+                    .get("workflows", []) if w.get("state") != "active"}
+        except GhError:
+            gone = set()
         latest, history = {}, {}
         for run in runs:  # newest first
             if run.get("conclusion") in ("cancelled", "skipped"):
+                continue
+            if run.get("workflow_id") is not None and run.get("workflow_id") in gone:
                 continue
             latest.setdefault(run.get("name"), run)
             history.setdefault(run.get("name"), []).append(run)
