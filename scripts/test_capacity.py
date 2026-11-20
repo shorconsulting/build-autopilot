@@ -556,10 +556,6 @@ class StateFile(unittest.TestCase):
         os.unlink(lock)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class StackedWorkflowTest(unittest.TestCase):
     """A workflow queueing several runs per open pull request (app's Auto-merge disarm, 2026-11-20) is flagged."""
 
@@ -583,3 +579,7 @@ class StackedWorkflowTest(unittest.TestCase):
         self.assertEqual(steward.stacked_workflows(few, self.prs(1), min_runs=50), [])
         gone = [run(i, "Auto-merge", "x", "old") for i in range(100)]
         self.assertEqual(steward.stacked_workflows(gone, self.prs(1)), [])
+
+
+if __name__ == "__main__":
+    unittest.main()

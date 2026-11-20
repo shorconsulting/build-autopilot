@@ -517,7 +517,7 @@ def stacked_workflows(queued, open_prs, min_runs=50, per_pr=2.0):
     PRs stopped merging). They can't be cancelled safely here, because each run may act on its own event, so
     they become an `improve` item: give the workflow a per-PR concurrency group or start its jobs only on the
     events they act on. Returns [{"workflow", "queued", "prs", "per_pr"}], most queued first."""
-    open_shas = {(p.get("head") or {}).get("sha") for p in open_prs}
+    open_shas = {sha for p in open_prs if (sha := (p.get("head") or {}).get("sha"))}
     runs, prs = {}, {}
     for r in queued:
         if r.get("event") not in PR_EVENTS or r.get("head_sha") not in open_shas:
