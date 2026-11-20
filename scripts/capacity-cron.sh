@@ -4,7 +4,9 @@
 #   <Owner>.token   a fine-grained GitHub token for that org (mode 600), one per org
 #   repos           one owner/repo per line (# comments allowed)
 #   apply.env       optional: SLOT_REGEX and RESTART (see capacity_apply.py) for this box's own runners,
-#                   DRY_RUN=1 to only print what it would do (do one dry pass first)
+#                   DRY_RUN=1 to only print what it would do (do one dry pass first),
+#                   SWEEP_EVERY_MIN (default 30; 0 = off): how often to also re-run checks that failed before the
+#                   code ran and cancel hung ones (steward.py sweep + sweep_apply.py, plain code, no AI)
 # Each org's repos are checked with that org's token; this box's runners are restarted, stale runs cancelled.
 set -euo pipefail
 
@@ -14,6 +16,7 @@ STATE="${CAPACITY_STATE:-/var/lib/build-autopilot}"
 SLOT_REGEX=""
 RESTART=""
 DRY_RUN=""
+SWEEP_EVERY_MIN=30
 if [ -f "$CONF/apply.env" ]; then
   # shellcheck disable=SC1091
   . "$CONF/apply.env"
@@ -56,4 +59,30 @@ if [ -n "$reports" ] && [ -n "$RESTART" ]; then
   # shellcheck disable=SC2086
   python3 "$HERE/capacity_apply.py" $reports --no-cancel --slot-regex "$SLOT_REGEX" --restart "$RESTART" $dry \
     || echo "some restarts failed (see above)"
+fi
+
+# The PR sweep reads every open PR's checks, so it runs less often than the capacity pass.
+if [ "${SWEEP_EVERY_MIN:-0}" -gt 0 ]; then
+  stamp="$STATE/sweep.stamp"
+  if [ -f "$stamp" ] && [ -n "$(find "$stamp" -mmin -"$SWEEP_EVERY_MIN" 2>/dev/null)" ]; then
+    exit 0
+  fi
+  touch "$stamp"
+  for owner in $owners; do
+    tok="$CONF/$owner.token"
+    [ -s "$tok" ] || continue
+    args=""
+    for r in $(grep -v '^[[:space:]]*#' "$CONF/repos" | grep "^$owner/"); do
+      args="$args --repo $r"
+    done
+    out="$STATE/sweep-$owner.json"
+    # shellcheck disable=SC2086
+    if GH_TOKEN="$(cat "$tok")" python3 "$HERE/steward.py" sweep $args --out "$out" \
+        --history-dir "$STATE/steward-history"; then
+      GH_TOKEN="$(cat "$tok")" python3 "$HERE/sweep_apply.py" "$out" $dry \
+        || echo "$owner: some re-runs or cancels failed (see above)"
+    else
+      echo "$owner: sweep failed"
+    fi
+  done
 fi

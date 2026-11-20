@@ -142,19 +142,32 @@ class Sweeper:
         runs = (api("repos/%s/commits/%s/check-runs?per_page=100" % (repo, sha)) or {}).get("check_runs", [])
         stall = self.rules["stall"]
         out = {"total": len(runs), "failed": [], "infra": [], "stalled": [], "pending": 0}
+        # A check cancelled because another run of it took over (a duplicate trigger, a concurrency group) is not a
+        # failure: the live one decides. Only a cancel with nothing else of that name is a machine failure.
+        live = {r.get("name") for r in runs if not (r.get("status") == "completed"
+                                                   and r.get("conclusion") == "cancelled")}
         for r in runs:
             if r.get("status") != "completed":
                 started = parse_time(r.get("started_at"))
                 age_min = (self.now - started).total_seconds() / 60 if started else None
                 limit = stall["check_queued_minutes"] if r.get("status") == "queued" else stall["check_running_minutes"]
                 if age_min is not None and age_min > limit:
-                    out["stalled"].append({"name": r.get("name"), "status": r.get("status"), "minutes": int(age_min)})
+                    entry = {"name": r.get("name"), "status": r.get("status"), "minutes": int(age_min),
+                             "job": job_id(r)}
+                    if classify and entry["job"] and r.get("status") == "in_progress":
+                        j = self.job(repo, entry["job"])
+                        entry.update(run_id=j.get("run_id"), attempt=j.get("run_attempt"))
+                    out["stalled"].append(entry)
                 else:
                     out["pending"] += 1
+                continue
+            if r.get("conclusion") == "cancelled" and r.get("name") in live:
                 continue
             if r.get("conclusion") in FAILED or r.get("conclusion") == "cancelled":
                 entry = {"name": r.get("name"), "conclusion": r.get("conclusion"), "job": job_id(r)}
                 if classify and self.is_infra(repo, r):
+                    j = self.job(repo, entry["job"]) if entry["job"] else {}
+                    entry.update(run_id=j.get("run_id"), attempt=j.get("run_attempt"))
                     out["infra"].append(entry)
                 elif r.get("conclusion") != "cancelled":
                     out["failed"].append(entry)
@@ -300,6 +313,7 @@ class Sweeper:
                         "lane": next((l["name"][5:] for l in p.get("labels") or [] if l["name"].startswith("lane:")),
                                      None),
                         "failed": [f["name"] for f in chk["failed"]], "infra": [f["name"] for f in chk["infra"]],
+                        "infra_runs": [{k: f.get(k) for k in ("name", "run_id", "attempt")} for f in chk["infra"]],
                         "stalled": chk["stalled"], "classified": i < cap})
         try:
             wip = api("repos/%s/git/matching-refs/heads/fast-builder/wip/" % repo) or []
