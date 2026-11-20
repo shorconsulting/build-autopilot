@@ -6,7 +6,9 @@
 #   apply.env       optional: SLOT_REGEX and RESTART (see capacity_apply.py) for this box's own runners,
 #                   DRY_RUN=1 to only print what it would do (do one dry pass first),
 #                   SWEEP_EVERY_MIN (default 30; 0 = off): how often to also re-run checks that failed before the
-#                   code ran and cancel hung ones (steward.py sweep + sweep_apply.py, plain code, no AI)
+#                   code ran and cancel hung ones (steward.py sweep + sweep_apply.py, plain code, no AI);
+#                   SWEEP_MAX_PRS (default 40, most recently updated first) and SWEEP_MIN_RATE (default 2500: skip the
+#                   sweep when fewer API calls than that are left this hour, since a token's limit is its owner's)
 #                   BOX=hph-ci (this box's name in capacity.host.runners): read this box's own load, memory and
 #                   disk each pass, so the check can start one more slot (add-slot, capped by capacity.host.max_slots)
 #                   when every slot is busy, jobs are backed up and the box has headroom
@@ -20,6 +22,8 @@ SLOT_REGEX=""
 RESTART=""
 DRY_RUN=""
 SWEEP_EVERY_MIN=30
+SWEEP_MAX_PRS=40
+SWEEP_MIN_RATE=2500
 BOX=""
 if [ -f "$CONF/apply.env" ]; then
   # shellcheck disable=SC1091
@@ -94,7 +98,7 @@ if [ "${SWEEP_EVERY_MIN:-0}" -gt 0 ]; then
     out="$STATE/sweep-$owner.json"
     # shellcheck disable=SC2086
     if GH_TOKEN="$(cat "$tok")" python3 "$HERE/steward.py" sweep $args --out "$out" \
-        --history-dir "$STATE/steward-history"; then
+        --history-dir "$STATE/steward-history" --lite --max-prs "$SWEEP_MAX_PRS" --min-rate "$SWEEP_MIN_RATE"; then
       GH_TOKEN="$(cat "$tok")" python3 "$HERE/sweep_apply.py" "$out" $dry \
         || echo "$owner: some re-runs or cancels failed (see above)"
     else

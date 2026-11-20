@@ -89,5 +89,32 @@ class SweepCarriesRunIds(unittest.TestCase):
         self.assertEqual(self.sweep(fake)["pull_requests"][0]["state"], "red-infra")
 
 
+class Lite(unittest.TestCase):
+    def test_lite_reads_only_recent_prs_and_skips_the_scans(self):
+        pulls = [pr(i, "s%d" % i, updated="2026-11-15T%02d:00:00Z" % i) for i in range(1, 6)]
+        fake = FakeGitHub(pulls=pulls, checks={})
+        rules = steward.load_rules()
+        rules["steward"]["max_prs_classified"] = 2
+        with mock.patch.object(steward, "api", fake):
+            rep = steward.Sweeper(rules, now=NOW, lite=True).sweep_repo(REPO)
+        self.assertEqual([p["number"] for p in rep["pull_requests"]], [5, 4])
+        expensive = [c for c in fake.calls if "event=push" not in c and (
+            "/pulls/" in c or "/jobs" in c or "state=closed" in c or "status=completed" in c)]
+        self.assertEqual(expensive, [])
+
+    def test_sweep_steps_aside_when_the_hour_is_nearly_spent(self):
+        import argparse
+        args = argparse.Namespace(rules=steward.RULES_PATH, repo=[REPO], out=None, no_history=True, history_dir="/nonexistent",
+                                  lite=True, max_prs=10, min_rate=2500)
+        calls = []
+
+        def fake(path):
+            calls.append(path)
+            return {"resources": {"core": {"remaining": 900}}}
+        with mock.patch.object(steward, "api", fake):
+            self.assertEqual(steward.cmd_sweep(args), 0)
+        self.assertEqual(calls, ["rate_limit"])
+
+
 if __name__ == "__main__":
     unittest.main()

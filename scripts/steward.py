@@ -107,8 +107,12 @@ def job_id(run):
 
 
 class Sweeper:
-    def __init__(self, rules, now=None):
+    def __init__(self, rules, now=None, lite=False):
         self.rules = rules
+        # lite: repairs only (re-run machine failures, restart hung checks), for an unattended timer that shares the
+        # token owner's 5,000-calls-an-hour limit. Skips the runner, flaky and merge-time scans and the per-PR detail
+        # read, and reads only the most recently updated PRs.
+        self.lite = lite
         self.now = now or dt.datetime.now(dt.timezone.utc)
         self.jobs = {}  # job id -> job (cached; a sweep reads each job once)
         self._runs = {}  # repo -> recent workflow runs
@@ -286,13 +290,13 @@ class Sweeper:
         for pr in report["pull_requests"]:
             for name in pr["failed"]:
                 failing[name] = failing.get(name, 0) + 1
-        merged = self.merged_hours(repo)
+        merged = [] if self.lite else self.merged_hours(repo)
         return {"at": self.now.strftime("%Y-%m-%dT%H:%M:%SZ"), "repo": repo,
                 "open_prs": len(report["pull_requests"]), "counts": report["counts"],
                 "main_state": report["main"]["state"], "main_red_hours": report["main"]["red_hours"],
                 "broken_runners": [r["runner"] for r in report["runners"]],
                 "failing_checks": dict(sorted(failing.items(), key=lambda kv: -kv[1])[:15]),
-                "flaky": self.flaky(repo), "merged_24h": len(merged),
+                "flaky": {} if self.lite else self.flaky(repo), "merged_24h": len(merged),
                 "median_hours_to_merge": merged[len(merged) // 2] if merged else None}
 
     def sweep_repo(self, repo):
@@ -304,8 +308,11 @@ class Sweeper:
         idle_limit = self.rules["steward"]["idle_hours"]
         prs, counts = [], {}
         # Oldest first: the work that has waited longest is the work most likely to be forgotten.
-        for i, p in enumerate(sorted(pulls, key=lambda p: p["created_at"])):
-            detail = api("repos/%s/pulls/%s" % (repo, p["number"])) if i < cap else p
+        order = sorted(pulls, key=lambda p: p["created_at"])
+        if self.lite:  # the PRs being worked on now, and nothing past the cap
+            order = sorted(pulls, key=lambda p: p.get("updated_at") or "", reverse=True)[:cap]
+        for i, p in enumerate(order):
+            detail = api("repos/%s/pulls/%s" % (repo, p["number"])) if i < cap and not self.lite else p
             chk = self.checks(repo, p["head"]["sha"], classify=i < cap)
             state = self.pr_state(dict(p, mergeable_state=(detail or {}).get("mergeable_state")), chk, open_heads)
             idle = hours(self.now, parse_time(p.get("updated_at")))
@@ -326,7 +333,8 @@ class Sweeper:
             wip = []
         wip_heads = [w["ref"][len("refs/heads/"):] for w in wip]
         leftover = [b for b in wip_heads if b not in open_heads]
-        report = {"repo": repo, "main": self.main_state(repo, branch), "runners": self.runners(repo),
+        report = {"repo": repo, "main": self.main_state(repo, branch),
+                  "runners": [] if self.lite else self.runners(repo),
                   "counts": counts, "pull_requests": prs, "leftover_branches": leftover}
         report["health"] = self.health(repo, report)
         return report
@@ -1383,7 +1391,18 @@ def _capacity_pass(args):
 
 def cmd_sweep(args):
     rules = load_rules(args.rules)
-    sw = Sweeper(rules)
+    if args.max_prs is not None:
+        rules["steward"]["max_prs_classified"] = args.max_prs
+    if args.min_rate:
+        try:
+            left = (api("rate_limit") or {}).get("resources", {}).get("core", {}).get("remaining")
+        except GhError:
+            left = None
+        if left is not None and left < args.min_rate:
+            # The limit is the token owner's, shared with every other tool they run: never spend the last of it.
+            print("sweep skipped: %d API calls left this hour, under --min-rate %d" % (left, args.min_rate))
+            return 0
+    sw = Sweeper(rules, lite=args.lite)
     repos = args.repo or [current_repo()]
     out = {"generated_at": sw.now.strftime("%Y-%m-%dT%H:%M:%SZ"), "repos": [], "errors": []}
     for repo in repos:
@@ -1447,6 +1466,9 @@ def main(argv=None):
     s.add_argument("--out")
     s.add_argument("--history-dir", default=HISTORY_DIR)
     s.add_argument("--no-history", action="store_true", help="don't record this sweep")
+    s.add_argument("--lite", action="store_true", help="repairs only: the cheap reads an unattended timer needs")
+    s.add_argument("--max-prs", type=int, help="classify at most this many PRs (default steward.max_prs_classified)")
+    s.add_argument("--min-rate", type=int, default=0, help="skip the sweep when fewer API calls than this are left")
     h = sub.add_parser("health", help="the CI health history for a repo, and what it says to improve")
     h.add_argument("--repo", required=True)
     h.add_argument("--history-dir", default=HISTORY_DIR)

@@ -438,4 +438,7 @@ Every `SWEEP_EVERY_MIN` minutes (default 30, set it in `apply.env`; 0 turns it o
 `lanes.infra_reruns_per_pr` times by the run's attempt number; a check *running* past `stall.check_running_minutes`
 is cancelled and re-run on the next pass. A check stalled while *queued* is left to capacity (cancelling it only
 re-queues it at the back). PRs labelled parked, do-not-merge, hold or blocked are skipped, at most 20 actions per org
-per pass. Red code, conflicts and drafts stay with the lanes.
+per pass. Red code, conflicts and drafts stay with the lanes. The timer's sweep is `--lite`: it reads only the `SWEEP_MAX_PRS`
+(default 40) most recently updated PRs, skips the runner, flaky and merge-time scans, and steps aside when fewer than
+`SWEEP_MIN_RATE` (default 2500) API calls are left this hour. A token's limit is its owner's (5,000 an hour, shared by
+every token and tool they run), so the box must never spend the last of it.
