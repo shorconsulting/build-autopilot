@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Keep only a few pull requests of a repo in CI at once, so each one finishes (build rules, rule 3).
+"""Keep only a few pull requests of a repo in CI at once, so each one finishes (build rules, rules 2 and 3).
 
 Why: when every open pull request has CI queued on a small runner pool, GitHub hands jobs out oldest first across
 all of them. A run with stages (changes -> lint/e2e -> test shards) goes to the back of a queue thousands of jobs long

@@ -39,6 +39,9 @@ work, not the end.
 - Push a PR's branch only when the change is ready for CI: commit work in progress locally and push once. Every push
   cancels the PR's running CI and puts it at the back of the queue, so a lane that pushes every 15 minutes on a busy
   pool never gets a green run (ranch-rides, 2026-11-20: 78% of CI minutes went to runs a newer push cancelled).
+- A run the steward's admission check cancelled is paused, not failed: on a repo with an `admission` line only a few
+  PRs run CI at once, and the check re-runs the paused ones itself when their turn comes. Don't re-run it by hand
+  (that queues it again behind the PRs already admitted). The check prints `pause ok: <repo>#<pr> run <id>` for each.
 - After you push, wait for the checks (`gh run watch`, or `$FB pr-wait <n> --seconds 540`), never by re-reading the PR
   in a loop. Green and allowed to merge by the policy: land it. Red: read the first error lines and fix it on the
   same branch. Behind or in conflict: update or rebase it.

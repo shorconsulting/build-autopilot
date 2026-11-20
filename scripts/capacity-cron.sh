@@ -54,10 +54,17 @@ for owner in $owners; do
     echo "$owner: capacity check failed"
   fi
   if [ -f "$CONF/admission" ]; then
-    grep -v '^[[:space:]]*#' "$CONF/admission" | grep "^$owner/" | while read -r r max; do
+    # A no-match grep must not end the pass (set -e with pipefail): an org with no admission line is normal.
+    lines="$({ grep -v '^[[:space:]]*#' "$CONF/admission" | grep "^$owner/"; } || true)"
+    while read -r r max; do
+      [ -n "$r" ] || continue
+      # shellcheck disable=SC2086
       GH_TOKEN="$(cat "$tok")" python3 "$HERE/ci_admission.py" --repo "$r" --max-prs "${max:-3}" \
-          --state "$STATE/admission-$owner.json" $dry || echo "$r: some admission steps failed (see above)"
-    done
+          --state "$STATE/admission-$owner.json" $dry </dev/null \
+          || echo "$r: some admission steps failed (see above)"
+    done <<EOF_ADMISSION
+$lines
+EOF_ADMISSION
   fi
 done
 if [ -n "$reports" ] && [ -n "$RESTART" ]; then
