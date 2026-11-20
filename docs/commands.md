@@ -431,3 +431,11 @@ chown root:root /etc/hph-ci/steward && chmod 755 /etc/hph-ci/steward   # root-ow
 ```
 
 Each pass prints one line per action, so `journalctl -u build-autopilot-capacity` is the record of what it did.
+
+Every `SWEEP_EVERY_MIN` minutes (default 30, set it in `apply.env`; 0 turns it off) the same pass also runs
+`steward.py sweep` and `scripts/sweep_apply.py`, plain code with no AI: a PR whose checks failed before the code ran
+(checkout, setup, a vanished runner, a cancel with nothing else of that name) gets its failed jobs re-run, at most
+`lanes.infra_reruns_per_pr` times by the run's attempt number; a check *running* past `stall.check_running_minutes`
+is cancelled and re-run on the next pass. A check stalled while *queued* is left to capacity (cancelling it only
+re-queues it at the back). PRs labelled parked, do-not-merge, hold or blocked are skipped, at most 20 actions per org
+per pass. Red code, conflicts and drafts stay with the lanes.
