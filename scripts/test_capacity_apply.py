@@ -32,6 +32,24 @@ class Plan(unittest.TestCase):
         self.assertEqual({k for k, _, _ in p}, {"cancel"})
 
 
+class Ghosts(unittest.TestCase):
+    def test_a_ghost_run_github_cannot_cancel_is_skipped_not_failed(self):
+        import json
+        import subprocess
+        import tempfile
+        from unittest import mock
+        r = {"repos": [{"repo": "o/a", "actions": [{"do": "cancel-stale", "runs": [1, 2]}]}]}
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            json.dump(r, fh)
+        ghost = subprocess.CompletedProcess([], 1, "", "Cannot cancel a workflow run that has not been queued yet. (HTTP 409)")
+        okay = subprocess.CompletedProcess([], 0, "", "")
+        with mock.patch.object(capacity_apply.subprocess, "run", side_effect=[ghost, okay]):
+            self.assertEqual(capacity_apply.main([fh.name, "--no-restart"]), 0)
+        other = subprocess.CompletedProcess([], 1, "", "HTTP 403")
+        with mock.patch.object(capacity_apply.subprocess, "run", side_effect=[other, okay]):
+            self.assertEqual(capacity_apply.main([fh.name, "--no-restart"]), 1)
+
+
 class Guards(unittest.TestCase):
     def test_the_cancel_cap_is_per_repo_across_actions(self):
         r = {"repos": [{"repo": "o/a", "actions": [{"do": "cancel-stale", "runs": [1, 2, 3]},
