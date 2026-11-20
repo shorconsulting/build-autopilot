@@ -346,6 +346,11 @@ reroutes, so idle runners with other labels stay idle while a pool queues for ho
      `resume-slot`, start the named runner, then `capacity-note --host <box> --resumed <runner>`. Pausing needs red
      load or memory on two passes in a row; red disk alone is a `report` (prune Docker or the Colima disk). One
      change per box per `cooldown_minutes`.
+   - `improve` (`stacked-workflow`): a workflow has over `capacity.stack_per_pr` queued runs per open pull request
+     (and `capacity.stack_min_runs` in all), so every label, review or push queues another job on the pool. Its
+     runs aren't cancelled (each may act on its own event); file `Steward: stacked-workflow <name>` once (link an
+     open one) and fix it with a pull request by the repo's policy: a per-PR concurrency group, or start its jobs
+     only on the events they act on (HPortHealth/app#5327).
    - `reroute`: before opening a pull request, look for an open one from the steward for the same labels and
      update it instead. Open a pull request in the repo that moves its light jobs (auto-merge, sweeps, labelling, mark-done,
      cancel-on-close) to the idle runners' label, or file it as the steward lane's next item. A CI-machinery or ADR

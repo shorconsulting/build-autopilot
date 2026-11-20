@@ -510,6 +510,29 @@ def stale_runs(queued, open_prs, keep=None, closed_at=None, dedupe=None):
     return out
 
 
+def stacked_workflows(queued, open_prs, min_runs=50, per_pr=2.0):
+    """Workflows piling up queued runs for the same open pull requests: more than `per_pr` queued runs per pull
+    request on average, and at least `min_runs` in all. That is a workflow with no per-PR concurrency group whose
+    jobs start on every label, review or push (HPortHealth/app's Auto-merge `disarm`, 2026-11-20: ~2,500 queued,
+    PRs stopped merging). They can't be cancelled safely here, because each run may act on its own event, so
+    they become an `improve` item: give the workflow a per-PR concurrency group or start its jobs only on the
+    events they act on. Returns [{"workflow", "queued", "prs", "per_pr"}], most queued first."""
+    open_shas = {sha for p in open_prs if (sha := (p.get("head") or {}).get("sha"))}
+    runs, prs = {}, {}
+    for r in queued:
+        if r.get("event") not in PR_EVENTS or r.get("head_sha") not in open_shas:
+            continue
+        name = r.get("name") or str(r.get("workflow_id"))
+        runs[name] = runs.get(name, 0) + 1
+        prs.setdefault(name, set()).add(r.get("head_sha"))
+    out = []
+    for name, n in runs.items():
+        k = len(prs[name])
+        if n >= min_runs and k and n / k > per_pr:
+            out.append({"workflow": name, "queued": n, "prs": k, "per_pr": round(n / k, 1)})
+    return sorted(out, key=lambda x: -x["queued"])
+
+
 def fits(job_labels, runner_labels):
     """GitHub's rule: a runner can take a job only if it has every label the job asks for."""
     have = {l.lower() for l in runner_labels}
@@ -1062,6 +1085,8 @@ def capacity_repo(repo, rules, sample_runs, cache=None, lean=False):
     return {"_oldest": oldest, "_runners": repo_runners, "repo": repo, "queued_runs": len(queued), "stale": [{"run": i, "reason": why, "workflow": w}
                                                                    for i, why, w in stale],
             "queued_job_labels": {",".join(k): v for k, v in labels.items()}, "_labels": labels,
+            "stacked": stacked_workflows(queued, open_prs, rules["capacity"].get("stack_min_runs", 50),
+                                         rules["capacity"].get("stack_per_pr", 2.0)),
             "oldest_queued_hours": hours(now, first)}
 
 
@@ -1242,6 +1267,14 @@ def _capacity_pass(args):
                                                 "runners": rep.pop("_runners")}
         stale = [(s["run"], s["reason"], s["workflow"]) for s in rep["stale"]]
         rep["actions"] = capacity_actions(stale, [], rules)
+        for w in rep.get("stacked") or []:
+            rep["actions"].append({"do": "improve", "kind": "stacked-workflow", "needs_person": False,
+                                   "workflow": w["workflow"], "evidence": w,
+                                   "why": "%s has %d queued runs for %d open pull requests (%.1f each): every event "
+                                          "queues another job on the pool. File `Steward: stacked-workflow %s` and "
+                                          "fix it with a PR: a per-PR concurrency group, or start its jobs only on "
+                                          "the events they act on" % (w["workflow"], w["queued"], w["prs"],
+                                                                      w["per_pr"], w["workflow"])})
         out["repos"].append(rep)
     now = dt.datetime.now(dt.timezone.utc)
     all_pools, seen_runners = [], []
