@@ -351,6 +351,11 @@ reroutes, so idle runners with other labels stay idle while a pool queues for ho
      runs aren't cancelled (each may act on its own event); file `Steward: stacked-workflow <name>` once (link an
      open one) and fix it with a pull request by the repo's policy: a per-PR concurrency group, or start its jobs
      only on the events they act on (HPortHealth/app#5327).
+   - `add-slot` (from `--hosts`): every online slot on a box is busy, a backed-up pool fits its slots, the box has
+     headroom and fewer slots are online than `capacity.host.max_slots[box]`: start ONE more slot there (one change
+     per box per `cooldown_minutes`; a box with no ceiling never grows). On Hetzner `capacity-cron.sh` does it itself
+     when `apply.env` sets `BOX=hph-ci`: it reads the box's own load, memory and disk and starts the lowest unused
+     slot number through the same restart wrapper. Elsewhere, start that box's next runner service or container.
    - `reroute`: before opening a pull request, look for an open one from the steward for the same labels and
      update it instead. Open a pull request in the repo that moves its light jobs (auto-merge, sweeps, labelling, mark-done,
      cancel-on-close) to the idle runners' label, or file it as the steward lane's next item. A CI-machinery or ADR
@@ -420,6 +425,7 @@ chown root:root /etc/hph-ci/steward && chmod 755 /etc/hph-ci/steward   # root-ow
 #   SLOT_REGEX='^hph-ci-(?:light-)?([0-9]+)(?:-|$)'   # hph-ci-10 and hph-ci-light-10 are both hph-runner@10
 #   RESTART='sudo -n /usr/local/sbin/restart-runner-slot {slot}'
 #   DRY_RUN=1    # keep until a person has read the first journal output, then remove it
+#   BOX=hph-ci   # lets the pass read this box's load and start one more slot (add-slot) up to capacity.host.max_slots
 # systemd: build-autopilot-capacity.service (User=ba-steward, Type=oneshot, ExecStart=.../capacity-cron.sh)
 #          build-autopilot-capacity.timer (OnCalendar=*:0/10)
 ```
