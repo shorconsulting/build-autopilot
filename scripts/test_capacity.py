@@ -558,3 +558,28 @@ class StateFile(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StackedWorkflowTest(unittest.TestCase):
+    """A workflow queueing several runs per open pull request (app's Auto-merge disarm, 2026-11-20) is flagged."""
+
+    def prs(self, n):
+        return [{"number": i, "head": {"sha": "s%d" % i, "ref": "b%d" % i, "repo": {"full_name": "o/r"}}}
+                for i in range(n)]
+
+    def test_flags_a_workflow_stacking_runs_per_pr(self):
+        queued = [run(i, "Auto-merge", "b%d" % (i % 20), "s%d" % (i % 20)) for i in range(80)]
+        queued += [run(1000 + i, "CI", "b%d" % i, "s%d" % i) for i in range(20)]
+        out = steward.stacked_workflows(queued, self.prs(20), min_runs=50, per_pr=2.0)
+        self.assertEqual([w["workflow"] for w in out], ["Auto-merge"])
+        self.assertEqual((out[0]["queued"], out[0]["prs"], out[0]["per_pr"]), (80, 20, 4.0))
+
+    def test_one_run_per_pr_is_demand_not_stacking(self):
+        queued = [run(i, "CI", "b%d" % i, "s%d" % i) for i in range(200)]
+        self.assertEqual(steward.stacked_workflows(queued, self.prs(200)), [])
+
+    def test_small_queues_and_closed_heads_are_ignored(self):
+        few = [run(i, "Auto-merge", "b0", "s0") for i in range(10)]
+        self.assertEqual(steward.stacked_workflows(few, self.prs(1), min_runs=50), [])
+        gone = [run(i, "Auto-merge", "x", "old") for i in range(100)]
+        self.assertEqual(steward.stacked_workflows(gone, self.prs(1)), [])
