@@ -3,6 +3,8 @@
 # Config dir (default /etc/hph-ci/steward):
 #   <Owner>.token   a fine-grained GitHub token for that org (mode 600), one per org
 #   repos           one owner/repo per line (# comments allowed)
+#   admission       optional: "owner/repo max_prs" per line; keeps only that many pull requests of the repo in CI
+#                   at once and pauses the rest's queued runs until a place frees (scripts/ci_admission.py)
 #   apply.env       optional: SLOT_REGEX and RESTART (see capacity_apply.py) for this box's own runners,
 #                   DRY_RUN=1 to only print what it would do (do one dry pass first)
 # Each org's repos are checked with that org's token; this box's runners are restarted, stale runs cancelled.
@@ -50,6 +52,19 @@ for owner in $owners; do
     reports="$reports $out"
   else
     echo "$owner: capacity check failed"
+  fi
+  if [ -f "$CONF/admission" ]; then
+    # A no-match grep must not end the pass (set -e with pipefail): an org with no admission line is normal.
+    lines="$({ grep -v '^[[:space:]]*#' "$CONF/admission" | grep "^$owner/"; } || true)"
+    while read -r r max; do
+      [ -n "$r" ] || continue
+      # shellcheck disable=SC2086
+      GH_TOKEN="$(cat "$tok")" python3 "$HERE/ci_admission.py" --repo "$r" --max-prs "${max:-3}" \
+          --state "$STATE/admission-$owner.json" $dry </dev/null \
+          || echo "$r: some admission steps failed (see above)"
+    done <<EOF_ADMISSION
+$lines
+EOF_ADMISSION
   fi
 done
 if [ -n "$reports" ] && [ -n "$RESTART" ]; then

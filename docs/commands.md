@@ -411,6 +411,7 @@ chown root:root /etc/hph-ci/steward && chmod 755 /etc/hph-ci/steward   # root-ow
 # /etc/hph-ci/steward/HPortHealth.token, SConsInc.token: owner ba-steward, mode 600
 #   (fine-grained: Actions read/write, Contents and Pull requests read, Self-hosted runners read/write)
 # /etc/hph-ci/steward/repos: one owner/repo per line
+# /etc/hph-ci/steward/admission (optional): "owner/repo max_prs" per line, e.g. "SConsInc/ranch-rides 3"
 # /etc/hph-ci/steward/apply.env (root:root, mode 644):
 #   SLOT_REGEX='^hph-ci-(?:light-)?([0-9]+)(?:-|$)'   # hph-ci-10 and hph-ci-light-10 are both hph-runner@10
 #   RESTART='sudo -n /usr/local/sbin/restart-runner-slot {slot}'
@@ -420,3 +421,12 @@ chown root:root /etc/hph-ci/steward && chmod 755 /etc/hph-ci/steward   # root-ow
 ```
 
 Each pass prints one line per action, so `journalctl -u build-autopilot-capacity` is the record of what it did.
+
+**Admission (`scripts/ci_admission.py`).** A repo listed in `admission` keeps only `max_prs` pull requests in CI at
+once. Without it, every open pull request's CI shares the pool, each stage of a run waits through the whole queue,
+pushes cancel runs before they reach a runner, and nothing finishes (ranch-rides, 2026-11-20: 186 open pull requests,
+0 merges in 40 hours on 6 runners, 78% of its CI minutes spent on cancelled runs). Places go to auto-merge pull
+requests first, then heads that have not moved for 15 minutes, then the oldest; an admitted pull request keeps its
+place until its CI finishes or its head changes. Every other pull request's queued `pull_request` runs are cancelled
+and remembered, then resumed with `rerun-failed-jobs` (passed jobs are kept) when it gets a place. A run with a job
+on a runner is never cancelled. Set `max_prs` so the admitted pull requests' parallel jobs about fill the pool.
