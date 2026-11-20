@@ -66,5 +66,38 @@ class AddSlot(unittest.TestCase):
             self.assertEqual(capacity_apply.plan(rep, self.RX, "x {slot}", host=host, cancel=False), [])
 
 
+class Apply409(unittest.TestCase):
+    def run_main(self, results):
+        import json
+        import subprocess
+        import tempfile
+        from unittest import mock
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            json.dump({"repos": [{"repo": "o/a", "actions": [{"do": "cancel-stale", "runs": [9], "why": "stale"}]}]},
+                      fh)
+        calls = []
+
+        def fake(cmd, **kw):
+            calls.append(cmd[-1])
+            code, err = results.pop(0)
+            return subprocess.CompletedProcess(cmd, code, "", err)
+        with mock.patch.object(capacity_apply.subprocess, "run", fake), mock.patch("builtins.print"):
+            rc = capacity_apply.main([fh.name, "--no-restart"])
+        return rc, calls
+
+    def test_a_run_github_never_queued_is_force_cancelled(self):
+        rc, calls = self.run_main([(1, "Cannot cancel a workflow run that has not been queued yet. (HTTP 409)"),
+                                   (0, "")])
+        self.assertEqual((rc, calls), (0, ["repos/o/a/actions/runs/9/cancel", "repos/o/a/actions/runs/9/force-cancel"]))
+
+    def test_a_refused_force_cancel_is_skipped_not_failed(self):
+        rc, _ = self.run_main([(1, "(HTTP 409)"), (1, "(HTTP 409)")])
+        self.assertEqual(rc, 0)
+
+    def test_other_cancel_errors_still_fail(self):
+        rc, calls = self.run_main([(1, "(HTTP 500)")])
+        self.assertEqual((rc, len(calls)), (1, 1))
+
+
 if __name__ == "__main__":
     unittest.main()

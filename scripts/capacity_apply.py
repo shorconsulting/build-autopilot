@@ -92,9 +92,19 @@ def main(argv=None):
             continue
         res = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
         ok = res.returncode == 0
+        err = "" if ok else (res.stderr or res.stdout).strip()
+        if not ok and kind == "cancel" and "HTTP 409" in err:
+            # A run GitHub never really queued (old, stuck in requested/waiting) refuses a plain cancel. Force-cancel
+            # stops it; if that is refused too, it is GitHub's to clear, not a failure of this pass.
+            forced = subprocess.run([c.replace("/cancel", "/force-cancel") if c.endswith("/cancel") else c
+                                     for c in cmd], capture_output=True, text=True, timeout=300)
+            if forced.returncode == 0:
+                print("cancel ok (forced): %s" % why)
+            else:
+                print("cancel skipped: %s (GitHub refuses to cancel it: %s)" % (why, err[:120]))
+            continue
         failed += 0 if ok else 1
-        print("%s %s: %s%s" % (kind, "ok" if ok else "FAILED", why,
-                               "" if ok else " (%s)" % (res.stderr or res.stdout).strip()[:200]))
+        print("%s %s: %s%s" % (kind, "ok" if ok else "FAILED", why, "" if ok else " (%s)" % err[:200]))
     return 1 if failed else 0
 
 
