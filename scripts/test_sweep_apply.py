@@ -104,7 +104,12 @@ class Lite(unittest.TestCase):
 
     def test_sweep_steps_aside_when_the_hour_is_nearly_spent(self):
         import argparse
-        args = argparse.Namespace(rules=steward.RULES_PATH, repo=[REPO], out=None, no_history=True, history_dir="/nonexistent",
+        import json
+        import tempfile
+        out = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+        out.write(json.dumps(report(p(1, "red-infra", infra=[{"name": "a", "run_id": 7, "attempt": 1}]))))
+        out.close()
+        args = argparse.Namespace(rules=steward.RULES_PATH, repo=[REPO], out=out.name, no_history=True, history_dir="/nonexistent",
                                   lite=True, max_prs=10, min_rate=2500)
         calls = []
 
@@ -114,6 +119,20 @@ class Lite(unittest.TestCase):
         with mock.patch.object(steward, "api", fake):
             self.assertEqual(steward.cmd_sweep(args), 0)
         self.assertEqual(calls, ["rate_limit"])
+        with open(out.name) as fh:  # the previous pass's report is gone: nothing to apply again
+            self.assertEqual(sweep_apply.plan(json.load(fh)), [])
+        os.unlink(out.name)
+
+    def test_lite_sweeps_leave_the_health_history_alone(self):
+        import argparse
+        import tempfile
+        hist = tempfile.mkdtemp()
+        args = argparse.Namespace(rules=steward.RULES_PATH, repo=[REPO], out=None, no_history=False,
+                                  history_dir=hist, lite=True, max_prs=5, min_rate=0)
+        with mock.patch.object(steward, "api", FakeGitHub(pulls=[], checks={})), \
+                mock.patch("sys.stdout"):
+            steward.cmd_sweep(args)
+        self.assertEqual(os.listdir(hist), [])
 
 
 if __name__ == "__main__":

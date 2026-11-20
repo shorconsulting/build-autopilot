@@ -1401,8 +1401,14 @@ def cmd_sweep(args):
         if left is not None and left < args.min_rate:
             # The limit is the token owner's, shared with every other tool they run: never spend the last of it.
             print("sweep skipped: %d API calls left this hour, under --min-rate %d" % (left, args.min_rate))
+            if args.out:  # never leave the last pass's report for an apply step to act on again
+                with open(args.out, "w", encoding="utf-8") as fh:
+                    json.dump({"repos": [], "errors": [], "skipped": "rate floor"}, fh)
+                    fh.write("\n")
             return 0
     sw = Sweeper(rules, lite=args.lite)
+    if args.lite:
+        args.no_history = True  # a capped, scan-free sweep would skew the health history sweep to sweep
     repos = args.repo or [current_repo()]
     out = {"generated_at": sw.now.strftime("%Y-%m-%dT%H:%M:%SZ"), "repos": [], "errors": []}
     for repo in repos:
