@@ -75,46 +75,46 @@ class Watchdog(unittest.TestCase):
             return []
 
     def test_starts_an_exited_runner_and_ignores_other_containers(self):
-        self.world([("mini-dind-sconsinc-4", "exited"), ("postgres", "exited")])
+        self.world([("davids-mac-mini-dind-sconsinc-4", "exited"), ("postgres", "exited"), ("dind-helper-runner", "exited")])
         self.run_pass()
-        self.assertEqual(self.calls("start"), ["mini-dind-sconsinc-4"])
+        self.assertEqual(self.calls("start"), ["davids-mac-mini-dind-sconsinc-4"])
 
     def test_starts_colima_when_docker_is_down(self):
         os.remove(os.path.join(self.w, "up"))
-        self.world([("mini-dind-sconsinc-1", "running")], top={"mini-dind-sconsinc-1": "Runner.Listener run"})
+        self.world([("davids-mac-mini-dind-sconsinc-1", "running")], top={"davids-mac-mini-dind-sconsinc-1": "Runner.Listener run"})
         self.run_pass()
         with open(os.path.join(self.w, "calls")) as fh:
-            self.assertIn("colima start\n", fh.read())
+            self.assertIn("colima start --profile default\n", fh.read())
 
     def test_restarts_a_runner_with_no_process_only_on_the_second_pass(self):
-        self.world([("mini-dind-sconsinc-2", "running")], top={"mini-dind-sconsinc-2": "/bin/sh entrypoint"})
+        self.world([("davids-mac-mini-dind-sconsinc-2", "running")], top={"davids-mac-mini-dind-sconsinc-2": "/bin/sh entrypoint"})
         self.run_pass()
         self.assertEqual(self.calls("restart"), [])
         self.run_pass()
-        self.assertEqual(self.calls("restart"), ["mini-dind-sconsinc-2"])
+        self.assertEqual(self.calls("restart"), ["davids-mac-mini-dind-sconsinc-2"])
 
     def test_a_busy_runner_is_never_touched(self):
-        self.world([("mini-dind-sconsinc-3", "running")],
-                   top={"mini-dind-sconsinc-3": "Runner.Listener run\nRunner.Worker spawnclient"},
-                   logs={"mini-dind-sconsinc-3": jobs((5, "Failed"), (5, "Failed"), (5, "Failed"))})
+        self.world([("davids-mac-mini-dind-sconsinc-3", "running")],
+                   top={"davids-mac-mini-dind-sconsinc-3": "Runner.Listener run\nRunner.Worker spawnclient"},
+                   logs={"davids-mac-mini-dind-sconsinc-3": jobs((5, "Failed"), (5, "Failed"), (5, "Failed"))})
         self.run_pass()
         self.run_pass()
         self.assertEqual(self.calls("restart") + self.calls("start"), [])
 
     def test_restarts_a_runner_whose_jobs_all_fail_fast(self):
-        self.world([("linux-hporthealth-2", "running")], top={"linux-hporthealth-2": "Runner.Listener run"},
-                   logs={"linux-hporthealth-2": jobs((300, "Succeeded"), (8, "Failed"), (6, "Failed"), (9, "Failed"))})
+        self.world([("davids-mac-mini-linux-hporthealth-2", "running")], top={"davids-mac-mini-linux-hporthealth-2": "Runner.Listener run"},
+                   logs={"davids-mac-mini-linux-hporthealth-2": jobs((300, "Succeeded"), (8, "Failed"), (6, "Failed"), (9, "Failed"))})
         self.run_pass()
-        self.assertEqual(self.calls("restart"), ["linux-hporthealth-2"])
+        self.assertEqual(self.calls("restart"), ["davids-mac-mini-linux-hporthealth-2"])
 
     def test_leaves_a_runner_that_picked_up_real_test_failures(self):
-        self.world([("linux-hporthealth-1", "running")], top={"linux-hporthealth-1": "Runner.Listener run"},
-                   logs={"linux-hporthealth-1": jobs((400, "Failed"), (8, "Failed"), (500, "Failed"))})
+        self.world([("davids-mac-mini-linux-hporthealth-1", "running")], top={"davids-mac-mini-linux-hporthealth-1": "Runner.Listener run"},
+                   logs={"davids-mac-mini-linux-hporthealth-1": jobs((400, "Failed"), (8, "Failed"), (500, "Failed"))})
         self.run_pass()
         self.assertEqual(self.calls("restart"), [])
 
     def test_gives_up_after_the_hourly_cap(self):
-        self.world([("mini-dind-sconsinc-5", "exited")])
+        self.world([("davids-mac-mini-dind-sconsinc-5", "exited")])
         for _ in range(5):
             self.run_pass()
         self.assertEqual(len(self.calls("start")), 3)
@@ -122,9 +122,9 @@ class Watchdog(unittest.TestCase):
             self.assertIn("leaving it for a person", fh.read())
 
     def test_dry_run_changes_nothing(self):
-        self.world([("mini-dind-sconsinc-4", "exited")])
+        self.world([("davids-mac-mini-dind-sconsinc-4", "exited")])
         out = self.run_pass("--dry-run")
-        self.assertIn("would mini-dind-sconsinc-4", out)
+        self.assertIn("would davids-mac-mini-dind-sconsinc-4", out)
         self.assertEqual(self.calls("start"), [])
 
 

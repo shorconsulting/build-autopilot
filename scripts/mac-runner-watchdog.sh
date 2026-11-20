@@ -15,13 +15,15 @@
 #   mac-runner-watchdog.sh --dry-run  say what it would do, change nothing
 #   mac-runner-watchdog.sh --status   each runner container's state, and the last pass
 #
-# Containers are found by name: WATCHDOG_MATCH (an extended regex, default 'dind|hporthealth|runner').
+# Containers are found by name: WATCHDOG_MATCH (an extended regex, default
+# 'mini-dind-|mini-linux-': the davids-mac-mini-dind-* and davids-mac-mini-linux-* runner containers).
 # bash 3.2, ASCII only.
 set -uo pipefail
 export PATH="${WATCHDOG_TEST_BIN:+$WATCHDOG_TEST_BIN:}/opt/homebrew/bin:/usr/local/bin:$PATH"
-export DOCKER_HOST="${DOCKER_HOST:-unix://$HOME/.colima/default/docker.sock}"
+PROFILE="${WATCHDOG_COLIMA_PROFILE:-default}"
+export DOCKER_HOST="${DOCKER_HOST:-unix://$HOME/.colima/$PROFILE/docker.sock}"
 
-MATCH="${WATCHDOG_MATCH:-dind|hporthealth|runner}"
+MATCH="${WATCHDOG_MATCH:-mini-dind-|mini-linux-}"
 STATE="${WATCHDOG_STATE:-$HOME/.local/state/mac-runner-watchdog}"
 LOG="${WATCHDOG_LOG:-$HOME/Library/Logs/mac-runner-watchdog.log}"
 MAX_PER_HOUR="${WATCHDOG_MAX_PER_HOUR:-3}"
@@ -106,7 +108,7 @@ fast_failing() { # true when the last FAST_FAILS jobs all failed fast
 # 1. Colima
 if ! docker info >/dev/null 2>&1; then
   if command -v colima >/dev/null 2>&1; then
-    act "colima start (docker not answering)" colima start || exit 1
+    act "colima start --profile $PROFILE (docker not answering)" colima start --profile "$PROFILE" || exit 1
   else
     say "docker not answering and colima not installed: nothing to do"
     exit 1
@@ -114,7 +116,7 @@ if ! docker info >/dev/null 2>&1; then
 fi
 
 seen=0
-while IFS='|' read -r name st; do
+while IFS='|' read -r name st <&3; do
   [ -n "$name" ] || continue
   seen=$((seen + 1))
   miss="$STATE/$name.missing"
@@ -139,6 +141,9 @@ while IFS='|' read -r name st; do
       if [ "$(budget "$name")" -ge "$MAX_PER_HOUR" ]; then
         say "$name: every recent job fails within ${FAST_FAIL_S}s, but already restarted $MAX_PER_HOUR times this hour; leaving it for a person"
       else
+        if docker top "$name" -eo args 2>/dev/null </dev/null | grep -q 'Runner\.Worker'; then
+          continue  # it picked up a job meanwhile: never kill a running job
+        fi
         [ -z "$DRY" ] && budget "$name" add >/dev/null
         act "$name: last $FAST_FAILS jobs all failed within ${FAST_FAIL_S}s (checkout/setup), docker restart" \
           docker restart "$name"
@@ -158,7 +163,7 @@ while IFS='|' read -r name st; do
   fi
   [ -z "$DRY" ] && budget "$name" add >/dev/null && rm -f "$miss"
   act "$name: no runner process for two passes, docker restart" docker restart "$name"
-done <<EOF
+done 3<<EOF
 $(containers)
 EOF
 
