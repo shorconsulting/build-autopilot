@@ -33,6 +33,7 @@ import steward  # noqa: E402
 
 ACTIVE = ("queued", "in_progress", "waiting", "requested", "pending")
 GHOST = "has not been queued yet"
+RESUME_TRIES = 3  # failed resumes of one paused run before it is dropped and its pull request gives up its place
 
 
 def _now():
@@ -69,10 +70,13 @@ def plan(open_prs, runs, state, max_prs, settle_minutes=15, running_job=None, no
             continue  # closed or superseded: the capacity check's stale-run rules own those
         ci.setdefault(n, []).append(r)
 
+    active_ids = {str(r["id"]) for rs in ci.values() for r in rs}
     paused = {}
     for rid, p in (state.get("paused") or {}).items():
-        if head.get(p.get("pr")) == p.get("sha"):
-            paused[str(rid)] = p  # still the pull request's head: worth resuming
+        # Still the pull request's head and not already running again (re-run by hand, or a resume whose state
+        # was not saved): worth resuming. Resuming an active run would fail, then re-run real failures later.
+        if head.get(p.get("pr")) == p.get("sha") and str(rid) not in active_ids:
+            paused[str(rid)] = p
     waiting = {}  # pr -> [run_id] paused on its current head
     for rid, p in paused.items():
         waiting.setdefault(p["pr"], []).append(rid)
@@ -87,10 +91,14 @@ def plan(open_prs, runs, state, max_prs, settle_minutes=15, running_job=None, no
         if n not in admitted and any(r.get("status") == "in_progress" and running_job(r["id"]) for r in rs):
             admitted[n] = head[n]
 
+    pushed = {}  # pr -> when its head's newest CI run was made: the push, not a comment or a label
+    for n, rs in ci.items():
+        pushed[n] = max((r.get("created_at") or "" for r in rs), default="")
+
     def settled(n):
         p = prs[n]
-        t = steward.parse_time(p.get("updated_at") or p.get("created_at"))
-        # updated_at moves on a push (and on comments); a head pushed minutes ago is likely to move again.
+        t = steward.parse_time(pushed.get(n) or p.get("updated_at") or p.get("created_at"))
+        # A head pushed minutes ago is likely to move again, and that push would cancel the run it was given.
         return t is None or (now - t).total_seconds() >= settle_minutes * 60
 
     def rank(n):
@@ -173,12 +181,18 @@ def run_repo(repo, state, max_prs, settle_minutes, dry_run, max_actions):
             if kind == "pause":
                 new["paused"].pop(str(rid), None)
             else:
-                new["paused"][str(rid)] = {"pr": n, "sha": new["admitted"].get(str(n))}
+                tries = int((state.get("paused") or {}).get(str(rid), {}).get("tries", 0)) + 1
+                if tries >= RESUME_TRIES:
+                    # Give up on this run so its pull request frees its place; a push or a person starts it again.
+                    print("resume dropped: %s#%d run %d after %d failed tries" % (repo, n, rid, tries))
+                else:
+                    new["paused"][str(rid)] = {"pr": n, "sha": new["admitted"].get(str(n)), "tries": tries}
     for kind, rid, n, _ in actions[max_actions:]:  # over this pass's cap: next pass decides again
         if kind == "pause":
             new["paused"].pop(str(rid), None)
         else:
-            new["paused"][str(rid)] = {"pr": n, "sha": new["admitted"].get(str(n))}
+            new["paused"][str(rid)] = dict((state.get("paused") or {}).get(str(rid)) or {},
+                                           pr=n, sha=new["admitted"].get(str(n)))
     print("%s: %d in CI (max %d: %s), %d paused" % (repo, len(new["admitted"]), max_prs,
                                                    " ".join("#" + n for n in sorted(new["admitted"], key=int)),
                                                    len(new["paused"])))

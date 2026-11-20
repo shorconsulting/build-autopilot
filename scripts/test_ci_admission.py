@@ -66,6 +66,84 @@ class Admission(unittest.TestCase):
         acts, _ = plan(prs, runs, max_prs=0)
         self.assertEqual([a[1] for a in acts], [10])
 
+    def test_a_paused_run_already_running_again_is_not_resumed(self):
+        prs = [pr(1)]
+        acts, st = plan(prs, [run(10, 1, status="in_progress")], {"paused": {"10": {"pr": 1, "sha": "s1"}}})
+        self.assertEqual(acts, [])
+        self.assertEqual(st["paused"], {})
+        self.assertIn("1", st["admitted"])
+
+    def test_settled_is_judged_by_the_newest_ci_run_not_comments(self):
+        prs = [pr(1, created="2026-11-01T00:00:00Z", updated=FRESH), pr(2), pr(3)]
+        runs = [dict(run(10, 1), created_at=OLD), dict(run(20, 2), created_at=OLD), dict(run(30, 3), created_at=FRESH)]
+        _, st = plan(prs, runs)
+        self.assertEqual(set(st["admitted"]), {"1", "2"})
+
+
+class RunRepo(unittest.TestCase):
+    """run_repo with GitHub replaced: what it calls and what state it keeps."""
+
+    def go(self, prs, runs, state, answers, max_prs=1, max_actions=400):
+        from unittest import mock
+        calls = []
+
+        def gh(args):
+            calls.append(args[-1])
+            ans = answers.get(args[-1])
+            if isinstance(ans, Exception):
+                raise ans
+            return ""
+
+        def paged(path, key=None, cap=1000, per_page=100):
+            if "/pulls" in path:
+                return prs
+            if "/jobs" in path:
+                return []
+            return runs if "status=queued" in path else []
+
+        with mock.patch.object(ci_admission.steward, "gh", gh), \
+                mock.patch.object(ci_admission.steward, "paged", paged), \
+                mock.patch.object(ci_admission, "_now", lambda: NOW):
+            new, failed = ci_admission.run_repo("o/r", state, max_prs, 15, False, max_actions)
+        return calls, new, failed
+
+    E = ci_admission.steward.GhError
+
+    def test_pause_ok_ghost_and_failure(self):
+        prs = [pr(1), pr(2), pr(3), pr(4)]
+        runs = [run(10, 1), run(20, 2), run(30, 3), run(40, 4)]
+        answers = {"repos/o/r/actions/runs/30/cancel": self.E("Cannot cancel ... has not been queued yet. (HTTP 409)"),
+                   "repos/o/r/actions/runs/40/cancel": self.E("HTTP 500")}
+        calls, new, failed = self.go(prs, runs, {}, answers)
+        self.assertEqual(calls, ["repos/o/r/actions/runs/%d/cancel" % i for i in (20, 30, 40)])
+        self.assertEqual(set(new["paused"]), {"20"})
+        self.assertEqual(failed, 1)
+
+    def test_resume_falls_back_to_a_full_rerun(self):
+        state = {"paused": {"10": {"pr": 1, "sha": "s1"}}}
+        answers = {"repos/o/r/actions/runs/10/rerun-failed-jobs": self.E("no failed jobs")}
+        calls, new, failed = self.go([pr(1)], [], state, answers)
+        self.assertEqual(calls, ["repos/o/r/actions/runs/10/rerun-failed-jobs", "repos/o/r/actions/runs/10/rerun"])
+        self.assertEqual((new["paused"], failed), ({}, 0))
+
+    def test_a_resume_that_keeps_failing_frees_the_place(self):
+        state = {"paused": {"10": {"pr": 1, "sha": "s1"}}}
+        bad = {"repos/o/r/actions/runs/10/rerun-failed-jobs": self.E("too old"),
+               "repos/o/r/actions/runs/10/rerun": self.E("too old")}
+        for tries in range(1, ci_admission.RESUME_TRIES):
+            _, state, _ = self.go([pr(1)], [], state, bad)
+            self.assertEqual(state["paused"]["10"]["tries"], tries)
+        _, state, _ = self.go([pr(1)], [], state, bad)
+        self.assertEqual(state["paused"], {})
+        _, state, _ = self.go([pr(1)], [], state, bad)
+        self.assertEqual(state["admitted"], {})
+
+    def test_actions_over_the_cap_wait_for_the_next_pass(self):
+        prs = [pr(1), pr(2), pr(3)]
+        calls, new, _ = self.go(prs, [run(10, 1), run(20, 2), run(30, 3)], {}, {}, max_actions=1)
+        self.assertEqual(calls, ["repos/o/r/actions/runs/20/cancel"])
+        self.assertEqual(set(new["paused"]), {"20"})
+
 
 if __name__ == "__main__":
     unittest.main()
