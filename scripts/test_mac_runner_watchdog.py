@@ -13,7 +13,13 @@ echo "docker $*" >> "$W/calls"
 case "$1" in
   info) [ -f "$W/up" ] ;;
   ps) cat "$W/ps" ;;
-  top) cat "$W/top.$2" 2>/dev/null ;;
+  top)
+    # Like the real daemon: ps options that drop the PID column are refused.
+    if [ $# -gt 2 ]; then echo "Error response from daemon: Couldn't find PID field in ps output" >&2; exit 1; fi
+    n=$(( $(cat "$W/topn.$2" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$W/topn.$2"
+    f="$W/top.$2"; [ -f "$f.$n" ] && f="$f.$n"
+    [ -f "$f" ] || { echo "Error response from daemon: No such container: $2" >&2; exit 1; }
+    cat "$f" ;;
   inspect) echo "2026-11-20T20:00:00Z" ;;
   logs) cat "$W/logs.${@: -1}" 2>/dev/null ;;
   start|restart) exit 0 ;;
@@ -55,7 +61,9 @@ class Watchdog(unittest.TestCase):
             fh.write("".join("%s|%s\n" % kv for kv in ps))
         for name, procs in (top or {}).items():
             with open(os.path.join(self.w, "top." + name), "w") as fh:
-                fh.write("ARGS\n" + procs + "\n")
+                fh.write("UID PID PPID C STIME TTY TIME CMD\n"
+                         + "".join("1001 %d 1 0 17:30 ? 00:00:00 %s\n" % (100 + i, c)
+                                   for i, c in enumerate(procs.splitlines())))
         for name, text in (logs or {}).items():
             with open(os.path.join(self.w, "logs." + name), "w") as fh:
                 fh.write(text)
@@ -110,6 +118,30 @@ class Watchdog(unittest.TestCase):
     def test_leaves_a_runner_that_picked_up_real_test_failures(self):
         self.world([("davids-mac-mini-linux-hporthealth-1", "running")], top={"davids-mac-mini-linux-hporthealth-1": "Runner.Listener run"},
                    logs={"davids-mac-mini-linux-hporthealth-1": jobs((400, "Failed"), (8, "Failed"), (500, "Failed"))})
+        self.run_pass()
+        self.assertEqual(self.calls("restart"), [])
+
+    def test_a_runner_whose_processes_cannot_be_read_is_left_alone(self):
+        self.world([("davids-mac-mini-dind-sconsinc-1", "running")])  # docker top fails for it
+        for _ in range(3):
+            self.run_pass()
+        self.assertEqual(self.calls("restart"), [])
+        with open(os.path.join(self.w, "log")) as fh:
+            self.assertIn("could not list its processes", fh.read())
+
+    def test_status_reads_the_real_docker_top_format(self):
+        self.world([("davids-mac-mini-dind-sconsinc-1", "running")],
+                   top={"davids-mac-mini-dind-sconsinc-1": "runuser -u runner -- ./run.sh\n/home/runner/bin/Runner.Listener run"})
+        out = self.run_pass("--status")
+        self.assertIn("davids-mac-mini-dind-sconsinc-1 running Runner.Listener", out)
+
+    def test_never_restarts_a_fast_failing_runner_that_just_took_a_job(self):
+        name = "davids-mac-mini-linux-hporthealth-2"
+        self.world([(name, "running")], top={name: "Runner.Listener run"},
+                   logs={name: jobs((8, "Failed"), (6, "Failed"), (9, "Failed"))})
+        with open(os.path.join(self.w, "top.%s.2" % name), "w") as fh:
+            fh.write("UID PID PPID C STIME TTY TIME CMD\n1001 1 0 0 17:30 ? 00:00:00 Runner.Listener run\n"
+                     "1001 2 1 0 17:30 ? 00:00:00 Runner.Worker spawnclient\n")
         self.run_pass()
         self.assertEqual(self.calls("restart"), [])
 

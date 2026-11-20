@@ -60,14 +60,29 @@ act() { # act <what> <command...>: run it, or say it would
   fi
 }
 
+# The container's processes, as `docker top` prints them (UID PID ... CMD). Plain `docker top`, no ps options:
+# Docker refuses any that drop the PID column ("Couldn't find PID field in ps output"), and treating that refusal
+# as "no runner process" once restarted every runner on the machine. A failed query is never read as a dead runner.
+processes() {
+  docker top "$1" 2>/dev/null </dev/null
+}
+
 containers() {
   docker ps -a --format '{{.Names}}|{{.State}}' 2>/dev/null | grep -E "^[^|]*($MATCH)[^|]*\|" || true
 }
 
 if [ "${1:-}" = "--status" ]; then
   containers | while IFS='|' read -r name st; do
-    procs="$(docker top "$name" -eo args 2>/dev/null | grep -oE 'Runner\.(Listener|Worker)' | sort -u | tr '\n' ' ')"
-    echo "$name $st ${procs:-no-runner-process}"
+    if [ "$st" != "running" ]; then
+      echo "$name $st"
+      continue
+    fi
+    if ! p="$(processes "$name")"; then
+      echo "$name $st process-list-unavailable"
+      continue
+    fi
+    p="$(printf '%s\n' "$p" | grep -oE 'Runner\.(Listener|Worker)' | sort -u | tr '\n' ' ')"
+    echo "$name $st ${p:-no-runner-process}"
   done
   echo "last pass: $(tail -1 "$LOG" 2>/dev/null)"
   exit 0
@@ -130,7 +145,11 @@ while IFS='|' read -r name st <&3; do
     act "$name: was $st, docker start" docker start "$name"
     continue
   fi
-  procs="$(docker top "$name" -eo args 2>/dev/null)"
+  if ! procs="$(processes "$name")"; then
+    rm -f "$miss"  # could not read its processes: say so, never guess it is dead
+    say "$name: could not list its processes (docker top failed); leaving it alone"
+    continue
+  fi
   if echo "$procs" | grep -q 'Runner\.Worker'; then
     rm -f "$miss"  # running a job: healthy, never touched
     continue
@@ -141,8 +160,8 @@ while IFS='|' read -r name st <&3; do
       if [ "$(budget "$name")" -ge "$MAX_PER_HOUR" ]; then
         say "$name: every recent job fails within ${FAST_FAIL_S}s, but already restarted $MAX_PER_HOUR times this hour; leaving it for a person"
       else
-        if docker top "$name" -eo args 2>/dev/null </dev/null | grep -q 'Runner\.Worker'; then
-          continue  # it picked up a job meanwhile: never kill a running job
+        if ! again="$(processes "$name")" || echo "$again" | grep -q 'Runner\.Worker'; then
+          continue  # it picked up a job meanwhile, or can't be read: never kill a running job
         fi
         [ -z "$DRY" ] && budget "$name" add >/dev/null
         act "$name: last $FAST_FAILS jobs all failed within ${FAST_FAIL_S}s (checkout/setup), docker restart" \
