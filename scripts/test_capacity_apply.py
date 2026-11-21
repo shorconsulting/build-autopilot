@@ -99,6 +99,73 @@ class Apply409(unittest.TestCase):
         self.assertEqual((rc, len(calls)), (1, 1))
 
 
+class PauseResume(unittest.TestCase):
+    RX = r"^hph-ci-(?:light-)?([0-9]+)(?:-|$)"
+    T = "sudo -n /usr/local/sbin/restart-runner-slot {slot}"
+
+    def rep(self, do, host="hph-ci", runner="hph-ci-3-1795"):
+        return {"state": "/var/lib/build-autopilot/capacity-state-o.json",
+                "host_actions": [{"do": do, "needs_person": False, "host": host, "runner": runner, "why": "swapping"}]}
+
+    def test_pause_stops_the_slot_and_records_it(self):
+        (kind, argv, _, note), = capacity_apply.plan(self.rep("pause-slot"), self.RX, self.T, host="hph-ci",
+                                                     cancel=False)
+        self.assertEqual((kind, argv), ("pause-slot", ["sudo", "-n", "/usr/local/sbin/restart-runner-slot", "--stop",
+                                                       "3"]))
+        self.assertEqual(note[2:], ["capacity-note", "--host", "hph-ci", "--paused", "hph-ci-3-1795",
+                                    "--state", "/var/lib/build-autopilot/capacity-state-o.json"])
+
+    def test_resume_starts_it_and_records_it(self):
+        (kind, argv, _, note), = capacity_apply.plan(self.rep("resume-slot"), self.RX, self.T, host="hph-ci",
+                                                     cancel=False)
+        self.assertEqual(argv[-1], "3")
+        self.assertNotIn("--stop", argv)
+        self.assertIn("--resumed", note)
+
+    def test_other_box_or_no_restart_command_does_nothing(self):
+        self.assertEqual(capacity_apply.plan(self.rep("pause-slot", host="colima"), self.RX, self.T, host="hph-ci",
+                                             cancel=False), [])
+        self.assertEqual(capacity_apply.plan(self.rep("pause-slot"), self.RX, "", host="hph-ci", cancel=False), [])
+        self.assertEqual(capacity_apply.plan(self.rep("pause-slot", runner="davids-mac-mini-dind-1"), self.RX, self.T,
+                                             host="hph-ci", cancel=False), [])
+
+    def test_a_pause_that_is_not_recorded_counts_as_a_failure(self):
+        import json
+        import subprocess
+        import tempfile
+        from unittest import mock
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            json.dump(self.rep("pause-slot"), fh)
+        results = [(0, ""), (1, "locked")]
+
+        def fake(cmd, **kw):
+            code, err = results.pop(0)
+            return subprocess.CompletedProcess(cmd, code, "", err)
+        with mock.patch.object(capacity_apply.subprocess, "run", fake), mock.patch("builtins.print"):
+            rc = capacity_apply.main([fh.name, "--no-cancel", "--slot-regex", self.RX, "--restart", self.T,
+                                      "--host", "hph-ci"])
+        self.assertEqual((rc, results), (1, []))
+
+
+class RestartHelper(unittest.TestCase):
+    def run_helper(self, *args):
+        import os
+        import subprocess
+        import tempfile
+        d = tempfile.mkdtemp()
+        script = open(os.path.join(os.path.dirname(os.path.abspath(capacity_apply.__file__)),
+                                   "restart-runner-slot.sh")).read().replace("/usr/bin/systemctl", "echo")
+        path = os.path.join(d, "h.sh")
+        open(path, "w").write(script)
+        return subprocess.run(["bash", path] + list(args), capture_output=True, text=True)
+
+    def test_stop_and_restart_one_numbered_slot_only(self):
+        self.assertEqual(self.run_helper("4").stdout.strip(), "restart hph-runner@4.service")
+        self.assertEqual(self.run_helper("--stop", "4").stdout.strip(), "stop hph-runner@4.service")
+        for bad in (["--stop"], ["x"], ["--stop", "4", "5"], ["--start", "4"], ["4;reboot"]):
+            self.assertEqual(self.run_helper(*bad).returncode, 2, bad)
+
+
 class RepeatCancel(unittest.TestCase):
     """A run GitHub accepted a cancel for (202) but left queued is force-cancelled on the next pass."""
 

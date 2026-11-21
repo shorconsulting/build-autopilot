@@ -3,7 +3,9 @@
 
 Self-healing (build rules, rule 3): cancel the stale queued runs it lists and restart this box's own runner services
 it names, and start one more slot when the report says `add-slot` for this box (--host), at the lowest slot number
-no runner of this box uses. It never deletes a registration, never restarts a VM or reboots the box, and touches only runners whose
+no runner of this box uses. When the report says `pause-slot` for this box (it is swapping), stop that one idle
+slot, and on `resume-slot` (no longer swapping, jobs backed up) start it again; each is recorded with
+`steward.py capacity-note` in the report's state file, so pool checks never restart a paused slot. It never deletes a registration, never restarts a VM or reboots the box, and touches only runners whose
 names match --slot-regex (runners of other boxes are left to the steward on their own box). Every action is printed
 as one line, so the timer's journal is the after-the-fact record.
 
@@ -48,6 +50,7 @@ def force(cmd):
     return [c.replace("/cancel", "/force-cancel") if c.endswith("/cancel") else c for c in cmd]
 
 RESTART_ACTIONS = ("restart-runner", "restore-pool")
+HERE = os.path.dirname(os.path.abspath(__file__))
 
 
 def plan(report, slot_regex, restart_template, max_cancels=100, seen=None, cancel=True, host=""):
@@ -84,6 +87,21 @@ def plan(report, slot_regex, restart_template, max_cancels=100, seen=None, cance
                 argv = shlex.split(restart_template.format(slot=slot))
                 out.append(("restart", argv, "%s (%s): %s" % (name, owner.get("owner"), act.get("why", ""))))
     for act in report.get("host_actions") or []:
+        if (act.get("do") in ("pause-slot", "resume-slot") and not act.get("needs_person") and host
+                and act.get("host") == host and rx and restart_template):
+            m = rx.search(act.get("runner") or "")
+            if not m or m.group(1) in seen:
+                continue
+            slot = m.group(1)
+            seen.add(slot)
+            tmpl = restart_template.replace("{slot}", "--stop {slot}") if act["do"] == "pause-slot" else restart_template
+            note = [sys.executable, os.path.join(HERE, "steward.py"), "capacity-note", "--host", host,
+                    "--paused" if act["do"] == "pause-slot" else "--resumed", act["runner"]]
+            if report.get("state"):
+                note += ["--state", report["state"]]
+            out.append((act["do"], shlex.split(tmpl.format(slot=slot)), "%s (%s): %s" % (
+                act["runner"], host, act.get("why", "")), note))
+            continue
         if act.get("do") != "add-slot" or act.get("needs_person") or not host or act.get("host") != host:
             continue
         if not rx or not restart_template or "add-slot" in seen:
@@ -119,7 +137,9 @@ def main(argv=None):
                       cancel=not a.no_cancel, host=a.host)
     failed = 0
     cancelled = load_cancelled(a.cancel_state) if a.cancel_state else {}
-    for kind, cmd, why in steps:
+    for step in steps:
+        kind, cmd, why = step[:3]
+        note = step[3] if len(step) > 3 else None
         key = cmd[-1].rsplit("/actions/runs/", 1)
         key = "%s %s" % (key[0][len("repos/"):], key[1].split("/")[0]) if kind == "cancel" and len(key) == 2 else ""
         repeat = bool(key) and key in cancelled
@@ -150,6 +170,11 @@ def main(argv=None):
             continue
         failed += 0 if ok else 1
         print("%s %s: %s%s" % (kind, "ok" if ok else "FAILED", why, "" if ok else " (%s)" % err[:200]))
+        if ok and note:
+            rec = subprocess.run(note, capture_output=True, text=True, timeout=600)
+            if rec.returncode != 0:
+                failed += 1
+                print("%s done but not recorded: %s" % (kind, (rec.stderr or rec.stdout).strip()[:200]))
     if a.cancel_state and not a.dry_run:
         try:
             save_cancelled(a.cancel_state, cancelled)
