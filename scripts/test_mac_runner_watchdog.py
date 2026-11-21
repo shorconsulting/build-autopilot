@@ -145,11 +145,36 @@ class Watchdog(unittest.TestCase):
         self.run_pass()
         self.assertEqual(self.calls("restart"), [])
 
-    def test_gives_up_after_the_hourly_cap(self):
-        self.world([("davids-mac-mini-dind-sconsinc-5", "exited")])
+    def test_past_the_hourly_cap_an_exited_runner_is_retried_slowly(self):
+        name = "davids-mac-mini-dind-sconsinc-5"
+        self.world([(name, "exited")])
         for _ in range(5):
             self.run_pass()
         self.assertEqual(len(self.calls("start")), 3)
+        with open(os.path.join(self.w, "log")) as fh:
+            self.assertIn("next try in at most 15 min", fh.read())
+        # 16 minutes after the last start: one more try, still inside the hour.
+        import time
+        path = os.path.join(self.w, "st", name + ".restarts")
+        now = int(time.time())
+        with open(path, "w") as fh:
+            fh.write("%d\n%d\n%d\n" % (now - 1500, now - 1200, now - 960))
+        self.run_pass()
+        self.assertEqual(len(self.calls("start")), 4)
+        self.run_pass()
+        self.assertEqual(len(self.calls("start")), 4)
+
+    def test_a_running_runner_keeps_the_hard_cap(self):
+        name = "davids-mac-mini-dind-sconsinc-2"
+        self.world([(name, "running")], top={name: "/bin/sh entrypoint"})
+        import time
+        os.makedirs(os.path.join(self.w, "st"), exist_ok=True)
+        now = int(time.time())
+        with open(os.path.join(self.w, "st", name + ".restarts"), "w") as fh:
+            fh.write("%d\n%d\n%d\n" % (now - 3000, now - 2900, now - 2800))
+        for _ in range(3):
+            self.run_pass()
+        self.assertEqual(self.calls("restart"), [])
         with open(os.path.join(self.w, "log")) as fh:
             self.assertIn("leaving it for a person", fh.read())
 

@@ -10,8 +10,9 @@
 #      work folder. Real test failures take longer than that, so a runner that just picked up red PRs is left alone.
 #   5. The load governor (mac-runner-governor.sh) takes runner slots out of service while the machine is
 #      overloaded and puts them back when it eases. A slot it paused is not started again here.
-# A container is restarted at most WATCHDOG_MAX_PER_HOUR (3) times an hour; past that it is left alone and logged,
-# because something is wrong that a restart won't fix. Every action is one line in the log.
+# A container is restarted at most WATCHDOG_MAX_PER_HOUR (3) times an hour; past that a running one is left alone and
+# logged, because something is wrong that a restart won't fix, and an exited one is started only once every
+# WATCHDOG_SLOW_RETRY_S (900) seconds. Every action is one line in the log.
 #
 #   mac-runner-watchdog.sh            one pass
 #   mac-runner-watchdog.sh --dry-run  say what it would do, change nothing
@@ -31,6 +32,7 @@ LOG="${WATCHDOG_LOG:-$HOME/Library/Logs/mac-runner-watchdog.log}"
 MAX_PER_HOUR="${WATCHDOG_MAX_PER_HOUR:-3}"
 FAST_FAILS="${WATCHDOG_FAST_FAILS:-3}"
 FAST_FAIL_S="${WATCHDOG_FAST_FAIL_S:-90}"
+SLOW_RETRY_S="${WATCHDOG_SLOW_RETRY_S:-900}"
 DRY=""
 [ "${1:-}" = "--dry-run" ] && DRY=1
 mkdir -p "$STATE" "$(dirname "$LOG")"
@@ -102,6 +104,13 @@ budget() {
   wc -l < "$f" | tr -d ' '
 }
 
+# Seconds since this container's last recorded restart (a large number when there is none).
+since_last() {
+  local last
+  last="$(tail -1 "$STATE/$1.restarts" 2>/dev/null)"
+  echo $(( $(date +%s) - ${last:-0} ))
+}
+
 # Durations in seconds of the jobs a runner finished since its container started, with their result, oldest first:
 # "<seconds> <Succeeded|Failed|Canceled>". From the runner's own lines:
 #   2026-11-20 22:36:17Z: Running job: enable
@@ -145,8 +154,11 @@ while IFS='|' read -r name st <&3; do
   fi
   if [ "$st" != "running" ]; then
     rm -f "$miss"
-    if [ "$(budget "$name")" -ge "$MAX_PER_HOUR" ]; then
-      say "$name: $st, but already restarted $MAX_PER_HOUR times this hour; leaving it for a person"
+    # Past the hourly cap, a stopped container is still started once every SLOW_RETRY_S: starting one can't hurt a
+    # job, and the usual cause is a network drop that outlasted the first tries (sconsinc-6, 2026-11-20: three starts
+    # in 5 minutes during an outage, then an hour down). Restarts of a running container keep the hard cap.
+    if [ "$(budget "$name")" -ge "$MAX_PER_HOUR" ] && [ "$(since_last "$name")" -lt "$SLOW_RETRY_S" ]; then
+      say "$name: $st, already restarted $MAX_PER_HOUR times this hour; next try in at most $((SLOW_RETRY_S / 60)) min (a person may want to look)"
       continue
     fi
     [ -z "$DRY" ] && budget "$name" add >/dev/null
