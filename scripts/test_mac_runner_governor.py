@@ -4,6 +4,7 @@ stopped, started or relabelled."""
 import os
 import subprocess
 import tempfile
+import time
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -344,17 +345,15 @@ class Governor(unittest.TestCase):
         self.assertEqual(self.draining(), [])
 
     def test_an_unreadable_machine_is_never_read_as_calm(self):
-        self.runners({"1": ("running", IDLE, ""), "2": ("running", IDLE, ""), "3": ("running", "Runner.Listener run", "")})
+        self.runners({"1": ("running", IDLE, ""), "2": ("running", IDLE, ""), "3": ("exited", None, "")})
         os.makedirs(os.path.join(self.state, "governor", "paused"))
         with open(os.path.join(self.state, "governor", "paused", R + "3"), "w") as fh:
-            fh.write("1\n")
-        with open(os.path.join(self.w, "ps"), "a") as fh:
-            pass
-        self.vm(vm(load=1))
-        os.remove(os.path.join(self.w, "vm"))
-        for _ in range(4):
+            fh.write("%d\n" % time.time())
+        self.mac(load=1)
+        for _ in range(6):
             self.go()
         self.assertEqual(self.calls("start"), [])
+        self.assertEqual(self.paused(), ["3"])
 
     # --- slow jobs ---
     def learned(self):
