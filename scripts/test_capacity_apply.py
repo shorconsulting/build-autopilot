@@ -99,5 +99,59 @@ class Apply409(unittest.TestCase):
         self.assertEqual((rc, len(calls)), (1, 1))
 
 
+class RepeatCancel(unittest.TestCase):
+    """A run GitHub accepted a cancel for (202) but left queued is force-cancelled on the next pass."""
+
+    def setUp(self):
+        import tempfile
+        self.d = tempfile.mkdtemp()
+        self.state = self.d + "/cancelled.json"
+        self.report = self.d + "/cap.json"
+        import json
+        with open(self.report, "w") as fh:
+            json.dump({"repos": [{"repo": "o/a", "actions": [{"do": "cancel-stale", "runs": [9], "why": "stale"}]}]}, fh)
+
+    def run_pass(self, code=0, extra=()):
+        import subprocess
+        from unittest import mock
+        calls = []
+
+        def fake(cmd, **kw):
+            calls.append(cmd[-1])
+            return subprocess.CompletedProcess(cmd, code, "", "" if code == 0 else "(HTTP 500)")
+        with mock.patch.object(capacity_apply.subprocess, "run", fake), mock.patch("builtins.print"):
+            rc = capacity_apply.main([self.report, "--no-restart", "--cancel-state", self.state] + list(extra))
+        return rc, calls
+
+    def test_first_pass_cancels_second_pass_forces(self):
+        self.assertEqual(self.run_pass(), (0, ["repos/o/a/actions/runs/9/cancel"]))
+        self.assertEqual(self.run_pass(), (0, ["repos/o/a/actions/runs/9/force-cancel"]))
+
+    def test_a_failed_cancel_is_not_remembered(self):
+        self.run_pass(code=1)
+        self.assertEqual(self.run_pass()[1], ["repos/o/a/actions/runs/9/cancel"])
+
+    def test_old_cancels_are_forgotten(self):
+        import json
+        import time
+        with open(self.state, "w") as fh:
+            json.dump({"o/a 9": time.time() - capacity_apply.REMEMBER_S - 60}, fh)
+        self.assertEqual(self.run_pass()[1], ["repos/o/a/actions/runs/9/cancel"])
+
+    def test_a_refused_force_cancel_is_skipped_not_failed(self):
+        self.run_pass()
+        self.assertEqual(self.run_pass(code=1), (0, ["repos/o/a/actions/runs/9/force-cancel"]))
+
+    def test_unreadable_state_starts_empty_and_dry_run_writes_nothing(self):
+        import os
+        with open(self.state, "w") as fh:
+            fh.write("not json")
+        self.assertEqual(self.run_pass(extra=["--dry-run"])[1], [])
+        with open(self.state) as fh:
+            self.assertEqual(fh.read(), "not json")
+        os.remove(self.state)
+        self.assertEqual(self.run_pass()[1], ["repos/o/a/actions/runs/9/cancel"])
+
+
 if __name__ == "__main__":
     unittest.main()

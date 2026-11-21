@@ -93,6 +93,7 @@ for owner in $owners; do
       --state "$STATE/capacity-state-$owner.json"; then
     # Cancels with this org's token; restarts once per pass over every org's report, below.
     GH_TOKEN="$tok" python3 "$HERE/capacity_apply.py" "$out" --no-restart $dry \
+      --cancel-state "$STATE/cancelled-$owner.json" \
       || echo "$owner: some cancels failed (see above)"
     reports="$reports $out"
   else
