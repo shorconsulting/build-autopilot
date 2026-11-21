@@ -2,10 +2,14 @@
 """Put a labelled pull request's CI at the front of the line on a self-hosted runner pool (plain code, no AI).
 
 GitHub hands queued jobs to self-hosted runners in arrival order and has no priority setting. So when an open PR in
-one of --repo carries --label (default `ci:priority`) and its head still has a run that has not finished, every
-run of those repos that is QUEUED (no job started, so nothing is lost) and was created before it is bumped: it is
-cancelled, and once GitHub reports it completed it is re-run, which queues it again behind the priority PR. A
-bumped run that is already superseded (its pull request's head moved on) is only cancelled, never re-run.
+one of --repo carries --label (default `ci:priority`), applied by someone with admin or maintain access, and its
+head still has a job waiting for a runner, every pull request run of those repos that is QUEUED (no job started, so
+nothing is lost) and was queued before it is bumped: it is cancelled, and once GitHub reports it completed it is
+re-run, which queues it again behind the priority PR. "Queued" is when the current attempt was queued
+(run_started_at), so a run bumped once is never bumped again for the same priority PR. Only pull_request and
+pull_request_target runs with a pull request are bumped: a push, schedule, release or deploy run is never touched.
+A bumped run that is already superseded (its pull request's head moved on) is only cancelled, never re-run. List
+only repos whose CI runs on the box's own pool in --repo: a run waiting for a GitHub-hosted runner gains nothing.
 
 Re-runs owed are kept in --state, so a run cancelled in one pass and not yet completed is re-run by a later pass
 (each pass first pays what earlier passes owe, with or without a priority PR). A re-run still owed after
@@ -43,6 +47,15 @@ def ts(s):
     return datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ").timestamp()
 
 
+PR_EVENTS = ("pull_request", "pull_request_target")
+MAINTAINERS = ("admin", "maintain")
+
+
+def queued_at(run):
+    """When the run's current attempt was queued: run_started_at (a re-run keeps its created_at), else created_at."""
+    return ts(run.get("run_started_at") or run["created_at"])
+
+
 def superseded(run):
     """True when every pull request the run is for has a different head now: a re-run would test old code."""
     prs = run.get("pull_requests") or []
@@ -51,26 +64,31 @@ def superseded(run):
 
 def plan(priority_runs, queued, max_bumps):
     """[(repo, run, rerun?)] to bump: queued runs created before the oldest unfinished priority run.
-    priority_runs: [(repo, run)] of unfinished runs on priority heads; queued: [(repo, run)] of queued runs."""
+    priority_runs: [(repo, run)] of runs on priority heads with a job waiting, each with "waiting_since" (epoch);
+    queued: [(repo, run)] of queued runs."""
     if not priority_runs:
         return []
-    first = min(ts(r["created_at"]) for _, r in priority_runs)
+    first = min(r["waiting_since"] for _, r in priority_runs)
     mine = {(repo, r["id"]) for repo, r in priority_runs}
     heads = {(repo, r["head_sha"]) for repo, r in priority_runs}
     older = [(repo, r) for repo, r in queued
              if (repo, r["id"]) not in mine and (repo, r.get("head_sha")) not in heads
-             and r.get("status") == "queued" and ts(r["created_at"]) < first]
-    older.sort(key=lambda x: x[1]["created_at"])
+             and r.get("status") == "queued" and r.get("event") in PR_EVENTS and r.get("pull_requests")
+             and queued_at(r) < first]
+    older.sort(key=lambda x: (queued_at(x[1]), x[1]["id"]))
     return [(repo, r, not superseded(r)) for repo, r in older[:max(max_bumps, 0)]]
 
 
 def load(path):
+    """{"<repo> <run>": {"t": epoch of the bump, "q": epoch it was queued before it}}."""
     try:
         with open(path, encoding="utf-8") as fh:
             data = json.load(fh)
-        return data if isinstance(data, dict) else {}
     except (OSError, ValueError):
         return {}
+    if not isinstance(data, dict):
+        return {}
+    return {k: v for k, v in data.items() if isinstance(v, dict) and len(k.split(" ")) == 2}
 
 
 def save(path, data):
@@ -83,9 +101,10 @@ def save(path, data):
 def pay_owed(api, owed, now, dry):
     """Re-run every owed run GitHub now reports completed. Returns the count of failures."""
     failed = 0
-    for key in sorted(owed):
+    # Oldest first, by when each run was queued before its bump (numeric, never the text of the key).
+    for key in sorted(owed, key=lambda k: (owed[k].get("q", 0), int(k.split(" ")[1]))):
         repo, run = key.split(" ")
-        if now - owed[key] > OWE_FOR_S:
+        if now - owed[key].get("t", 0) > OWE_FOR_S:
             print("re-run dropped: %s run %s (still not completed %d hours after the bump)" % (repo, run, OWE_FOR_S // 3600))
             del owed[key]
             continue
@@ -108,8 +127,40 @@ def pay_owed(api, owed, now, dry):
     return failed
 
 
+def labeller(api, repo, number, label):
+    """(login, may) of whoever last applied the label: may is True only for admin or maintain access."""
+    who = None
+    for page in range(1, 11):
+        ok, events, err = api("GET", "repos/%s/issues/%d/events?per_page=100&page=%d" % (repo, number, page))
+        if not ok:
+            print("%s #%d: could not read who applied %s (%s)" % (repo, number, label, err))
+            return None, False
+        for e in events or []:
+            if e.get("event") == "labeled" and (e.get("label") or {}).get("name") == label:
+                who = (e.get("actor") or {}).get("login")
+        if len(events or []) < 100:
+            break
+    if not who:
+        return None, False
+    ok, perm, err = api("GET", "repos/%s/collaborators/%s/permission" % (repo, who))
+    role = (perm or {}).get("role_name") or (perm or {}).get("permission") if ok else None
+    return who, role in MAINTAINERS
+
+
+def waiting_since(api, repo, run):
+    """Epoch the run's earliest job still waiting for a runner was queued; None when no job waits."""
+    if run.get("status") == "queued":
+        return queued_at(run)
+    ok, data, err = api("GET", "repos/%s/actions/runs/%d/jobs?filter=latest&per_page=100" % (repo, run["id"]))
+    if not ok:
+        print("%s run %d: could not list its jobs (%s)" % (repo, run["id"], err))
+        return None
+    waits = [ts(j["created_at"]) for j in (data or {}).get("jobs") or [] if j.get("status") == "queued"]
+    return min(waits) if waits else None
+
+
 def priority_runs_for(api, repo, label):
-    """[(repo, run)] of the unfinished runs on the heads of open PRs carrying the label."""
+    """[(repo, run)] of the runs on the heads of open PRs carrying the label that have a job waiting for a runner."""
     ok, issues, err = api("GET", "repos/%s/issues?state=open&labels=%s&per_page=100" % (repo, quote(label, safe="")))
     if not ok:
         print("%s: could not list %s PRs (%s)" % (repo, label, err))
@@ -122,12 +173,23 @@ def priority_runs_for(api, repo, label):
         if not ok or not pr:
             print("%s #%s: could not read the PR (%s)" % (repo, issue["number"], err))
             continue
+        who, may = labeller(api, repo, issue["number"], label)
+        if not may:
+            print("%s #%s has %s from %s, who has no admin or maintain access: ignored" % (
+                repo, issue["number"], label, who or "an unknown account"))
+            continue
         ok, runs, err = api("GET", "repos/%s/actions/runs?head_sha=%s&per_page=100" % (repo, pr["head"]["sha"]))
+        if not ok:
+            print("%s #%s: could not list the runs on its head (%s)" % (repo, issue["number"], err))
+            continue
+        n = 0
         for r in (runs or {}).get("workflow_runs") or []:
-            if r.get("status") != "completed":
-                out.append((repo, r))
-        print("%s #%s has %s: %d unfinished run(s) on its head" % (
-            repo, issue["number"], label, sum(1 for x in out if x[1]["head_sha"] == pr["head"]["sha"])))
+            since = waiting_since(api, repo, r) if r.get("status") != "completed" else None
+            if since is not None:
+                out.append((repo, dict(r, waiting_since=since)))
+                n += 1
+        print("%s #%s has %s (applied by %s): %d run(s) on its head waiting for a runner" % (
+            repo, issue["number"], label, who, n))
     return out
 
 
@@ -156,9 +218,11 @@ def run(repos, state_path, label=LABEL, max_bumps=500, min_rate=1500, settle_s=3
         if left is not None and left < min_rate:
             print("priority: not bumping, %d API calls left this hour (under %d)" % (left, min_rate))
             prio = []
+    prio_names = ", ".join(sorted({"%s@%s" % (repo, r["head_sha"][:7]) for repo, r in prio}))
     bumps = plan(prio, [x for repo in repos for x in queued_for(api, repo)], max_bumps) if prio else []
     for repo, r, rerun in bumps:
-        why = "%s run %s (%s, queued %s)" % (repo, r["id"], r.get("name", ""), r["created_at"])
+        why = "%s run %s (%s, queued %s) for priority %s" % (
+            repo, r["id"], r.get("name", ""), r.get("run_started_at") or r["created_at"], prio_names)
         if dry:
             print("would bump: %s%s" % (why, "" if rerun else ", superseded: cancel only"))
             continue
@@ -170,7 +234,7 @@ def run(repos, state_path, label=LABEL, max_bumps=500, min_rate=1500, settle_s=3
             print("bump FAILED: %s (%s)" % (why, err))
             continue
         if rerun:
-            owed.setdefault("%s %d" % (repo, r["id"]), now())
+            owed.setdefault("%s %d" % (repo, r["id"]), {"t": now(), "q": queued_at(r)})
         print("bumped: %s%s" % (why, ", re-run owed" if rerun else ", superseded: cancelled, not re-run"))
     if bumps and not dry:
         if state_path:
