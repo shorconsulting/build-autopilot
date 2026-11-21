@@ -22,9 +22,14 @@ fi
 mkdir -p "$HOME/.local/bin" "$HOME/Library/LaunchAgents"
 install -m 755 "$HERE/mac-runner-watchdog.sh" "$BIN"
 install -m 755 "$HERE/mac-runner-governor.sh" "$GOV"
-# Settings for the agent: every GOV_* and WATCHDOG_* variable set when this was run.
+# With the governor turned off nothing would start the runners it paused: start them now.
+if [ "${WATCHDOG_GOVERNOR:-1}" = 0 ]; then
+  bash "$GOV" --resume-all || true
+fi
+# Settings for the agent: the supported GOV_* and WATCHDOG_* settings set when this was run (never the test ones).
 ENVXML=""
-for v in $(env | grep -oE '^(GOV|WATCHDOG)_[A-Z_]+' | sort -u); do
+for v in $(env | grep -oE '^(GOV_[A-Z_]+|WATCHDOG_(GOVERNOR|MATCH|COLIMA_PROFILE|MAX_PER_HOUR|FAST_FAILS|FAST_FAIL_S))=' \
+             | tr -d '=' | sort -u); do
   val="$(printenv "$v" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g')"
   ENVXML="$ENVXML    <key>$v</key><string>$val</string>
 "

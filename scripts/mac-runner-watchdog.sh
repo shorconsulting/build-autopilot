@@ -138,8 +138,9 @@ while IFS='|' read -r name st <&3; do
   [ -n "$name" ] || continue
   seen=$((seen + 1))
   miss="$STATE/$name.missing"
-  if [ -f "$STATE/governor/paused/$name" ]; then
+  if [ "${WATCHDOG_GOVERNOR:-1}" != 0 ] && [ -f "$STATE/governor/paused/$name" ]; then
     rm -f "$miss"  # taken out of service by the load governor on purpose: it starts it again when load eases
+    # (with the governor turned off, nothing would: then a paused runner is started like any other)
     continue
   fi
   if [ "$st" != "running" ]; then

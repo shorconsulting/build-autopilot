@@ -946,13 +946,29 @@ GOVERNOR_PAUSED_DIR = os.environ.get("BA_GOVERNOR_PAUSED_DIR") or os.path.expand
     "~/.local/state/mac-runner-watchdog/governor/paused")
 
 
-def governor_paused(path=None):
-    """Runner names the Mac load governor has paused, or [] when it isn't installed here."""
+GOVERNOR_PAUSED_MAX_HOURS = 24
+
+
+def governor_paused(path=None, now=None):
+    """Runner names the Mac load governor has paused, or [] when it isn't installed here. A pause older than
+    GOVERNOR_PAUSED_MAX_HOURS is not counted (the governor turned off, or stuck), so the runner is reported
+    offline and restarted like any other instead of staying parked unseen."""
     path = path or GOVERNOR_PAUSED_DIR
+    now = now or time.time()
+    out = []
     try:
-        return sorted(f for f in os.listdir(path) if not f.endswith(".labels") and not f.startswith("."))
+        names = os.listdir(path)
     except OSError:
         return []
+    for f in names:
+        if f.endswith((".labels", ".id")) or f.startswith("."):
+            continue
+        try:
+            if now - os.path.getmtime(os.path.join(path, f)) < GOVERNOR_PAUSED_MAX_HOURS * 3600:
+                out.append(f)
+        except OSError:
+            pass
+    return sorted(out)
 
 
 def cmd_capacity_note(args):

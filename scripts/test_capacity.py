@@ -631,5 +631,14 @@ class GovernorPaused(unittest.TestCase):
                                    steward.governor_paused(d))
         self.assertEqual([x for x in f if x.get("runner") == "davids-mac-mini-dind-sconsinc-4"], [])
 
+    def test_a_governor_pause_older_than_a_day_is_not_counted(self):
+        import tempfile
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, "davids-mac-mini-dind-sconsinc-4")
+        open(path, "w").close()
+        old = time.time() - (steward.GOVERNOR_PAUSED_MAX_HOURS + 1) * 3600
+        os.utime(path, (old, old))
+        self.assertEqual(steward.governor_paused(d), [])
+
 if __name__ == "__main__":
     unittest.main()

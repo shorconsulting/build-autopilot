@@ -414,15 +414,19 @@ Mac runner watchdog (`scripts/install-mac-runner-watchdog.sh` installs both as o
   the runners' own logs; no estimate until it has seen a job three times).
 - Overloaded two passes in a row (once, when memory is nearly gone or the Mac is in critical pressure), or a job
   running three times its usual time (and at least 10 minutes) while other jobs share the box: it takes ONE runner
-  out of service. An idle one is stopped at once; otherwise the busy one closest to done drains: it finishes its job
-  and is stopped the moment it ends, before it takes another. A running job is never stopped, and each runner group
-  keeps at least `GOV_MIN_SLOTS` (2).
+  out of service. An idle one is stopped at once, after one more look right before the stop. With `GOV_GH_ORGS`,
+  when none is idle, the busy one closest to done drains (below). A running job is never stopped, and each runner
+  group keeps at least `GOV_MIN_SLOTS` (2).
 - Calm three passes in a row: it puts ONE back (cancels a drain, or starts the runner paused most recently).
 - One change per `GOV_COOLDOWN_S` (6 minutes). Paused runners are listed in
-  `~/.local/state/mac-runner-watchdog/governor/paused/`; the watchdog doesn't restart them, and a capacity check run
-  on that Mac leaves them out of its offline and pool checks.
-- With `GOV_GH_ORGS` (e.g. `sconsinc:SConsInc`) and a `gh` login that can administer the org's runners, a draining
-  runner's custom labels are taken off at GitHub, so it can take no new job at all, and put back when it returns.
+  `~/.local/state/mac-runner-watchdog/governor/paused/`; while the governor is on the watchdog doesn't restart them,
+  and a capacity check run on that Mac leaves them out of its offline and pool checks for up to a day (an older
+  pause is reported and restarted like any offline runner). Installing with `WATCHDOG_GOVERNOR=0` starts them all.
+- Draining needs `GOV_GH_ORGS` (e.g. `sconsinc:SConsInc`) and a `gh` login that can administer the org's runners:
+  the runner's custom labels come off at GitHub so it is given no new job, it is stopped once its job ends and
+  GitHub says it is not busy, and its labels go back when it returns. Without it, only idle runners are stopped
+  (under a backlog a runner takes its next job within a second of the last, so stopping it "between jobs" could
+  kill a job just handed to it).
 
 ```
 bash scripts/install-mac-runner-watchdog.sh                               # install or update (governor on)

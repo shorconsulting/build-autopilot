@@ -19,13 +19,15 @@
 #   green    all readings well inside the limits, no slow job.
 #   (else)   hold: change nothing.
 # and acts, one change per GOV_COOLDOWN_S:
-#   red two passes in a row (or once, when severe) -> drain ONE runner: an idle one is stopped at once; otherwise
-#            the busy one closest to done is marked draining and stopped the moment its job ends. A running job is
-#            never stopped. Never below GOV_MIN_SLOTS runners in service per runner group (the name without -N).
+#   red two passes in a row (or once, when severe) -> take ONE runner out: an idle one is stopped at once (looked
+#            at again right before the stop); with GOV_GH_ORGS, otherwise the busy one closest to done drains: its
+#            labels come off at GitHub so it is given no new job, and it is stopped once its job ends and GitHub
+#            says it is not busy. A running job is never stopped. Never below GOV_MIN_SLOTS runners in service per
+#            runner group (the name without -N).
 #   green three passes in a row -> undo ONE: cancel a drain, or start the runner paused most recently.
-# With GOV_GH_ORGS set, a draining runner also has its custom labels taken off at GitHub (so it takes no new job
-# between passes) and put back when it returns. Without it, a draining runner is watched every GOV_POLL_S seconds
-# for up to GOV_WATCH_S, and stopped between jobs.
+# Without GOV_GH_ORGS only idle runners are stopped: a busy one could be handed its next job in the moment between
+# its job ending and the stop, so it is never drained without its labels off. A draining runner is watched every
+# GOV_POLL_S seconds for up to GOV_WATCH_S, and its labels go back when it returns.
 #
 # Paused runners are listed in $STATE/governor/paused/; the watchdog does not start them again, and the steward's
 # capacity check (on this computer) leaves them out of its offline checks. Every action is one line in the log.
@@ -241,22 +243,35 @@ org_of() {
 
 runner_id() { gh api "orgs/$1/actions/runners" --paginate --jq ".runners[] | select(.name == \"$2\") | .id" 2>/dev/null | head -1; }
 
-# Take a draining runner's custom labels off at GitHub, keeping them in $G/draining/<name>.labels.
+# Take a busy runner's custom labels off at GitHub, keeping them in $G/draining/<name>.labels, so GitHub can give it
+# no new job. True only when they came off: a busy runner is drained only then, because without it the runner can
+# be handed its next job in the moment between "its job ended" and the stop.
 unlabel() {
   local name="$1" org id labels
   org="$(org_of "$name")"
-  [ -n "$org" ] || return 0
+  [ -n "$org" ] || return 1
   [ -n "$DRY" ] && { say "would take $name's labels off at GitHub ($org)"; return 0; }
   id="$(runner_id "$org" "$name")"
-  [ -n "$id" ] || { say "$name: not found at GitHub ($org); it is watched and stopped between jobs instead"; return 0; }
+  [ -n "$id" ] || { say "$name: not found at GitHub ($org); not drained"; return 1; }
   labels="$(gh api "orgs/$org/actions/runners/$id/labels" --jq '.labels[] | select(.type == "custom") | .name' 2>/dev/null)"
-  [ -n "$labels" ] || return 0
+  [ -n "$labels" ] || { say "$name: could not read its labels at GitHub ($org); not drained"; return 1; }
   if gh api -X DELETE "orgs/$org/actions/runners/$id/labels" >/dev/null 2>&1; then
     printf '%s\n' "$labels" > "$G/draining/$name.labels"
+    echo "$id" > "$G/draining/$name.id"
     say "$name: labels taken off at GitHub ($(echo $labels)), so it takes no new job"
-  else
-    say "$name: could not take its labels off at GitHub; it is watched and stopped between jobs instead"
+    return 0
   fi
+  say "$name: could not take its labels off at GitHub ($org); not drained"
+  return 1
+}
+
+# For a runner whose labels the governor took off: true when GitHub says it is not running a job.
+github_idle() {
+  local name="$1" org id
+  [ -f "$G/draining/$name.id" ] || return 0
+  org="$(org_of "$name")"
+  id="$(cat "$G/draining/$name.id")"
+  [ "$(gh api "orgs/$org/actions/runners/$id" --jq .busy 2>/dev/null)" = "false" ]
 }
 
 # Put back labels unlabel() took off. Kept for the next try if GitHub refuses.
@@ -289,10 +304,16 @@ stop_paused() { # stop an idle runner and record it as paused by the governor
     say "would stop $name ($why)"
     return 0
   fi
+  # Looked at again right before the stop (the scan or the last poll may be seconds old): never stop a runner that
+  # has taken a job meanwhile, nor one GitHub still counts as busy.
+  if ! idle_now "$name" || ! github_idle "$name"; then
+    say "$name: took a job before it could be stopped; left running"
+    return 1
+  fi
   if docker stop "$name" >/dev/null 2>&1; then
     now > "$G/paused/$name"
     [ -f "$G/draining/$name.labels" ] && mv "$G/draining/$name.labels" "$G/paused/$name.labels"
-    rm -f "$G/draining/$name"
+    rm -f "$G/draining/$name" "$G/draining/$name.id"
     say "$name: stopped ($why)"
   else
     say "$name: docker stop FAILED ($why)"
@@ -321,7 +342,7 @@ cancel_drain() {
     return 0
   fi
   relabel "$name"
-  rm -f "$G/draining/$name"
+  rm -f "$G/draining/$name" "$G/draining/$name.id"
   say "$name: no longer draining ($why)"
 }
 
@@ -343,11 +364,11 @@ watch_drains() {
     left=0
     for f in "$G/draining/"*; do
       [ -f "$f" ] || continue
-      case "$f" in *.labels) continue ;; esac
+      case "$f" in *.labels|*.id) continue ;; esac
       name="$(basename "$f")"
       left=1
       if idle_now "$name"; then
-        stop_paused "$name" "drained: its job ended"
+        stop_paused "$name" "drained: its job ended" || true
       fi
     done
     [ "$left" = 1 ] && [ "$(now)" -lt "$deadline" ] || break
@@ -355,8 +376,8 @@ watch_drains() {
   done
 }
 
-paused_list() { for f in "$G/paused/"*; do [ -f "$f" ] && case "$f" in *.labels) ;; *) basename "$f" ;; esac; done; }
-draining_list() { for f in "$G/draining/"*; do [ -f "$f" ] && case "$f" in *.labels) ;; *) basename "$f" ;; esac; done; }
+paused_list() { for f in "$G/paused/"*; do [ -f "$f" ] && case "$f" in *.labels|*.id) ;; *) basename "$f" ;; esac; done; }
+draining_list() { for f in "$G/draining/"*; do [ -f "$f" ] && case "$f" in *.labels|*.id) ;; *) basename "$f" ;; esac; done; }
 
 # --- modes ----------------------------------------------------------------------------------------------------
 
@@ -453,31 +474,40 @@ cooling=""
 
 if [ "$level" = red ] && { [ "$reds" -ge "$RED_PASSES" ] || [ -n "$severe" ]; } && [ -z "$cooling" ]; then
   # In service per group: running and not draining. Pick from the group with the most, idle first, else the busy
-  # runner whose job has run longest (soonest done); never one starting a job.
+  # runner whose job has run longest (soonest done); never one starting a job, and a busy one only where its
+  # labels can be taken off at GitHub (GOV_GH_ORGS).
   pick="$(echo "$runners" | while read -r n g s e k sl; do
       [ -f "$G/draining/$n" ] && continue
-      case "$s" in idle|busy|starting|unknown) echo "$n $g $s $e" ;; esac
+      dr=0; [ -n "$(org_of "$n")" ] && dr=1
+      case "$s" in idle|busy|starting|unknown) echo "$n $g $s $e $dr" ;; esac
     done | awk -v min="$MIN_SLOTS" '
-      { n[NR] = $1; g[NR] = $2; s[NR] = $3; e[NR] = $4; c[$2]++ }
+      { n[NR] = $1; g[NR] = $2; s[NR] = $3; e[NR] = $4; dr[NR] = $5; c[$2]++ }
       END { best = ""; for (i = 1; i <= NR; i++) {
-              if (c[g[i]] <= min || (s[i] != "idle" && s[i] != "busy")) continue
+              if (c[g[i]] <= min || (s[i] != "idle" && !(s[i] == "busy" && dr[i]))) continue
               score = c[g[i]] * 1000000 + (s[i] == "idle" ? 500000 : 0) + e[i]
               if (best == "" || score > bs) { best = i; bs = score } }
             if (best != "") print n[best], s[best] }')"
   if [ -z "$pick" ]; then
-    say "overloaded ($why) but every runner group is at its minimum of $MIN_SLOTS; nothing to take out"
+    if [ -z "$GH_ORGS" ]; then
+      say "overloaded ($why) but no runner is idle or above its group's minimum of $MIN_SLOTS; a busy runner is only drained with GOV_GH_ORGS set"
+    else
+      say "overloaded ($why) but every runner group is at its minimum of $MIN_SLOTS; nothing to take out"
+    fi
   else
     set -- $pick
     say "overloaded: $why$vmtxt; $mactxt"
+    acted=""
     if [ "$2" = idle ]; then
-      stop_paused "$1" "overloaded, idle"
-    else
+      stop_paused "$1" "overloaded, idle" && acted=1
+    elif unlabel "$1"; then
       [ -z "$DRY" ] && now > "$G/draining/$1"
       say "$1: draining (overloaded); it finishes its job and then stops"
-      unlabel "$1"
+      acted=1
     fi
-    setf changed-at "$(now)"
-    setf red 0
+    if [ -n "$acted" ]; then
+      setf changed-at "$(now)"
+      setf red 0
+    fi
   fi
 elif [ "$level" = green ] && [ "$greens" -ge "$GREEN_PASSES" ] && [ -z "$cooling" ]; then
   d="$(draining_list | tail -1)"

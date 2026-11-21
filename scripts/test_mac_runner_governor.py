@@ -16,7 +16,10 @@ echo "docker $*" >> "$W/calls"
 case "$1" in
   info) exit 0 ;;
   ps) cat "$W/ps" ;;
-  top) f="$W/top.$2"; [ -f "$f" ] || exit 1; cat "$f" ;;
+  top)
+    n=$(( $(cat "$W/topn.$2" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$W/topn.$2"
+    f="$W/top.$2"; [ -f "$f.$n" ] && f="$f.$n"
+    [ -f "$f" ] || exit 1; cat "$f" ;;
   inspect) echo "2026-11-20T20:00:00Z" ;;
   logs) cat "$W/logs.${@: -1}" 2>/dev/null ;;
   stop) sed -i.bak "s/^$2|running$/$2|exited/" "$W/ps" ;;
@@ -43,6 +46,7 @@ echo "gh $*" >> "$WORLD/calls"
 case "$*" in
   *"actions/runners --paginate"*) echo 42 ;;
   "api orgs/SConsInc/actions/runners/42/labels --jq"*) echo shorconsulting-ci ;;
+  "api orgs/SConsInc/actions/runners/42 --jq .busy") cat "$WORLD/gh_busy" 2>/dev/null || echo false ;;
 esac
 exit 0
 '''
@@ -152,11 +156,11 @@ class Governor(unittest.TestCase):
 
     def paused(self):
         d = os.path.join(self.state, "governor", "paused")
-        return sorted(f.replace(R, "") for f in os.listdir(d) if not f.endswith(".labels")) if os.path.isdir(d) else []
+        return sorted(f.replace(R, "") for f in os.listdir(d) if not f.endswith((".labels", ".id"))) if os.path.isdir(d) else []
 
     def draining(self):
         d = os.path.join(self.state, "governor", "draining")
-        return sorted(f.replace(R, "") for f in os.listdir(d) if not f.endswith(".labels")) if os.path.isdir(d) else []
+        return sorted(f.replace(R, "") for f in os.listdir(d) if not f.endswith((".labels", ".id"))) if os.path.isdir(d) else []
 
     def four_busy_one_idle(self):
         self.runners({"1": ("running", BUSY, jobs(running="build", at=0)),
@@ -212,6 +216,7 @@ class Governor(unittest.TestCase):
         self.assertEqual(self.calls("stop"), ["4"])
 
     def test_with_every_runner_busy_it_drains_the_longest_running_and_stops_it_when_its_job_ends(self):
+        self.env["GOV_GH_ORGS"] = "sconsinc:SConsInc"
         self.runners({"1": ("running", BUSY, jobs(running="build", at=0)),
                       "2": ("running", BUSY, jobs(running="build", at=600)),
                       "3": ("running", BUSY, jobs(running="lint", at=1200))})
@@ -231,6 +236,7 @@ class Governor(unittest.TestCase):
         self.assertEqual(self.draining(), [])
 
     def test_a_runner_that_just_took_a_job_is_never_stopped(self):
+        self.env["GOV_GH_ORGS"] = "sconsinc:SConsInc"
         # Listener only, but the last line it logged is a job it took: the job process is about to start.
         self.runners({"1": ("running", BUSY, jobs(running="build", at=0)),
                       "2": ("running", IDLE, jobs(("build", 60), running="build", at=600)),
@@ -241,6 +247,7 @@ class Governor(unittest.TestCase):
         self.assertEqual(self.draining(), ["1"])
 
     def test_a_draining_runner_that_takes_a_new_job_is_not_stopped(self):
+        self.env["GOV_GH_ORGS"] = "sconsinc:SConsInc"
         self.runners({"1": ("running", BUSY, jobs(running="build", at=0)),
                       "2": ("running", BUSY, jobs(running="build", at=600)),
                       "3": ("running", BUSY, jobs(running="lint", at=1200))})
@@ -252,6 +259,60 @@ class Governor(unittest.TestCase):
         self.go(GOV_COOLDOWN_S="9999")
         self.assertEqual(self.calls("stop"), [])
 
+    def test_without_github_orgs_a_busy_runner_is_never_drained(self):
+        # Without its labels off, a runner can be handed its next job in the moment between its job ending and
+        # the stop, so only idle runners are taken out.
+        self.runners({"1": ("running", BUSY, jobs(running="build", at=0)),
+                      "2": ("running", BUSY, jobs(running="build", at=600)),
+                      "3": ("running", BUSY, jobs(running="lint", at=1200))})
+        self.vm(vm(avail_pct=2))
+        for _ in range(3):
+            self.go()
+        self.assertEqual(self.draining(), [])
+        self.assertEqual(self.calls("stop"), [])
+        with open(os.path.join(self.w, "log")) as fh:
+            self.assertIn("only drained with GOV_GH_ORGS set", fh.read())
+
+    def test_an_idle_runner_that_takes_a_job_just_before_the_stop_is_left_running(self):
+        self.four_busy_one_idle()
+        # Idle when scanned, busy when looked at again right before the stop.
+        self.top("4", IDLE)
+        with open(os.path.join(self.w, "top.%s4.2" % R), "w") as fh:
+            fh.write("UID PID PPID C STIME TTY TIME CMD\n1001 1 0 0 17:30 ? 00:00:00 Runner.Listener run\n"
+                     "1001 2 1 0 17:30 ? 00:00:00 Runner.Worker spawnclient\n")
+        self.vm(vm(avail_pct=2))
+        self.go()
+        self.assertEqual(self.calls("stop"), [])
+        self.assertEqual(self.paused(), [])
+        with open(os.path.join(self.w, "log")) as fh:
+            self.assertIn("took a job before it could be stopped", fh.read())
+
+    def test_a_drained_runner_github_still_counts_busy_is_not_stopped(self):
+        self.env["GOV_GH_ORGS"] = "sconsinc:SConsInc"
+        self.runners({"1": ("running", BUSY, jobs(running="build", at=0)),
+                      "2": ("running", BUSY, jobs(running="build", at=600)),
+                      "3": ("running", BUSY, jobs(running="lint", at=1200))})
+        self.vm(vm(avail_pct=2))
+        self.go()
+        self.assertEqual(self.draining(), ["1"])
+        self.logs("1", jobs(("build", 3000)))
+        self.top("1", IDLE)
+        with open(os.path.join(self.w, "gh_busy"), "w") as fh:
+            fh.write("true\n")
+        self.go(GOV_COOLDOWN_S="9999")
+        self.assertEqual(self.calls("stop"), [])
+        os.remove(os.path.join(self.w, "gh_busy"))
+        self.go(GOV_COOLDOWN_S="9999")
+        self.assertEqual(self.calls("stop"), ["1"])
+
+    def test_with_the_governor_off_the_watchdog_starts_a_paused_runner(self):
+        self.four_busy_one_idle()
+        self.vm(vm(avail_pct=2))
+        self.go()
+        self.assertEqual(self.paused(), ["4"])
+        self.go(script=WATCHDOG, WATCHDOG_GOVERNOR="0")
+        self.assertEqual(self.calls("start"), ["4"])
+
     def test_never_below_the_minimum_per_runner_group(self):
         self.runners({"1": ("running", IDLE, ""), "2": ("running", IDLE, "")})
         self.vm(vm(avail_pct=2))
@@ -259,7 +320,7 @@ class Governor(unittest.TestCase):
             self.go()
         self.assertEqual(self.calls("stop"), [])
         with open(os.path.join(self.w, "log")) as fh:
-            self.assertIn("at its minimum of 2", fh.read())
+            self.assertIn("minimum of 2", fh.read())
 
     def test_one_change_per_cooldown(self):
         self.four_busy_one_idle()
@@ -342,6 +403,7 @@ class Governor(unittest.TestCase):
         self.assertEqual(self.paused(), [])
 
     def test_calm_cancels_a_drain_before_starting_anything(self):
+        self.env["GOV_GH_ORGS"] = "sconsinc:SConsInc"
         self.runners({"1": ("running", BUSY, jobs(running="build", at=0)),
                       "2": ("running", BUSY, jobs(running="build", at=600)),
                       "3": ("running", BUSY, jobs(running="lint", at=1200))})
@@ -366,6 +428,7 @@ class Governor(unittest.TestCase):
         self.assertEqual(self.paused(), [])
 
     def test_resume_all_starts_every_paused_runner_and_ends_every_drain(self):
+        self.env["GOV_GH_ORGS"] = "sconsinc:SConsInc"
         self.runners({"1": ("running", BUSY, jobs(running="build", at=0)),
                       "2": ("running", BUSY, jobs(running="build", at=600)),
                       "3": ("running", IDLE, ""),
