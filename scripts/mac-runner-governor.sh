@@ -15,7 +15,10 @@
 #   - each runner's running job, against how long that job usually takes here (learned from the runners' own logs).
 # It then calls the box:
 #   red      memory stalls, memory nearly gone, load far above the cores, the Mac swapping hard or in critical
-#            memory pressure, or a job running GOV_SLOW_RATIO times its usual time while other jobs share the box.
+#            memory pressure, or a job running GOV_SLOW_RATIO times its usual time while other jobs share the box
+#            and the machine readings are already off calm. Severe (acts on the first pass): VM memory at or under
+#            GOV_RED_MEM_AVAIL free, a memory stall (some avg60 or full avg10) at GOV_SEVERE_MEM_PSI, or the Mac in
+#            critical pressure.
 #   green    all readings well inside the limits, no slow job.
 #   (else)   hold: change nothing.
 # and acts, one change per GOV_COOLDOWN_S:
@@ -447,9 +450,9 @@ if [ -n "$vm" ]; then
   ge "$4" "$RED_MEM_PSI" && red "VM memory stall ${4}%"
   ge "$4" "$SEVERE_MEM_PSI" && severe=1
   ge "$5" "$SEVERE_MEM_PSI" && { red "VM memory full stall ${5}%"; severe=1; }
-  [ "$3" -le "$RED_MEM_AVAIL" ] && { red "VM memory ${3}% free"; severe=1; }
+  ge "$RED_MEM_AVAIL" "$3" && { red "VM memory ${3}% free"; severe=1; }
   ge "$vload" "$RED_LOAD" && red "VM load ${vload} per core"
-  { ge "$4" "$GREEN_MEM_PSI" || [ "$3" -lt "$GREEN_MEM_AVAIL" ] || ! lt "$vload" "$GREEN_LOAD"; } && hold
+  { ge "$4" "$GREEN_MEM_PSI" || lt "$3" "$GREEN_MEM_AVAIL" || ! lt "$vload" "$GREEN_LOAD"; } && hold
   vmtxt="vm load/core $vload, mem free ${3}%, mem stall ${4}%"
 else
   hold
@@ -471,8 +474,10 @@ else
   mactxt="mac unreadable"
 fi
 
+# A slow job counts only beside a machine reading that is already off calm: job names (build, test) repeat across
+# repos on org-wide runners, so a heavy repo's build can look slow next to a light one's on a box that is fine.
 if [ -n "$slow" ]; then
-  if [ "$busy" -ge 2 ]; then red "slow: $slow"; else hold; fi
+  if [ "$busy" -ge 2 ] && [ "$level" != green ]; then red "slow: $slow"; else hold; fi
 fi
 
 reading="$(date '+%Y-%m-%d %H:%M:%S') $level; $vmtxt; $mactxt; busy $busy${slow:+; slow $slow}"

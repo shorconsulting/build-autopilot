@@ -412,8 +412,9 @@ Mac runner watchdog (`scripts/install-mac-runner-watchdog.sh` installs both as o
 - It reads the VM's memory stall (PSI), free memory and load per core, the Mac's memory pressure level, swap growth
   and load per core, and each runner's running job against the median time that job took on this Mac (learned from
   the runners' own logs; no estimate until it has seen a job three times).
-- Overloaded two passes in a row (once, when memory is nearly gone or the Mac is in critical pressure), or a job
-  running three times its usual time (and at least 10 minutes) while other jobs share the box: it takes ONE runner
+- Overloaded two passes in a row (once, when memory is nearly gone, a memory stall reaches 25%, or the Mac is in
+  critical pressure), or a job running three times its usual time (and at least 10 minutes) while other jobs share
+  the box and the readings are already off calm (job names repeat across repos): it takes ONE runner
   out of service. An idle one is stopped at once, after one more look right before the stop. With `GOV_GH_ORGS`,
   when none is idle, the busy one closest to done drains (below). A running job is never stopped, and each runner
   group keeps at least `GOV_MIN_SLOTS` (2).

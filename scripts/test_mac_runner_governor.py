@@ -366,12 +366,24 @@ class Governor(unittest.TestCase):
                       "2": ("running", BUSY, jobs(running="lint", at=3000)),
                       "3": ("running", IDLE, ""),
                       "9": ("running", IDLE, self.learned())})
-        self.vm(vm(load=4))  # CPU and memory look fine: only the job times say the box is struggling
+        self.vm(vm(load=12))  # 1.5 per core: busy, not over the limit; the job times say the box is struggling
         self.go()
         self.go()
         self.assertEqual(len(self.calls("stop")), 1)
         with open(os.path.join(self.w, "log")) as fh:
             self.assertIn("slow: %s1 (build, 3600s)" % R, fh.read())
+
+    def test_a_slow_job_on_a_calm_box_is_not_overload(self):
+        # Another repo's heavier "build" can look slow next to the learned one; with calm readings it is not acted on.
+        self.runners({"1": ("running", BUSY, jobs(running="build", at=0)),
+                      "2": ("running", BUSY, jobs(running="lint", at=3000)),
+                      "3": ("running", IDLE, ""),
+                      "9": ("running", IDLE, self.learned())})
+        self.vm(vm(load=4))
+        self.mac(load=1)
+        for _ in range(3):
+            self.go()
+        self.assertEqual(self.calls("stop"), [])
 
     def test_a_slow_job_alone_on_the_box_is_not_overload(self):
         self.runners({"1": ("running", BUSY, jobs(running="build", at=0)),
