@@ -150,8 +150,9 @@ for owner in $owners; do
   done
   [ "${ADMIT_MAX:-0}" -gt 0 ] || { bump_args="$args"; admit_args=""; }
   if [ -n "$PRIORITY_LABEL" ]; then
-    # Shaped repos only pay re-runs owed from before (--max-bumps 0 there would still list them); bump the rest.
-    [ -n "$bump_args" ] || bump_args="$args --max-bumps 0"
+    # Every pass pays every re-run owed in the state file, whatever its repo (shaped repos included), and bumps
+    # only the repos admit_apply does not shape; with every repo shaped it only pays (--pay-only).
+    [ -n "$bump_args" ] || bump_args="--pay-only"
     # shellcheck disable=SC2086
     GH_TOKEN="$tok" python3 "$HERE/priority_apply.py" $bump_args --label "$PRIORITY_LABEL" $dry \
       --state "$STATE/priority-$owner.json" \

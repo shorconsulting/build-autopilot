@@ -135,13 +135,22 @@ def run(repos, state_path, max_active=8, min_jobs=3, label=pa.LABEL, min_rate=15
         runs = [r for r in runs if sizes.get(r["wid"], 0) >= min_jobs]
         shaped = {w for w, n in sizes.items() if n >= min_jobs} | {v.get("wid") for k, v in parked.items()
                                                                     if k.split(" ")[0] == repo}
-        # Runs GitHub already reports in_progress hold places too (only shaped workflows count).
+        # Runs GitHub already reports in_progress hold places too (only shaped workflows count; a workflow with
+        # nothing queued this pass is sized from one of its in-progress runs).
         busy = 0
         for page in range(1, 6):
             okb, data, _ = api("GET", "repos/%s/actions/runs?status=in_progress&per_page=100&page=%d" % (repo, page))
             got = ((data or {}).get("workflow_runs") or []) if okb else []
-            busy += sum(1 for r in got if r.get("workflow_id") in shaped and r.get("event") in PR_EVENTS
-                        and "%s %d" % (repo, r["id"]) not in hold)
+            for r in got:
+                if r.get("event") not in PR_EVENTS or "%s %d" % (repo, r["id"]) in hold:
+                    continue
+                wid = r.get("workflow_id")
+                if wid not in sizes:
+                    okj, jd, _ = api("GET", "repos/%s/actions/runs/%d/jobs?filter=latest&per_page=100" % (repo, r["id"]))
+                    sizes[wid] = len((jd or {}).get("jobs") or []) if okj else 0
+                    if sizes[wid] >= min_jobs:
+                        shaped.add(wid)
+                busy += 1 if wid in shaped else 0
             if len(got) < 100:
                 break
         # Parked runs (cancelled, so not in the queue) compete in the same ordering as the queued ones.

@@ -135,10 +135,6 @@ class Lite(unittest.TestCase):
         self.assertEqual(os.listdir(hist), [])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class HoldParked(unittest.TestCase):
     def test_a_run_parked_by_the_capacity_pass_is_not_rerun_as_a_machine_failure(self):
         import tempfile
@@ -151,3 +147,7 @@ class HoldParked(unittest.TestCase):
         f.close()
         steps = sa.plan(rep, 3, 20, sa.load_hold([f.name, "/nonexistent.json"]))
         self.assertEqual([s[1][-1] for s in steps], ["repos/SConsInc/ranch-rides/actions/runs/8/rerun-failed-jobs"])
+
+
+if __name__ == "__main__":
+    unittest.main()

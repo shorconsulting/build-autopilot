@@ -159,6 +159,13 @@ class Run(unittest.TestCase):
         self.go(api, max_active=2)
         self.assertEqual(api.posts(), ["repos/o/a/actions/runs/3/cancel"])
 
+    def test_an_in_progress_run_of_a_workflow_with_nothing_queued_still_holds_a_place(self):
+        other = dict(run_(1, "2026-11-21T00:00:00Z", wid=5), status="in_progress")
+        runs = [other, run_(2, "2026-11-21T01:00:00Z", started=True), run_(3, "2026-11-21T02:00:00Z", started=True)]
+        api = Api(runs, {1: RUNNING, 2: STARTED, 3: STARTED})
+        self.go(api, max_active=2)
+        self.assertEqual(api.posts(), ["repos/o/a/actions/runs/3/cancel"])
+
     def test_push_and_schedule_runs_are_never_touched(self):
         r = run_(1, "2026-11-21T01:00:00Z")
         r.update(event="push", pull_requests=[])
