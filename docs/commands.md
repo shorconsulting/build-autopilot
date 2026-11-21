@@ -421,12 +421,16 @@ Mac runner watchdog (`scripts/install-mac-runner-watchdog.sh` installs both as o
 - One change per `GOV_COOLDOWN_S` (6 minutes). Paused runners are listed in
   `~/.local/state/mac-runner-watchdog/governor/paused/`; while the governor is on the watchdog doesn't restart them,
   and a capacity check run on that Mac leaves them out of its offline and pool checks for up to a day (an older
-  pause is reported and restarted like any offline runner). Installing with `WATCHDOG_GOVERNOR=0` starts them all.
+  pause is reported and restarted like any offline runner). The governor itself starts any runner paused longer
+  than `GOV_MAX_PAUSE_S` (a day) whatever the readings say. Installing with `WATCHDOG_GOVERNOR=0` starts them all.
+  Settings are taken from the installer's environment each time, so give them again on every re-run.
 - Draining needs `GOV_GH_ORGS` (e.g. `sconsinc:SConsInc`) and a `gh` login that can administer the org's runners:
   the runner's custom labels come off at GitHub so it is given no new job, it is stopped once its job ends and
   GitHub says it is not busy, and its labels go back when it returns. Without it, only idle runners are stopped
   (under a backlog a runner takes its next job within a second of the last, so stopping it "between jobs" could
-  kill a job just handed to it).
+  kill a job just handed to it). An idle runner is looked at again right before it is stopped; a job handed to it
+  in the fraction of a second between that look and the stop would still be cut off, which is unlikely when the
+  runner was idle (no matching job was waiting).
 
 ```
 bash scripts/install-mac-runner-watchdog.sh                               # install or update (governor on)

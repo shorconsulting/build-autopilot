@@ -313,6 +313,18 @@ class Governor(unittest.TestCase):
         self.go(script=WATCHDOG, WATCHDOG_GOVERNOR="0")
         self.assertEqual(self.calls("start"), ["4"])
 
+    def test_a_pause_never_outlives_the_maximum_even_with_no_readings(self):
+        self.four_busy_one_idle()
+        self.vm(vm(avail_pct=2))
+        self.go()
+        self.assertEqual(self.paused(), ["4"])
+        os.remove(os.path.join(self.w, "vm"))  # no calm reading will ever come
+        self.go()
+        self.assertEqual(self.calls("start"), [])
+        self.go(GOV_MAX_PAUSE_S="0")
+        self.assertEqual(self.calls("start"), ["4"])
+        self.assertEqual(self.paused(), [])
+
     def test_never_below_the_minimum_per_runner_group(self):
         self.runners({"1": ("running", IDLE, ""), "2": ("running", IDLE, "")})
         self.vm(vm(avail_pct=2))

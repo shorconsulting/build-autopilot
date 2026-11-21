@@ -47,6 +47,7 @@
 #   GOV_RED_SWAP_GROWTH_MB [1024] Mac swap growth since the last pass   GOV_GREEN_SWAP_GROWTH_MB [256]
 #   GOV_SLOW_RATIO [3]  GOV_SLOW_MIN_S [600]  GOV_BASE_N [15]  GOV_BASE_MIN [3]
 #   GOV_WATCH_S [100]  GOV_POLL_S [2]
+#   GOV_MAX_PAUSE_S [86400]  a runner paused this long is started again whatever the readings say
 #   GOV_GH_ORGS ['']   e.g. 'sconsinc:SConsInc hporthealth:HPortHealth' (a word of the runner name : its org)
 # bash 3.2, ASCII only.
 set -uo pipefail
@@ -78,6 +79,7 @@ BASE_MIN="${GOV_BASE_MIN:-3}"
 WATCH_S="${GOV_WATCH_S:-100}"
 POLL_S="${GOV_POLL_S:-2}"
 GH_ORGS="${GOV_GH_ORGS:-}"
+MAX_PAUSE="${GOV_MAX_PAUSE_S:-86400}"
 
 DRY=""
 MODE="${1:-}"
@@ -409,6 +411,14 @@ for n in $(paused_list); do
   if containers | grep -q "^$n|running$"; then
     [ -z "$DRY" ] && { relabel "$n"; rm -f "$G/paused/$n"; }
     say "$n: running again (started outside the governor); no longer paused"
+  fi
+done
+
+# A pause never outlives GOV_MAX_PAUSE_S: if the readings never come back calm (the VM can't be read, or load sits
+# between the limits), the runner is started again rather than left parked.
+for n in $(paused_list); do
+  if [ $(( $(now) - $(cat "$G/paused/$n" 2>/dev/null || echo 0) )) -ge "$MAX_PAUSE" ]; then
+    resume_one "$n" "paused longer than ${MAX_PAUSE}s"
   fi
 done
 

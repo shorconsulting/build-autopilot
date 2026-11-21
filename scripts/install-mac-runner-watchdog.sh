@@ -56,6 +56,12 @@ PLIST_EOF
 plutil -lint "$PLIST" >/dev/null
 launchctl bootstrap "gui/$(id -u)" "$PLIST"
 echo "installed $LABEL (every 2 minutes, and at login)"
+# Settings are taken from this run only: say which, so a re-run without them is not a silent change.
+if [ -n "$ENVXML" ]; then
+  echo "settings: $(echo "$ENVXML" | sed -E 's|.*<key>([^<]*)</key><string>([^<]*)</string>.*|\1=\2|' | tr '\n' ' ')"
+else
+  echo "settings: defaults (a re-run without your GOV_* or WATCHDOG_GOVERNOR settings drops them; give them again)"
+fi
 echo "log:    tail -f ~/Library/Logs/mac-runner-watchdog.log"
 echo "status: $BIN --status"
 echo "load governor: on (WATCHDOG_GOVERNOR=0 bash $0 turns it off); undo every pause: $GOV --resume-all"
