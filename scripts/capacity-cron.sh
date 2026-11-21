@@ -23,6 +23,12 @@
 #                   PRIORITY_LABEL (default ci:priority; empty = off): an open PR with this label goes to the
 #                   front of the line. Every run of that org's repos queued before its unfinished runs is cancelled
 #                   and re-run, so it queues behind them (priority_apply.py; re-runs owed survive in $STATE).
+#                   ADMIT_REPOS (default empty = off): space-separated owner/repo list to shape with ADMIT_MAX
+#                   (default 12): at most that many multi-job PR runs per listed repo are active at once,
+#                   started ones first, so PRs finish one after another instead of every PR getting one job and
+#                   waiting a day for the next. The rest are parked (cancelled, nothing lost) and admitted as places
+#                   free, at most 50 cancels and re-runs per pass (admit_apply.py). ADMIT_FAIL_FAST=1 also cancels
+#                   the rest of a run once a job has failed (only for repos with no continue-on-error jobs).
 # Each org's repos are checked with that org's token; this box's runners are restarted, stale runs cancelled.
 set -euo pipefail
 
@@ -38,6 +44,9 @@ SWEEP_MAX_PRS=40
 SWEEP_MIN_RATE=2500
 BOX=""
 PRIORITY_LABEL="ci:priority"
+ADMIT_MAX=12
+ADMIT_REPOS=""
+ADMIT_FAIL_FAST=""
 if [ -f "$CONF/apply.env" ]; then
   # shellcheck disable=SC1091
   . "$CONF/apply.env"
@@ -132,11 +141,33 @@ for owner in $owners; do
   else
     echo "$owner: capacity check failed"
   fi
+  # This org's repos that admit_apply shapes (it orders ci:priority PRs first itself), and the rest.
+  admit_args=""
+  bump_args=""
+  for r in $(grep -v '^[[:space:]]*#' "$CONF/repos" | grep "^$owner/"); do
+    case " $ADMIT_REPOS " in
+      *" $r "*) admit_args="$admit_args --repo $r" ;;
+      *) bump_args="$bump_args --repo $r" ;;
+    esac
+  done
+  [ "${ADMIT_MAX:-0}" -gt 0 ] || { bump_args="$admit_args$bump_args"; admit_args=""; }
   if [ -n "$PRIORITY_LABEL" ]; then
+    # Every pass pays every re-run owed in the state file, whatever its repo (shaped repos included), and bumps
+    # only the repos admit_apply does not shape; with every repo shaped it only pays (--pay-only).
+    [ -n "$bump_args" ] || bump_args="--pay-only"
     # shellcheck disable=SC2086
-    GH_TOKEN="$tok" python3 "$HERE/priority_apply.py" $args --label "$PRIORITY_LABEL" $dry \
+    GH_TOKEN="$tok" python3 "$HERE/priority_apply.py" $bump_args --label "$PRIORITY_LABEL" $dry \
       --state "$STATE/priority-$owner.json" \
       || echo "$owner: some priority bumps or re-runs failed (see above)"
+  fi
+  if [ -n "$admit_args" ]; then
+    ff=""
+    [ -z "$ADMIT_FAIL_FAST" ] || ff="--fail-fast"
+    # shellcheck disable=SC2086
+    GH_TOKEN="$tok" python3 "$HERE/admit_apply.py" $admit_args --max-active "$ADMIT_MAX" $ff \
+      --label "$PRIORITY_LABEL" --hold "$STATE/priority-$owner.json" \
+      $dry --state "$STATE/admit-$owner.json" \
+      || echo "$owner: some parks or admits failed (see above)"
   fi
 done
 if [ -n "$reports" ] && [ -n "$RESTART" ]; then
@@ -164,7 +195,7 @@ if [ "${SWEEP_EVERY_MIN:-0}" -gt 0 ]; then
     # shellcheck disable=SC2086
     if GH_TOKEN="$tok" python3 "$HERE/steward.py" sweep $args --out "$out" \
         --history-dir "$STATE/steward-history" --lite --max-prs "$SWEEP_MAX_PRS" --min-rate "$SWEEP_MIN_RATE"; then
-      GH_TOKEN="$tok" python3 "$HERE/sweep_apply.py" "$out" $dry \
+      GH_TOKEN="$tok" python3 "$HERE/sweep_apply.py" "$out" $dry --hold "$STATE/admit-$owner.json" \
         || echo "$owner: some re-runs or cancels failed (see above)"
     else
       echo "$owner: sweep failed"

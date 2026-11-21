@@ -209,6 +209,8 @@ def queued_for(api, repo):
 
 def run(repos, state_path, label=LABEL, max_bumps=500, min_rate=1500, settle_s=30, dry=False, api=gh,
         sleep=time.sleep, now=time.time):
+    """Pays every re-run owed in state_path, whatever its repo (so a repo later handed to admit_apply is still paid),
+    then bumps for priority PRs in repos (none: pay only)."""
     owed = load(state_path) if state_path else {}
     failed = pay_owed(api, owed, now(), dry)
     prio = [x for repo in repos for x in priority_runs_for(api, repo, label)]
@@ -248,7 +250,9 @@ def run(repos, state_path, label=LABEL, max_bumps=500, min_rate=1500, settle_s=3
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--repo", action="append", required=True, help="owner/repo whose runs share the pool")
+    ap.add_argument("--repo", action="append", default=[], help="owner/repo whose runs share the pool")
+    ap.add_argument("--pay-only", action="store_true",
+                    help="only pay re-runs owed from earlier passes (every repo in --state); bump nothing")
     ap.add_argument("--state", default="", help="JSON file of re-runs owed (without it a bump is never re-run)")
     ap.add_argument("--label", default=LABEL)
     ap.add_argument("--max-bumps", type=int, default=500)
@@ -258,7 +262,9 @@ def main(argv=None):
     a = ap.parse_args(argv)
     if not a.state and not a.dry_run:
         ap.error("--state is required (a bumped run must be re-run)")
-    return run(a.repo, a.state, a.label, a.max_bumps, a.min_rate, a.settle, a.dry_run)
+    if not a.repo and not a.pay_only:
+        ap.error("--repo is required unless --pay-only")
+    return run([] if a.pay_only else a.repo, a.state, a.label, a.max_bumps, a.min_rate, a.settle, a.dry_run)
 
 
 if __name__ == "__main__":

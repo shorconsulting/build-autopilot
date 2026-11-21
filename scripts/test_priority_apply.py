@@ -187,6 +187,17 @@ class Run(unittest.TestCase):
         pa.run(["o/a"], self.state, api=api, sleep=lambda s: None)
         self.assertIn(("GET", "repos/o/a/issues?state=open&labels=ci%3Apriority&per_page=100"), api.calls)
 
+    def test_pay_only_pays_owed_reruns_of_any_repo_and_bumps_nothing(self):
+        Path(self.state).write_text('{"o/shaped 1": {"t": 100, "q": 1}}')
+        api = FakeApi([run_(1, "2026-11-21T09:00:00Z", status="completed")], {})
+        real = api.__call__
+
+        def anyrepo(method, path):
+            return real(method, path.replace("repos/o/shaped/", "repos/o/a/"))
+        pa.run([], self.state, api=anyrepo, sleep=lambda s: None, now=lambda: 200)
+        self.assertEqual([p for m, p in api.calls if m == "POST"], ["repos/o/a/actions/runs/1/rerun"])
+        self.assertFalse(any("issues" in p or "status=queued" in p for _, p in api.calls))
+
     def test_dry_run_posts_nothing(self):
         api = FakeApi([run_(10, "2026-11-21T10:00:00Z", sha="P"), run_(1, "2026-11-21T09:00:00Z")], {1: "P"})
         pa.run(["o/a"], self.state, dry=True, api=api, sleep=lambda s: None)
