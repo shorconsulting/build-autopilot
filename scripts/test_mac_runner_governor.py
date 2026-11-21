@@ -366,7 +366,7 @@ class Governor(unittest.TestCase):
                       "2": ("running", BUSY, jobs(running="lint", at=3000)),
                       "3": ("running", IDLE, ""),
                       "9": ("running", IDLE, self.learned())})
-        self.vm(vm(load=12))  # 1.5 per core: busy, not over the limit; the job times say the box is struggling
+        self.vm(vm(load=12, psi_some60=3))  # busy, a little memory stall, not over any limit: the job times say it is struggling
         self.go()
         self.go()
         self.assertEqual(len(self.calls("stop")), 1)
@@ -384,6 +384,55 @@ class Governor(unittest.TestCase):
         for _ in range(3):
             self.go()
         self.assertEqual(self.calls("stop"), [])
+
+    def test_a_slow_job_on_a_box_that_is_only_busy_is_not_overload(self):
+        # High load alone (normal under a backlog) does not make a slow job count; it takes memory or swap pressure.
+        self.runners({"1": ("running", BUSY, jobs(running="build", at=0)),
+                      "2": ("running", BUSY, jobs(running="lint", at=3000)),
+                      "3": ("running", IDLE, ""),
+                      "9": ("running", IDLE, self.learned())})
+        self.vm(vm(load=12))
+        for _ in range(3):
+            self.go()
+        self.assertEqual(self.calls("stop"), [])
+
+    def test_a_paused_runner_comes_back_under_steady_moderate_load(self):
+        self.four_busy_one_idle()
+        self.vm(vm(avail_pct=2))
+        self.go()
+        self.assertEqual(self.paused(), ["4"])
+        self.vm(vm(load=12, avail_pct=40))  # 1.5 per core, no memory stall: busy but coping
+        self.mac(load=12)
+        for _ in range(4):
+            self.go()
+        self.assertEqual(self.calls("start"), [])
+        self.go()
+        self.assertEqual(self.calls("start"), ["4"])
+
+    def test_a_drain_is_called_off_after_its_maximum(self):
+        self.env["GOV_GH_ORGS"] = "sconsinc:SConsInc"
+        self.runners({"1": ("running", BUSY, jobs(running="build", at=0)),
+                      "2": ("running", BUSY, jobs(running="build", at=600)),
+                      "3": ("running", BUSY, jobs(running="lint", at=1200))})
+        self.vm(vm(avail_pct=2))
+        self.go()
+        self.assertEqual(self.draining(), ["1"])
+        self.go(GOV_MAX_DRAIN_S="0", GOV_COOLDOWN_S="9999")
+        self.assertEqual(self.draining(), [])
+        self.assertIn("gh api -X POST orgs/SConsInc/actions/runners/42/labels -f labels[]=shorconsulting-ci",
+                      self.gh_calls())
+
+    def test_a_failed_stop_is_not_counted_as_a_change(self):
+        self.four_busy_one_idle()
+        docker = os.path.join(self.bin, "docker")
+        with open(docker) as fh:
+            body = fh.read()
+        with open(docker, "w") as fh:
+            fh.write(body.replace('  stop) sed', '  stop) exit 1; sed'))
+        self.vm(vm(avail_pct=2))
+        self.go(GOV_COOLDOWN_S="3600")
+        self.go(GOV_COOLDOWN_S="3600")
+        self.assertEqual(self.calls("stop"), ["4", "4"], "no cooldown started by a stop that failed")
 
     def test_a_slow_job_alone_on_the_box_is_not_overload(self):
         self.runners({"1": ("running", BUSY, jobs(running="build", at=0)),

@@ -414,11 +414,13 @@ Mac runner watchdog (`scripts/install-mac-runner-watchdog.sh` installs both as o
   the runners' own logs; no estimate until it has seen a job three times).
 - Overloaded two passes in a row (once, when memory is nearly gone, a memory stall reaches 25%, or the Mac is in
   critical pressure), or a job running three times its usual time (and at least 10 minutes) while other jobs share
-  the box and the readings are already off calm (job names repeat across repos): it takes ONE runner
+  the box beside memory or swap pressure (job names repeat across repos, so load alone is not enough): it takes ONE runner
   out of service. An idle one is stopped at once, after one more look right before the stop. With `GOV_GH_ORGS`,
   when none is idle, the busy one closest to done drains (below). A running job is never stopped, and each runner
   group keeps at least `GOV_MIN_SLOTS` (2).
-- Calm three passes in a row: it puts ONE back (cancels a drain, or starts the runner paused most recently).
+- Calm three passes in a row, or steady five in a row (no red, no memory or swap pressure, load may be high: busy
+  but coping, as under a backlog): it puts ONE back (cancels a drain, or starts the runner paused most recently).
+  A drain is called off after `GOV_MAX_DRAIN_S` (2 hours).
 - One change per `GOV_COOLDOWN_S` (6 minutes). Paused runners are listed in
   `~/.local/state/mac-runner-watchdog/governor/paused/`; while the governor is on the watchdog doesn't restart them,
   and a capacity check run on that Mac leaves them out of its offline and pool checks for up to a day (an older

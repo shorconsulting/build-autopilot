@@ -27,7 +27,9 @@
 #            labels come off at GitHub so it is given no new job, and it is stopped once its job ends and GitHub
 #            says it is not busy. A running job is never stopped. Never below GOV_MIN_SLOTS runners in service per
 #            runner group (the name without -N).
-#   green three passes in a row -> undo ONE: cancel a drain, or start the runner paused most recently.
+#   green GOV_GREEN_PASSES (3) in a row, or steady GOV_STEADY_PASSES (5) in a row (no red, VM readable, no memory
+#            pressure: busy but coping, as under a backlog) -> undo ONE: cancel a drain, or start the runner paused
+#            most recently. Without the steady path a busy box would only ever lose runners.
 # Without GOV_GH_ORGS only idle runners are stopped: a busy one could be handed its next job in the moment between
 # its job ending and the stop, so it is never drained without its labels off. A draining runner is watched every
 # GOV_POLL_S seconds for up to GOV_WATCH_S, and its labels go back when it returns.
@@ -51,6 +53,8 @@
 #   GOV_SLOW_RATIO [3]  GOV_SLOW_MIN_S [600]  GOV_BASE_N [15]  GOV_BASE_MIN [3]
 #   GOV_WATCH_S [100]  GOV_POLL_S [2]
 #   GOV_MAX_PAUSE_S [86400]  a runner paused this long is started again whatever the readings say
+#   GOV_MAX_DRAIN_S [7200]   a drain this old is called off (its labels go back)
+#   GOV_STEADY_PASSES [5]    passes with no red and no memory pressure that also put one runner back
 #   GOV_GH_ORGS ['']   e.g. 'sconsinc:SConsInc hporthealth:HPortHealth' (a word of the runner name : its org)
 # bash 3.2, ASCII only.
 set -uo pipefail
@@ -83,6 +87,8 @@ WATCH_S="${GOV_WATCH_S:-100}"
 POLL_S="${GOV_POLL_S:-2}"
 GH_ORGS="${GOV_GH_ORGS:-}"
 MAX_PAUSE="${GOV_MAX_PAUSE_S:-86400}"
+MAX_DRAIN="${GOV_MAX_DRAIN_S:-7200}"
+STEADY_PASSES="${GOV_STEADY_PASSES:-5}"
 
 DRY=""
 MODE="${1:-}"
@@ -328,6 +334,7 @@ stop_paused() { # stop an idle runner and record it as paused by the governor
     say "$name: stopped ($why)"
   else
     say "$name: docker stop FAILED ($why)"
+    return 1
   fi
 }
 
@@ -441,6 +448,7 @@ slow="$(echo "$runners" | awk '$6 == 1 { printf "%s (%s, %ds) ", $1, $5, $4 }')"
 level=green
 severe=""
 why=""
+pressure=""   # a memory or swap signal (not load alone): what makes a slow job count, and what a steady pass lacks
 red() { level=red; why="$why$*; "; }
 hold() { [ "$level" = green ] && level=hold; }
 
@@ -453,6 +461,7 @@ if [ -n "$vm" ]; then
   ge "$RED_MEM_AVAIL" "$3" && { red "VM memory ${3}% free"; severe=1; }
   ge "$vload" "$RED_LOAD" && red "VM load ${vload} per core"
   { ge "$4" "$GREEN_MEM_PSI" || lt "$3" "$GREEN_MEM_AVAIL" || ! lt "$vload" "$GREEN_LOAD"; } && hold
+  { ge "$4" "$GREEN_MEM_PSI" || lt "$3" "$GREEN_MEM_AVAIL"; } && pressure=1
   vmtxt="vm load/core $vload, mem free ${3}%, mem stall ${4}%"
 else
   hold
@@ -469,15 +478,16 @@ if [ -n "$mac" ]; then
   [ "$growth" -ge "$RED_SWAP" ] && red "Mac swap grew ${growth} MB"
   ge "$mload" "$RED_LOAD" && red "Mac load ${mload} per core"
   { [ "$3" -ge 2 ] || [ "$growth" -ge "$GREEN_SWAP" ] || ! lt "$mload" "$GREEN_LOAD"; } && hold
+  { [ "$3" -ge 2 ] || [ "$growth" -ge "$GREEN_SWAP" ]; } && pressure=1
   mactxt="mac load/core $mload, pressure $3, swap ${4} MB (+$growth)"
 else
   mactxt="mac unreadable"
 fi
 
-# A slow job counts only beside a machine reading that is already off calm: job names (build, test) repeat across
-# repos on org-wide runners, so a heavy repo's build can look slow next to a light one's on a box that is fine.
+# A slow job counts only beside a real memory or swap signal, not load alone: job names (build, test) repeat across
+# repos on org-wide runners, so a heavy repo's build can look slow next to a light one's on a busy box that is fine.
 if [ -n "$slow" ]; then
-  if [ "$busy" -ge 2 ] && [ "$level" != green ]; then red "slow: $slow"; else hold; fi
+  if [ "$busy" -ge 2 ] && [ -n "$pressure" ]; then red "slow: $slow"; else hold; fi
 fi
 
 reading="$(date '+%Y-%m-%d %H:%M:%S') $level; $vmtxt; $mactxt; busy $busy${slow:+; slow $slow}"
@@ -486,8 +496,19 @@ setf last-reading "$reading"
 if [ "$level" = red ]; then setf red $(( $(getf red 0) + 1 )); setf green 0
 elif [ "$level" = green ]; then setf green $(( $(getf green 0) + 1 )); setf red 0
 else setf red 0; setf green 0; fi
-reds="$(getf red 0)"; greens="$(getf green 0)"
+# Steady: not red, the VM read, no memory or swap pressure (load may be high: busy but coping).
+if [ "$level" != red ] && [ -n "$vm" ] && [ -z "$pressure" ]; then setf steady $(( $(getf steady 0) + 1 ))
+else setf steady 0; fi
+reds="$(getf red 0)"; greens="$(getf green 0)"; steadies="$(getf steady 0)"
 [ -n "$DRY" ] && { [ "$level" = red ] && reds=$((reds + 1)); [ "$level" = green ] && greens=$((greens + 1)); }
+
+# A drain never outlives GOV_MAX_DRAIN_S: its labels go back (a runner whose processes can't be read, or readings
+# that never come back calm, must not leave it online at GitHub with no labels).
+for n in $(draining_list); do
+  if [ $(( $(now) - $(cat "$G/draining/$n" 2>/dev/null || echo 0) )) -ge "$MAX_DRAIN" ]; then
+    cancel_drain "$n" "draining longer than ${MAX_DRAIN}s"
+  fi
+done
 
 since=$(( $(now) - $(getf changed-at 0) ))
 cooling=""
@@ -530,15 +551,16 @@ if [ "$level" = red ] && { [ "$reds" -ge "$RED_PASSES" ] || [ -n "$severe" ]; } 
       setf red 0
     fi
   fi
-elif [ "$level" = green ] && [ "$greens" -ge "$GREEN_PASSES" ] && [ -z "$cooling" ]; then
+elif [ "$level" != red ] && { [ "$greens" -ge "$GREEN_PASSES" ] || [ "$steadies" -ge "$STEADY_PASSES" ]; } \
+     && [ -z "$cooling" ]; then
   d="$(draining_list | tail -1)"
   p="$(for n in $(paused_list); do echo "$(cat "$G/paused/$n") $n"; done | sort -n | tail -1 | awk '{ print $2 }')"
   if [ -n "$d" ]; then
     cancel_drain "$d" "load eased: $vmtxt; $mactxt"
-    setf changed-at "$(now)"; setf green 0
+    setf changed-at "$(now)"; setf green 0; setf steady 0
   elif [ -n "$p" ]; then
     resume_one "$p" "load eased: $vmtxt; $mactxt"
-    setf changed-at "$(now)"; setf green 0
+    setf changed-at "$(now)"; setf green 0; setf steady 0
   fi
 fi
 
