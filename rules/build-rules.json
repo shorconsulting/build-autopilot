@@ -91,6 +91,9 @@
         ],
         "colima": [
           "davids-mac-mini-dind-"
+        ],
+        "ds-pc": [
+          "ds-pc-dind-"
         ]
       }
     },
