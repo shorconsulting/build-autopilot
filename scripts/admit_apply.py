@@ -7,7 +7,7 @@ one job, then waits behind every other run's next job: everything is partly done
 (SConsInc/ranch-rides, 2026-11-21: ~560 runs queued, a PR's first job on Nov 19 and its test shard on Nov 21).
 
 Each pass, per --repo, for queued pull_request runs of workflows with at least --min-jobs jobs:
-  * fail fast: a run with a FAILED job has its queued jobs cancelled. The PR cannot pass on that run, so its
+  * fail fast (--fail-fast, off by default): a run with a FAILED job has its queued jobs cancelled. The PR cannot pass on that run, so its
     remaining jobs are pure waste. It is never re-run here. A new push starts the next one; when the failure was a
     machine failure (checkout, setup), the steward sweep re-runs the failed and cancelled jobs as before.
   * admit at most --max-active runs at once. Runs that have started (a job done or running) come first, oldest
@@ -20,7 +20,9 @@ A PR with the priority label (default `ci:priority`, see priority_apply.py) goes
 per repo parked longer than PARK_FOR_S go next each pass (oldest first), so nothing waits forever and a backlog parked
 in one pass trickles back instead of returning at once. Runs listed in a --hold file (priority_apply's owed re-runs)
 are never touched; the steward sweep is given this script's state file so it does not re-run a parked run. Superseded runs (their PR's head moved
-on) are cancelled and forgotten. It stops parking when fewer than --min-rate API calls are left, and only reads the
+on) are cancelled and forgotten, and so is a parked run whose PR closed or that is older than FORGET_S. Writes are
+capped per pass (--max-writes, default 50) and stop at the first rate-limit refusal, so a big backlog is parked over
+several passes instead of in one burst. It stops parking when fewer than --min-rate API calls are left, and only reads the
 jobs of runs that look started (updated after they were queued), so a pass costs about one call per active run.
 
   GH_TOKEN=... python3 admit_apply.py --repo o/app --state /var/lib/build-autopilot/admit-o.json --max-active 8
@@ -32,6 +34,8 @@ import time
 import priority_apply as pa
 
 PARK_FOR_S = 12 * 3600
+FORGET_S = 3 * 86400  # a parked run older than this is dropped: its PR has long moved on or closed
+RATE_LIMITED = ("HTTP 403", "HTTP 429", "secondary rate limit", "rate limit")
 PR_EVENTS = pa.PR_EVENTS
 STARTED_AFTER_S = 60  # a run updated this long after it was queued has had a job change state
 
@@ -89,18 +93,41 @@ def remaining(api):
     return ((rate or {}).get("resources", {}).get("core", {}).get("remaining")) if ok else None
 
 
+class Budget:
+    """Write requests left this pass. GitHub's secondary limits allow far fewer writes than the hourly quota (about
+    80 a minute), so a big backlog is parked over several passes; a rate-limit refusal stops all writes."""
+
+    def __init__(self, n):
+        self.left, self.stopped = n, False
+
+    def ok(self):
+        return not self.stopped and self.left > 0
+
+    def spend(self, err=""):
+        self.left -= 1
+        if err and any(m in err for m in RATE_LIMITED):
+            self.stopped = True
+            print("stopping writes for this pass: GitHub refused one as rate-limited (%s)" % err[:120])
+
+
 def run(repos, state_path, max_active=8, min_jobs=3, label=pa.LABEL, min_rate=1500, dry=False, api=pa.gh,
-        now=time.time, hold=None, overdue_cap=2):
-    """hold: {"<repo> <run>"} owned by another script this pass (priority_apply's owed re-runs): never touched."""
+        now=time.time, hold=None, overdue_cap=2, max_writes=50, fail_fast=False):
+    """hold: {"<repo> <run>"} owned by another script this pass (priority_apply's owed re-runs): never touched.
+    max_writes: cancels plus re-runs per pass, all repos together. fail_fast: cancel the rest of a run with a failed
+    job (off: such a run is left alone, since a continue-on-error or if: failure() job can still let it pass)."""
     parked = pa.load(state_path) if state_path else {}
+    parked = {k: v for k, v in parked.items() if now() - v.get("t", 0) <= FORGET_S}
     hold = hold or set()
+    budget = Budget(max_writes)
     failed_calls = 0
     for repo in repos:
         left = remaining(api)
         may_park = left is None or left >= min_rate
         prio_prs = set()
-        okp, issues, _ = api("GET", "repos/%s/issues?state=open&labels=%s&per_page=100" % (
-            repo, pa.quote(label, safe="")))
+        okp, issues = False, None
+        if label:
+            okp, issues, _ = api("GET", "repos/%s/issues?state=open&labels=%s&per_page=100" % (
+                repo, pa.quote(label, safe="")))
         for i in (issues or []) if okp else []:
             if "pull_request" in i and pa.labeller(api, repo, i["number"], label)[1]:
                 prio_prs.add(i["number"])
@@ -162,27 +189,16 @@ def run(repos, state_path, max_active=8, min_jobs=3, label=pa.LABEL, min_rate=15
             runs.append({"wid": v.get("wid"), "repo": repo, "id": rid, "q": v.get("q", 0), "prs": v.get("prs") or [],
                          "superseded": False, "name": v.get("name", ""), "kind": v.get("kind", "new"),
                          "parked": True, "overdue": now() - v.get("t", 0) > PARK_FOR_S})
+        if not fail_fast:
+            runs = [r for r in runs if r["kind"] != "failed" or r["parked"]]  # left alone, holding no place
         keep, park, failed, stale = decide(runs, max(max_active - busy, 0), prio_prs, overdue_cap)
-        for r in failed:
-            failed_calls += act(api, dry, repo, r, "cancel", "fail fast: a job already failed, the PR cannot pass on this run")
-        for r in stale:
-            failed_calls += act(api, dry, repo, r, "cancel", "superseded: its PR has a newer head")
-            parked.pop("%s %d" % (repo, r["id"]), None)
-        n_parked = 0
-        for r in park:
-            if r["parked"]:
-                continue  # still waiting its turn
-            if not may_park:
-                continue
-            if act(api, dry, repo, r, "cancel", "parked: %d runs ahead are active" % max_active) == 0:
-                n_parked += 1
-                if not dry:
-                    parked["%s %d" % (repo, r["id"])] = {"t": now(), "q": r["q"], "kind": r["kind"], "prs": r["prs"],
-                                                         "wid": r["wid"], "name": r["name"]}
+        # Writes in order of value: admit into free places, then drop dead work, then park (capped per pass).
         admitted = 0
         for r in keep:
             if not r["parked"]:
                 continue
+            if not budget.ok():
+                break
             key = "%s %d" % (repo, r["id"])
             okr, cur, err = api("GET", "repos/%s/actions/runs/%d" % (repo, r["id"]))
             if not okr:
@@ -190,8 +206,9 @@ def run(repos, state_path, max_active=8, min_jobs=3, label=pa.LABEL, min_rate=15
                 continue
             if (cur or {}).get("status") != "completed":
                 continue  # the cancel has not landed yet
-            if pa.superseded(cur or {}):
-                print("forgotten: %s run %d (its PR has a newer head)" % (repo, r["id"]))
+            if pa.superseded(cur or {}) or not (cur or {}).get("pull_requests"):
+                # A newer head, or no open PR any more (closed or merged): nothing to admit.
+                print("forgotten: %s run %d (its PR has a newer head or is closed)" % (repo, r["id"]))
                 parked.pop(key, None)
                 continue
             # A started run keeps its successful jobs and re-runs only the cancelled ones.
@@ -200,6 +217,7 @@ def run(repos, state_path, max_active=8, min_jobs=3, label=pa.LABEL, min_rate=15
                 print("would admit: %s run %d (%s)" % (repo, r["id"], path))
                 continue
             okr, _, err = api("POST", "repos/%s/actions/runs/%d/%s" % (repo, r["id"], path))
+            budget.spend("" if okr else err)
             if okr:
                 admitted += 1
                 print("admitted: %s run %d (%s%s)" % (repo, r["id"], path, ", parked too long" if r["overdue"] else ""))
@@ -207,24 +225,46 @@ def run(repos, state_path, max_active=8, min_jobs=3, label=pa.LABEL, min_rate=15
             else:
                 failed_calls += 1
                 print("admit FAILED: %s run %d (%s)" % (repo, r["id"], err))
+        for r in failed:
+            if budget.ok():
+                failed_calls += act(api, dry, repo, r, "cancel", "fail fast: a job already failed", budget)
+        for r in stale:
+            if budget.ok() and act(api, dry, repo, r, "cancel", "superseded: its PR has a newer head", budget) == 0:
+                parked.pop("%s %d" % (repo, r["id"]), None)
+        n_parked = 0
+        for r in park:
+            if r["parked"] or not may_park:
+                continue  # a parked one is still waiting its turn
+            if not budget.ok():
+                break
+            if act(api, dry, repo, r, "cancel", "parked: %d runs ahead are active" % max_active, budget) == 0:
+                n_parked += 1
+                if not dry:
+                    parked["%s %d" % (repo, r["id"])] = {"t": now(), "q": r["q"], "kind": r["kind"], "prs": r["prs"],
+                                                         "wid": r["wid"], "name": r["name"]}
         print("%s: %d in progress, %d places, %d kept, %d newly parked, %d admitted, %d waiting parked, "
               "%d failed-fast, %d superseded%s" % (
                   repo, busy, max(max_active - busy, 0), len(keep), n_parked, admitted,
                   sum(1 for k in parked if k.split(" ")[0] == repo), len(failed), len(stale),
-                  "" if may_park else "; not parking, %s API calls left" % left))
+                  ("" if may_park else "; not parking, %s API calls left" % left)
+                  + ("" if budget.ok() else "; write budget for this pass used up, the rest wait for the next")))
         if state_path and not dry:
             pa.save(state_path, parked)  # after each repo, so a killed pass still remembers what it parked
     return 1 if failed_calls else 0
 
 
-def act(api, dry, repo, r, what, why):
+def act(api, dry, repo, r, what, why, budget=None):
     line = "%s run %d (%s, PR %s): %s" % (repo, r["id"], r.get("name", ""), ",".join("#%d" % n for n in r["prs"]), why)
     if dry:
         print("would %s: %s" % (what, line))
         return 0
     ok, _, err = api("POST", "repos/%s/actions/runs/%d/cancel" % (repo, r["id"]))
-    if not ok and "409" in err:
+    if budget:
+        budget.spend("" if ok else err)
+    if not ok and "409" in err and (budget is None or budget.ok()):
         ok, _, err = api("POST", "repos/%s/actions/runs/%d/force-cancel" % (repo, r["id"]))
+        if budget:
+            budget.spend("" if ok else err)
     print("%s %s: %s%s" % (what, "ok" if ok else "FAILED", line, "" if ok else " (%s)" % err))
     return 0 if ok else 1
 
@@ -237,6 +277,9 @@ def main(argv=None):
     ap.add_argument("--min-jobs", type=int, default=3, help="only runs with at least this many jobs are shaped")
     ap.add_argument("--label", default=pa.LABEL)
     ap.add_argument("--min-rate", type=int, default=1500)
+    ap.add_argument("--max-writes", type=int, default=50, help="cancels plus re-runs per pass, all repos together")
+    ap.add_argument("--fail-fast", action="store_true",
+                    help="cancel the rest of a run with a failed job (only for repos with no continue-on-error jobs)")
     ap.add_argument("--hold", action="append", default=[],
                     help="a state file of another script (priority_apply's owed re-runs): its runs are never touched")
     ap.add_argument("--dry-run", action="store_true")
@@ -246,7 +289,8 @@ def main(argv=None):
     hold = set()
     for path in a.hold:
         hold |= set(pa.load(path))
-    return run(a.repo, a.state, a.max_active, a.min_jobs, a.label, a.min_rate, a.dry_run, hold=hold)
+    return run(a.repo, a.state, a.max_active, a.min_jobs, a.label, a.min_rate, a.dry_run, hold=hold,
+               max_writes=a.max_writes, fail_fast=a.fail_fast)
 
 
 if __name__ == "__main__":

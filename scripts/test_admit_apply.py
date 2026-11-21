@@ -135,7 +135,7 @@ class Run(unittest.TestCase):
 
     def test_fail_fast_cancels_a_run_with_a_failed_job_and_never_reruns_it(self):
         api = Api([run_(1, "2026-11-21T01:00:00Z", started=True)], {1: FAILED})
-        self.go(api, max_active=5)
+        self.go(api, max_active=5, fail_fast=True)
         self.assertEqual(api.posts(), ["repos/o/a/actions/runs/1/cancel"])
         self.assertEqual(json.loads(Path(self.state).read_text()), {})
 
@@ -166,6 +166,49 @@ class Run(unittest.TestCase):
         self.go(api, max_active=2)
         self.assertEqual(api.posts(), ["repos/o/a/actions/runs/3/cancel"])
 
+    def test_without_fail_fast_a_run_with_a_failed_job_is_left_alone(self):
+        # A continue-on-error or if: failure() job can fail while the run still passes.
+        runs = [run_(1, "2026-11-21T01:00:00Z", started=True), run_(2, "2026-11-21T02:00:00Z", started=True)]
+        api = Api(runs, {1: FAILED, 2: STARTED})
+        self.go(api, max_active=1)
+        self.assertEqual(api.posts(), [])
+
+    def test_writes_are_capped_per_pass_and_the_backlog_parks_over_several_passes(self):
+        runs = [run_(i, "2026-11-21T%02d:00:00Z" % i, started=True) for i in range(1, 12)]
+        api = Api(runs, {i: STARTED for i in range(1, 12)})
+        self.go(api, max_active=1, max_writes=4)
+        self.assertEqual(len(api.posts()), 4)
+        api.calls.clear()
+        self.go(api, max_active=1, max_writes=4)
+        self.assertEqual(len(api.posts()), 4)
+        self.assertEqual(len(json.loads(Path(self.state).read_text())), 8)
+
+    def test_a_rate_limit_refusal_stops_every_write_for_the_pass(self):
+        runs = [run_(i, "2026-11-21T%02d:00:00Z" % i, started=True) for i in range(1, 8)]
+        api = Api(runs, {i: STARTED for i in range(1, 8)})
+        real = api.__call__
+
+        def limited(method, path):
+            if method == "POST":
+                api.calls.append((method, path))
+                return False, None, "gh: You have exceeded a secondary rate limit (HTTP 403)"
+            return real(method, path)
+        aa.run(["o/a"], self.state, max_active=1, api=limited, now=lambda: 1000.0)
+        self.assertEqual(len([c for c in api.calls if c[0] == "POST"]), 1)
+
+    def test_a_parked_run_whose_pr_closed_is_forgotten(self):
+        Path(self.state).write_text('{"o/a 7": {"t": 900, "q": 1, "kind": "started", "prs": [107], "wid": 1}}')
+        r7 = dict(run_(7, "2026-11-21T00:00:00Z"), status="completed", pull_requests=[])
+        api = Api([r7], {})
+        self.go(api, max_active=3)
+        self.assertEqual(api.posts(), [])
+        self.assertEqual(json.loads(Path(self.state).read_text()), {})
+
+    def test_an_empty_label_turns_priority_off(self):
+        api = Api([run_(1, "2026-11-21T01:00:00Z", started=True)], {1: STARTED}, prio=[101])
+        aa.run(["o/a"], self.state, max_active=1, label="", api=api, now=lambda: 1000.0)
+        self.assertFalse(any("/issues?" in p for _, p in api.calls))
+
     def test_push_and_schedule_runs_are_never_touched(self):
         r = run_(1, "2026-11-21T01:00:00Z")
         r.update(event="push", pull_requests=[])
@@ -178,7 +221,7 @@ class Run(unittest.TestCase):
         api = Api([run_(1, "2026-11-21T01:00:00Z", started=True), dict(run_(7, "2026-11-21T00:00:00Z"), status="completed")],
                   {1: STARTED})
         self.go(api, max_active=1, now=lambda: aa.PARK_FOR_S + 10.0)
-        self.assertEqual(api.posts(), ["repos/o/a/actions/runs/1/cancel", "repos/o/a/actions/runs/7/rerun"])
+        self.assertEqual(api.posts(), ["repos/o/a/actions/runs/7/rerun", "repos/o/a/actions/runs/1/cancel"])
 
     def test_steady_new_arrivals_never_starve_a_parked_started_run(self):
         runs = [run_(1, "2026-11-21T01:00:00Z", started=True), run_(2, "2026-11-21T02:00:00Z", started=True)]
@@ -188,7 +231,7 @@ class Run(unittest.TestCase):
         api.runs[50] = run_(50, "2026-11-21T05:00:00Z")  # a fresh push arrives
         api.calls.clear()
         self.go(api, max_active=1)
-        self.assertEqual(api.posts(), ["repos/o/a/actions/runs/50/cancel", "repos/o/a/actions/runs/2/rerun-failed-jobs"])
+        self.assertEqual(api.posts(), ["repos/o/a/actions/runs/2/rerun-failed-jobs", "repos/o/a/actions/runs/50/cancel"])
 
     def test_a_resumed_started_run_parked_again_comes_back_with_rerun_failed_jobs(self):
         runs = [run_(1, "2026-11-21T01:00:00Z", started=True), run_(2, "2026-11-21T02:00:00Z", started=True)]

@@ -27,7 +27,8 @@
 #                   (default 12): at most that many multi-job PR runs per listed repo are active at once,
 #                   started ones first, so PRs finish one after another instead of every PR getting one job and
 #                   waiting a day for the next. The rest are parked (cancelled, nothing lost) and admitted as places
-#                   free; a run with a failed job has its queued jobs cancelled (admit_apply.py).
+#                   free, at most 50 cancels and re-runs per pass (admit_apply.py). ADMIT_FAIL_FAST=1 also cancels
+#                   the rest of a run once a job has failed (only for repos with no continue-on-error jobs).
 # Each org's repos are checked with that org's token; this box's runners are restarted, stale runs cancelled.
 set -euo pipefail
 
@@ -45,6 +46,7 @@ BOX=""
 PRIORITY_LABEL="ci:priority"
 ADMIT_MAX=12
 ADMIT_REPOS=""
+ADMIT_FAIL_FAST=""
 if [ -f "$CONF/apply.env" ]; then
   # shellcheck disable=SC1091
   . "$CONF/apply.env"
@@ -148,7 +150,7 @@ for owner in $owners; do
       *) bump_args="$bump_args --repo $r" ;;
     esac
   done
-  [ "${ADMIT_MAX:-0}" -gt 0 ] || { bump_args="$args"; admit_args=""; }
+  [ "${ADMIT_MAX:-0}" -gt 0 ] || { bump_args="$admit_args$bump_args"; admit_args=""; }
   if [ -n "$PRIORITY_LABEL" ]; then
     # Every pass pays every re-run owed in the state file, whatever its repo (shaped repos included), and bumps
     # only the repos admit_apply does not shape; with every repo shaped it only pays (--pay-only).
@@ -160,8 +162,10 @@ for owner in $owners; do
   fi
   if [ -n "$admit_args" ]; then
     # shellcheck disable=SC2086
-    GH_TOKEN="$tok" python3 "$HERE/admit_apply.py" $admit_args --max-active "$ADMIT_MAX" \
-      --label "${PRIORITY_LABEL:-ci:priority}" --hold "$STATE/priority-$owner.json" \
+    ff=""
+    [ -z "$ADMIT_FAIL_FAST" ] || ff="--fail-fast"
+    GH_TOKEN="$tok" python3 "$HERE/admit_apply.py" $admit_args --max-active "$ADMIT_MAX" $ff \
+      --label "$PRIORITY_LABEL" --hold "$STATE/priority-$owner.json" \
       $dry --state "$STATE/admit-$owner.json" \
       || echo "$owner: some parks or admits failed (see above)"
   fi
