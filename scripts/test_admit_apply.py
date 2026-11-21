@@ -52,10 +52,11 @@ class Api:
         if path.endswith("/jobs") or "/jobs?" in path:
             return True, {"jobs": self.jobs.get(rid, NEW)}, ""
         if method == "POST" and path.endswith("/cancel"):
-            self.runs[rid]["status"] = "completed"
+            self.runs[rid].update(status="completed", conclusion="cancelled")
             return True, None, ""
         if method == "POST" and ("/rerun" in path):
-            self.runs[rid].update(status="queued", run_started_at="2026-11-21T23:30:00Z", updated_at="2026-11-21T23:30:00Z")
+            self.runs[rid].update(status="queued", conclusion=None, run_started_at="2026-11-21T23:30:00Z",
+                                  updated_at="2026-11-21T23:30:00Z")
             return True, None, ""
         return True, self.runs[rid], ""
 
@@ -198,11 +199,35 @@ class Run(unittest.TestCase):
 
     def test_a_parked_run_whose_pr_closed_is_forgotten(self):
         Path(self.state).write_text('{"o/a 7": {"t": 900, "q": 1, "kind": "started", "prs": [107], "wid": 1}}')
-        r7 = dict(run_(7, "2026-11-21T00:00:00Z"), status="completed", pull_requests=[])
+        r7 = dict(run_(7, "2026-11-21T00:00:00Z"), status="completed", conclusion="cancelled", pull_requests=[])
         api = Api([r7], {})
         self.go(api, max_active=3)
         self.assertEqual(api.posts(), [])
         self.assertEqual(json.loads(Path(self.state).read_text()), {})
+
+    def test_a_parked_run_rerun_by_hand_is_dropped_and_never_rerun_again(self):
+        Path(self.state).write_text('{"o/a 7": {"t": 900, "q": 1, "kind": "new", "prs": [107], "wid": 1}}')
+        api = Api([run_(7, "2026-11-21T00:00:00Z", started=True)], {7: RUNNING})  # someone clicked Re-run
+        self.go(api, max_active=3)
+        self.assertEqual(json.loads(Path(self.state).read_text()), {})
+        api.runs[7].update(status="completed", conclusion="success")
+        api.calls.clear()
+        self.go(api, max_active=3)
+        self.assertEqual(api.posts(), [])
+
+    def test_a_parked_run_that_finished_other_than_cancelled_is_forgotten(self):
+        Path(self.state).write_text('{"o/a 7": {"t": 900, "q": 1, "kind": "started", "prs": [107], "wid": 1}}')
+        api = Api([dict(run_(7, "2026-11-21T00:00:00Z"), status="completed", conclusion="success")], {})
+        self.go(api, max_active=3)
+        self.assertEqual(api.posts(), [])
+        self.assertEqual(json.loads(Path(self.state).read_text()), {})
+
+    def test_a_plain_403_fails_one_run_and_does_not_stop_the_pass(self):
+        b = aa.Budget(5)
+        b.spend("gh: Resource not accessible by integration (HTTP 403)")
+        self.assertTrue(b.ok())
+        b.spend("gh: You have exceeded a secondary rate limit (HTTP 403)")
+        self.assertFalse(b.ok())
 
     def test_an_empty_label_turns_priority_off(self):
         api = Api([run_(1, "2026-11-21T01:00:00Z", started=True)], {1: STARTED}, prio=[101])
@@ -218,7 +243,7 @@ class Run(unittest.TestCase):
 
     def test_a_run_parked_too_long_goes_ahead_of_started_runs(self):
         Path(self.state).write_text('{"o/a 7": {"t": 0, "q": 99999999999, "kind": "new", "prs": [107], "wid": 1}}')
-        api = Api([run_(1, "2026-11-21T01:00:00Z", started=True), dict(run_(7, "2026-11-21T00:00:00Z"), status="completed")],
+        api = Api([run_(1, "2026-11-21T01:00:00Z", started=True), dict(run_(7, "2026-11-21T00:00:00Z"), status="completed", conclusion="cancelled")],
                   {1: STARTED})
         self.go(api, max_active=1, now=lambda: aa.PARK_FOR_S + 10.0)
         self.assertEqual(api.posts(), ["repos/o/a/actions/runs/7/rerun", "repos/o/a/actions/runs/1/cancel"])
@@ -255,7 +280,7 @@ class Run(unittest.TestCase):
 
     def test_a_superseded_parked_run_is_forgotten_not_rerun(self):
         Path(self.state).write_text('{"o/a 7": {"t": 900, "q": 1, "kind": "started", "prs": [107]}}')
-        r7 = dict(run_(7, "2026-11-21T00:00:00Z"), status="completed")
+        r7 = dict(run_(7, "2026-11-21T00:00:00Z"), status="completed", conclusion="cancelled")
         r7["pull_requests"] = [{"number": 107, "head": {"sha": "newer"}}]
         api = Api([r7], {})
         self.go(api, max_active=3)

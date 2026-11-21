@@ -35,7 +35,7 @@ import priority_apply as pa
 
 PARK_FOR_S = 12 * 3600
 FORGET_S = 3 * 86400  # a parked run older than this is dropped: its PR has long moved on or closed
-RATE_LIMITED = ("HTTP 403", "HTTP 429", "secondary rate limit", "rate limit")
+RATE_LIMITED = ("HTTP 429", "rate limit")  # a 403 counts only when its message names the rate limit
 PR_EVENTS = pa.PR_EVENTS
 STARTED_AFTER_S = 60  # a run updated this long after it was queued has had a job change state
 
@@ -105,7 +105,7 @@ class Budget:
 
     def spend(self, err=""):
         self.left -= 1
-        if err and any(m in err for m in RATE_LIMITED):
+        if err and any(m in err.lower() for m in (x.lower() for x in RATE_LIMITED)):
             self.stopped = True
             print("stopping writes for this pass: GitHub refused one as rate-limited (%s)" % err[:120])
 
@@ -180,12 +180,16 @@ def run(repos, state_path, max_active=8, min_jobs=3, label=pa.LABEL, min_rate=15
                 busy += 1 if wid in shaped else 0
             if len(got) < 100:
                 break
+        # A parked run back in the queue (someone re-ran it by hand) is live again: no longer ours to admit.
+        queued_ids = {r["id"] for r in runs} | {int(k.split(" ")[1]) for k in hold if k.split(" ")[0] == repo}
+        for rid in queued_ids:
+            if parked.pop("%s %d" % (repo, rid), None) is not None:
+                print("live again: %s run %d (re-run outside this script), no longer parked" % (repo, rid))
         # Parked runs (cancelled, so not in the queue) compete in the same ordering as the queued ones.
-        queued_ids = {r["id"] for r in runs}
         for key, v in parked.items():
-            rid = int(key.split(" ")[1])
-            if key.split(" ")[0] != repo or rid in queued_ids or key in hold:
+            if key.split(" ")[0] != repo or key in hold:
                 continue
+            rid = int(key.split(" ")[1])
             runs.append({"wid": v.get("wid"), "repo": repo, "id": rid, "q": v.get("q", 0), "prs": v.get("prs") or [],
                          "superseded": False, "name": v.get("name", ""), "kind": v.get("kind", "new"),
                          "parked": True, "overdue": now() - v.get("t", 0) > PARK_FOR_S})
@@ -206,6 +210,11 @@ def run(repos, state_path, max_active=8, min_jobs=3, label=pa.LABEL, min_rate=15
                 continue
             if (cur or {}).get("status") != "completed":
                 continue  # the cancel has not landed yet
+            if (cur or {}).get("conclusion") != "cancelled":
+                # It ran again some other way and finished (or GitHub never applied our cancel): nothing to admit.
+                print("forgotten: %s run %d (it finished as %s, not cancelled)" % (repo, r["id"], (cur or {}).get("conclusion")))
+                parked.pop(key, None)
+                continue
             if pa.superseded(cur or {}) or not (cur or {}).get("pull_requests"):
                 # A newer head, or no open PR any more (closed or merged): nothing to admit.
                 print("forgotten: %s run %d (its PR has a newer head or is closed)" % (repo, r["id"]))
@@ -225,6 +234,9 @@ def run(repos, state_path, max_active=8, min_jobs=3, label=pa.LABEL, min_rate=15
             else:
                 failed_calls += 1
                 print("admit FAILED: %s run %d (%s)" % (repo, r["id"], err))
+                if "HTTP 403" in err and not budget.stopped:
+                    parked.pop(key, None)  # GitHub refuses this run (not a rate limit): stop retrying it
+                    print("forgotten: %s run %d (GitHub refuses to re-run it)" % (repo, r["id"]))
         for r in failed:
             if budget.ok():
                 failed_calls += act(api, dry, repo, r, "cancel", "fail fast: a job already failed", budget)

@@ -161,9 +161,9 @@ for owner in $owners; do
       || echo "$owner: some priority bumps or re-runs failed (see above)"
   fi
   if [ -n "$admit_args" ]; then
-    # shellcheck disable=SC2086
     ff=""
     [ -z "$ADMIT_FAIL_FAST" ] || ff="--fail-fast"
+    # shellcheck disable=SC2086
     GH_TOKEN="$tok" python3 "$HERE/admit_apply.py" $admit_args --max-active "$ADMIT_MAX" $ff \
       --label "$PRIORITY_LABEL" --hold "$STATE/priority-$owner.json" \
       $dry --state "$STATE/admit-$owner.json" \
