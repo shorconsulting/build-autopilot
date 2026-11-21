@@ -721,21 +721,47 @@ def settle(findings, state, now, cooldown_minutes, max_restarts=3, report_cooldo
 
 
 def host_pressure(h, rules):
-    """'red', 'headroom' or 'ok' for one runner box from the github-throughput dashboard's host health
-    (`/api/data` field `hosts`: cpus, load5, MemTotal, MemAvailable, disks). Thresholds: `capacity.host`."""
+    """'red', 'headroom' or 'ok' for one runner box from its host health (cpus, load5, MemTotal, MemAvailable, disks,
+    and from a box-local reading `swap_pages_per_s`: pages swapped in + out per second since the last pass).
+    Thresholds: `capacity.host`. `pause_on` picks which of load, memory and swap make a box red (disk always does,
+    as a report); a signal left out of it never makes a box red and never blocks headroom."""
     t = rules["capacity"]["host"]
     if (not h.get("ok") or not h.get("cpus") or not h.get("MemTotal") or h.get("MemAvailable") is None
             or h.get("load5") is None):
         return "unknown", {}  # a partial reading must not look like 100% memory or zero load
+    on = set(t.get("pause_on") or ("load", "memory", "swap"))
     load = h["load5"] / h["cpus"]
     mem = 1 - h["MemAvailable"] / h["MemTotal"]
     disk = max([(d.get("used") or 0) / d["size"] for d in h.get("disks") or [] if d.get("size")] or [0])
+    swap = h.get("swap_pages_per_s")
+    swap = float(swap) if isinstance(swap, (int, float)) else None
     m = {"load_per_core": round(load, 2), "mem_pct": round(mem * 100), "disk_pct": round(disk * 100)}
-    if load >= t["red_load_per_core"] or mem * 100 >= t["red_mem_pct"] or disk * 100 >= t["red_disk_pct"]:
+    if swap is not None:
+        m["swap_pages_per_s"] = round(swap, 1)
+    if hot_reading(m, rules) or disk * 100 >= t["red_disk_pct"]:
         return "red", m
-    if load <= t["headroom_load_per_core"] and mem * 100 <= t["headroom_mem_pct"] and disk * 100 < t["red_disk_pct"] - 10:
+    if (("load" not in on or load <= t["headroom_load_per_core"])
+            and ("memory" not in on or mem * 100 <= t["headroom_mem_pct"])
+            and ("swap" not in on or swap is None or swap < t.get("calm_swap_pages_per_s", 1))
+            and disk * 100 < t["red_disk_pct"] - 10):
         return "headroom", m
     return "ok", m
+
+
+def hot_reading(m, rules):
+    """True when a reading crosses a `pause_on` limit: the kind of red that pausing a slot can fix."""
+    t = rules["capacity"]["host"]
+    on = set(t.get("pause_on") or ("load", "memory", "swap"))
+    return bool(("load" in on and m.get("load_per_core", 0) >= t["red_load_per_core"])
+                or ("memory" in on and m.get("mem_pct", 0) >= t["red_mem_pct"])
+                or ("swap" in on and m.get("swap_pages_per_s") is not None
+                    and m["swap_pages_per_s"] >= t.get("red_swap_pages_per_s", 100)))
+
+
+def _pressure_text(m):
+    return "load %.2f per core, memory %d%%%s" % (
+        m["load_per_core"], m["mem_pct"],
+        ", swapping %.0f pages/s" % m["swap_pages_per_s"] if m.get("swap_pages_per_s") is not None else "")
 
 
 def host_actions(hosts, pools, rules, state, now, runners=None):
@@ -768,7 +794,7 @@ def host_actions(hosts, pools, rules, state, now, runners=None):
             st["paused"] = []
         last = parse_time(st.get("changed"))
         cooling = last and (now - last).total_seconds() < t["cooldown_minutes"] * 60
-        hot = level == "red" and (m["load_per_core"] >= t["red_load_per_core"] or m["mem_pct"] >= t["red_mem_pct"])
+        hot = level == "red" and hot_reading(m, rules)
         online_names = {r.get("name") for r in runners or [] if r.get("status") == "online"}
         for n in [n for n in st["paused"] if n in online_names]:
             # Running again (a resume whose note was never recorded, or a pause that never happened): not paused.
@@ -810,13 +836,13 @@ def host_actions(hosts, pools, rules, state, now, runners=None):
                     continue
                 st["pressure_reported"] = stamp
                 acts.append({"do": "report", "needs_person": False, "host": h["host"], "metrics": m,
-                             "why": "%s is over its limit (load %.2f per core, memory %d%%) but no slot can be paused "
-                                    "(%s)" % (h["host"], m["load_per_core"], m["mem_pct"], online)})
+                             "why": "%s is over its limit (%s) but no slot can be paused "
+                                    "(%s)" % (h["host"], _pressure_text(m), online)})
                 continue
             acts.append({"do": "pause-slot", "needs_person": False, "host": h["host"], "runner": pick, "metrics": m,
-                         "why": "%s is over its limit (load %.2f per core, memory %d%%): stop idle runner %s (%d online "
+                         "why": "%s is over its limit (%s): stop idle runner %s (%d online "
                                 "on it), then record it with capacity-note --paused %s"
-                                % (h["host"], m["load_per_core"], m["mem_pct"], pick, online, pick)})
+                                % (h["host"], _pressure_text(m), pick, online, pick)})
             st["changed"] = stamp
             st.setdefault("pending_pause", {})[pick] = stamp
             continue
@@ -831,11 +857,13 @@ def host_actions(hosts, pools, rules, state, now, runners=None):
         if level == "headroom" and backed_up and fits_backlog and not cooling:
             acts.append({"do": "resume-slot", "needs_person": False, "host": h["host"], "runner": st["paused"][-1],
                          "metrics": m,
-                         "why": "%s has headroom (load %.2f per core, memory %d%%) and jobs are backed up: start %s "
+                         "why": "%s has headroom (%s) and jobs are backed up: start %s "
                                 "again, then record it with capacity-note --resumed"
-                                % (h["host"], m["load_per_core"], m["mem_pct"], st["paused"][-1])})
+                                % (h["host"], _pressure_text(m), st["paused"][-1])})
             st["changed"] = stamp
-        elif level == "headroom" and backed_up and not st["paused"] and not cooling:
+        elif (level == "headroom" and backed_up and not st["paused"] and not cooling
+              and m["load_per_core"] <= t["headroom_load_per_core"]):
+            # Growing a box always needs CPU headroom, even when load no longer pauses or blocks a resume.
             add = add_slot(h["host"], runners, rules, wanted)
             if add:
                 acts.append(dict({"do": "add-slot", "needs_person": False, "host": h["host"], "metrics": m,
@@ -1399,6 +1427,7 @@ def _capacity_pass(args):
             out["hosts"].append(dict(host=h.get("host"), **dict(zip(("level", "metrics"), host_pressure(h, rules)))))
         except (AttributeError, TypeError, ValueError, ZeroDivisionError, KeyError):
             out["hosts"].append({"host": str(h)[:60], "level": "unknown", "metrics": {}})
+    out["state"] = args.state  # the box-local apply records its pauses here (capacity-note)
     out["host_actions"] = host_actions(hosts, all_pools, rules, state, now, seen_runners or None) + hosts_missing(args.hosts, hosts, state,
                                                                                         rules, now)
     _write_state(args.state, state)

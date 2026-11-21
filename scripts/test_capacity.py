@@ -17,6 +17,9 @@ import tempfile  # noqa: E402
 steward.GOVERNOR_PAUSED_DIR = tempfile.mkdtemp()
 
 RULES = steward.load_rules()
+# The load-based pause and add-slot mechanics, as a box configured with `pause_on` including load runs them.
+RULES_LOAD = steward.load_rules()
+RULES_LOAD["capacity"]["host"]["pause_on"] = ["load", "memory", "swap"]
 
 
 def run(i, name, branch, sha, event="pull_request", repo="o/r", created="2026-11-19T10:00:00Z", wid=None, prs=()):
@@ -281,21 +284,21 @@ class Hosts(unittest.TestCase):
         self.dt = dt
 
     def test_levels(self):
-        self.assertEqual(steward.host_pressure(host("h", 52), RULES)[0], "red")       # 1.6 per core
-        self.assertEqual(steward.host_pressure(host("h", 20, mem_avail=4), RULES)[0], "red")  # memory 97%
-        self.assertEqual(steward.host_pressure(host("h", 20, disk=0.92), RULES)[0], "red")
-        self.assertEqual(steward.host_pressure(host("h", 30), RULES)[0], "ok")         # 0.94 per core
-        self.assertEqual(steward.host_pressure(host("h", 16), RULES)[0], "headroom")
-        self.assertEqual(steward.host_pressure({"host": "h", "ok": False}, RULES)[0], "unknown")
+        self.assertEqual(steward.host_pressure(host("h", 52), RULES_LOAD)[0], "red")       # 1.6 per core
+        self.assertEqual(steward.host_pressure(host("h", 20, mem_avail=4), RULES_LOAD)[0], "red")  # memory 97%
+        self.assertEqual(steward.host_pressure(host("h", 20, disk=0.92), RULES_LOAD)[0], "red")
+        self.assertEqual(steward.host_pressure(host("h", 30), RULES_LOAD)[0], "ok")         # 0.94 per core
+        self.assertEqual(steward.host_pressure(host("h", 16), RULES_LOAD)[0], "headroom")
+        self.assertEqual(steward.host_pressure({"host": "h", "ok": False}, RULES_LOAD)[0], "unknown")
         partial = dict(host("h", 16))
         partial.pop("MemAvailable")
-        self.assertEqual(steward.host_pressure(partial, RULES)[0], "unknown")  # not "100% memory used"
+        self.assertEqual(steward.host_pressure(partial, RULES_LOAD)[0], "unknown")  # not "100% memory used"
 
     def test_disk_and_no_slot_reports_use_the_report_cooldown_and_never_delay_a_resume(self):
         state, T = {}, lambda m: self.t + self.dt.timedelta(minutes=m)
         dos = []
         for i in range(10):  # 100 minutes of a full disk
-            dos += [x["do"] for x in steward.host_actions([host("hph-ci", 16, disk=0.95)], BACKED, RULES, state, T(10 * i))]
+            dos += [x["do"] for x in steward.host_actions([host("hph-ci", 16, disk=0.95)], BACKED, RULES_LOAD, state, T(10 * i))]
         self.assertEqual(dos, ["report"])
         self.assertNotIn("changed", state["hosts"]["hph-ci"])
 
@@ -313,57 +316,57 @@ class Hosts(unittest.TestCase):
         state = {"hosts": {"hph-ci": {"paused": ["hph-ci-3", "hph-ci-4"],
                                       "paused_at": {"hph-ci-3": stamp, "hph-ci-4": stamp}}}}
         slots = [runner("hph-ci-3", ["hph-ci"], status="online"), runner("hph-ci-4", ["hph-ci"], status="offline")]
-        steward.host_actions([host("hph-ci", 30)], [], RULES, state, T(10), slots)
+        steward.host_actions([host("hph-ci", 30)], [], RULES_LOAD, state, T(10), slots)
         self.assertEqual(state["hosts"]["hph-ci"]["paused"], ["hph-ci-4"])  # 3 is running again
-        a = steward.host_actions([host("hph-ci", 30)], [], RULES, state, T(13 * 60), slots)
+        a = steward.host_actions([host("hph-ci", 30)], [], RULES_LOAD, state, T(13 * 60), slots)
         self.assertEqual([(x["do"], x["needs_person"], x["runners"]) for x in a], [("report", True, ["hph-ci-4"])])
-        self.assertEqual(steward.host_actions([host("hph-ci", 30)], [], RULES, state, T(13 * 60 + 10), slots), [])
+        self.assertEqual(steward.host_actions([host("hph-ci", 30)], [], RULES_LOAD, state, T(13 * 60 + 10), slots), [])
 
     def test_a_pause_not_yet_confirmed_still_protects_the_slot_from_a_restart(self):
         state, T = {}, lambda m: self.t + self.dt.timedelta(minutes=m)
-        steward.host_actions([host("hph-ci", 52)], BACKED, RULES, state, T(0))
-        steward.host_actions([host("hph-ci", 52)], BACKED, RULES, state, T(10), SLOTS)
+        steward.host_actions([host("hph-ci", 52)], BACKED, RULES_LOAD, state, T(0))
+        steward.host_actions([host("hph-ci", 52)], BACKED, RULES_LOAD, state, T(10), SLOTS)
         self.assertEqual(steward.paused_runners(state, T(20)), ["hph-ci-3"])
         self.assertEqual(steward.paused_runners(state, T(10 + 60 * steward.PENDING_PAUSE_HOURS)), [])
-        steward.host_actions([host("hph-ci", 16)], [], RULES, state, T(10 + 60 * steward.PENDING_PAUSE_HOURS))
+        steward.host_actions([host("hph-ci", 16)], [], RULES_LOAD, state, T(10 + 60 * steward.PENDING_PAUSE_HOURS))
         self.assertEqual(state["hosts"]["hph-ci"].get("pending_pause"), {})  # expired entries are pruned
 
     def test_pause_needs_two_red_passes_then_resume_with_headroom(self):
         state, T = {}, lambda m: self.t + self.dt.timedelta(minutes=m)
-        self.assertEqual(steward.host_actions([host("hph-ci", 52)], BACKED, RULES, state, T(0)), [])  # first red
-        a = steward.host_actions([host("hph-ci", 52)], BACKED, RULES, state, T(10), SLOTS)
+        self.assertEqual(steward.host_actions([host("hph-ci", 52)], BACKED, RULES_LOAD, state, T(0)), [])  # first red
+        a = steward.host_actions([host("hph-ci", 52)], BACKED, RULES_LOAD, state, T(10), SLOTS)
         self.assertEqual([(x["do"], x["runner"]) for x in a], [("pause-slot", "hph-ci-3")])
-        self.assertEqual(steward.host_actions([host("hph-ci", 52)], BACKED, RULES, state, T(15), SLOTS), [])
+        self.assertEqual(steward.host_actions([host("hph-ci", 52)], BACKED, RULES_LOAD, state, T(15), SLOTS), [])
         # Nothing recorded as paused (the steward didn't confirm it): headroom has nothing to resume.
-        self.assertEqual(steward.host_actions([host("hph-ci", 16)], BACKED, RULES, state, T(40)), [])
+        self.assertEqual(steward.host_actions([host("hph-ci", 16)], BACKED, RULES_LOAD, state, T(40)), [])
         state["hosts"]["hph-ci"]["paused"].append("hph-ci-7")
-        a = steward.host_actions([host("hph-ci", 16)], BACKED, RULES, state, T(70))
+        a = steward.host_actions([host("hph-ci", 16)], BACKED, RULES_LOAD, state, T(70))
         self.assertEqual([(x["do"], x["runner"]) for x in a], [("resume-slot", "hph-ci-7")])
 
     def test_pause_never_takes_a_busy_slot_or_goes_below_the_minimum(self):
         T = lambda m: self.t + self.dt.timedelta(minutes=m)
         busy = [runner("hph-ci-%d" % i, ["hph-ci"], busy=True) for i in range(1, 5)]
         state = {}
-        steward.host_actions([host("hph-ci", 52)], BACKED, RULES, state, T(0), busy)
-        a = steward.host_actions([host("hph-ci", 52)], BACKED, RULES, state, T(10), busy)
+        steward.host_actions([host("hph-ci", 52)], BACKED, RULES_LOAD, state, T(0), busy)
+        a = steward.host_actions([host("hph-ci", 52)], BACKED, RULES_LOAD, state, T(10), busy)
         self.assertEqual([x["do"] for x in a], ["report"])
         two = [runner("hph-ci-1", ["hph-ci"], busy=True), runner("hph-ci-2", ["hph-ci"])]
         state = {}
-        steward.host_actions([host("hph-ci", 52)], BACKED, RULES, state, T(0), two)
-        a = steward.host_actions([host("hph-ci", 52)], BACKED, RULES, state, T(10), two)
+        steward.host_actions([host("hph-ci", 52)], BACKED, RULES_LOAD, state, T(0), two)
+        a = steward.host_actions([host("hph-ci", 52)], BACKED, RULES_LOAD, state, T(10), two)
         self.assertEqual([x["do"] for x in a], ["report"])  # 2 online, min 2: pausing one would go below
         state = {}
-        steward.host_actions([host("hph-ci", 52)], BACKED, RULES, state, T(0), None)
-        a = steward.host_actions([host("hph-ci", 52)], BACKED, RULES, state, T(10), None)
+        steward.host_actions([host("hph-ci", 52)], BACKED, RULES_LOAD, state, T(0), None)
+        a = steward.host_actions([host("hph-ci", 52)], BACKED, RULES_LOAD, state, T(10), None)
         self.assertEqual([x["do"] for x in a], ["report"])  # runners unknown: never a blind pause
 
     def test_a_disk_only_red_is_a_report_not_a_pause(self):
         state = {}
         for m in (0, 10):
-            a = steward.host_actions([host("mini", 4, cpus=10, disk=0.93)], BACKED, RULES, state,
+            a = steward.host_actions([host("mini", 4, cpus=10, disk=0.93)], BACKED, RULES_LOAD, state,
                                      self.t + self.dt.timedelta(minutes=m))
         self.assertNotIn("pause-slot", [x["do"] for x in a])
-        a = steward.host_actions([host("mini", 4, cpus=10, disk=0.93)], BACKED, RULES, state,
+        a = steward.host_actions([host("mini", 4, cpus=10, disk=0.93)], BACKED, RULES_LOAD, state,
                                  self.t + self.dt.timedelta(minutes=240))
         self.assertEqual([x["do"] for x in a], ["report"])  # again only after the report cooldown
 
@@ -376,14 +379,14 @@ class Hosts(unittest.TestCase):
     def test_resume_only_when_the_backlog_fits_the_paused_slot(self):
         state = {"hosts": {"hph-ci": {"paused": ["hph-ci-light-1"]}}}
         slots = [runner("hph-ci-light-1", ["self-hosted", "hph-ci-light"], status="offline")]
-        self.assertEqual(steward.host_actions([host("hph-ci", 16)], BACKED, RULES, state, self.t, slots), [])
+        self.assertEqual(steward.host_actions([host("hph-ci", 16)], BACKED, RULES_LOAD, state, self.t, slots), [])
         slots = [runner("hph-ci-light-1", ["self-hosted", "hph-ci"], status="offline")]
-        a = steward.host_actions([host("hph-ci", 16)], BACKED, RULES, state, self.t, slots)
+        a = steward.host_actions([host("hph-ci", 16)], BACKED, RULES_LOAD, state, self.t, slots)
         self.assertEqual([x["do"] for x in a], ["resume-slot"])
 
     def test_no_resume_without_a_backlog(self):
         state = {"hosts": {"hph-ci": {"paused": ["hph-ci-7"]}}}
-        self.assertEqual(steward.host_actions([host("hph-ci", 16)], [], RULES, state, self.t), [])
+        self.assertEqual(steward.host_actions([host("hph-ci", 16)], [], RULES_LOAD, state, self.t), [])
 
     def test_a_paused_slot_is_never_restarted_by_the_pool_check(self):
         state = {"hosts": {"hph-ci": {"paused": ["hph-ci-7"]}}}
@@ -393,7 +396,7 @@ class Hosts(unittest.TestCase):
         for m in (0, 10, 20):
             _, f = steward.pool_report(runners, {SH: 50}, 20, {SH: 60}, 10, steward.paused_runners(state))
             ready = steward.settle(f, state.setdefault("HPortHealth", {}), self.t + self.dt.timedelta(minutes=m), 30)
-            dos += [a["do"] for a in steward.capacity_actions([], ready, RULES)]
+            dos += [a["do"] for a in steward.capacity_actions([], ready, RULES_LOAD)]
         self.assertNotIn("restart-runner", dos)
         self.assertNotIn("report", dos)
 
@@ -405,6 +408,61 @@ class Hosts(unittest.TestCase):
             self.assertEqual(steward.paused_runners(steward._read_state(path)), ["hph-ci-7"])
             steward.main(["capacity-note", "--host", "hph-ci", "--resumed", "hph-ci-7", "--state", path])
             self.assertEqual(steward.paused_runners(steward._read_state(path)), [])
+
+
+class Swap(unittest.TestCase):
+    """Default rules (2026-11-20): swapping pauses an idle slot; load alone neither pauses nor blocks a resume."""
+
+    def setUp(self):
+        import datetime as dt
+        self.dt, self.t = dt, dt.datetime(2026, 11, 20, 21, 0, tzinfo=dt.timezone.utc)
+
+    def T(self, m):
+        return self.t + self.dt.timedelta(minutes=m)
+
+    @staticmethod
+    def box(load5=64, swap=0.0):
+        h = host("hph-ci", load5)
+        h["swap_pages_per_s"] = swap
+        return h
+
+    def test_swapping_twice_pauses_one_idle_slot(self):
+        state = {}
+        self.assertEqual(steward.host_actions([self.box(swap=800)], BACKED, RULES, state, self.T(0), SLOTS), [])
+        a = steward.host_actions([self.box(swap=800)], BACKED, RULES, state, self.T(10), SLOTS)
+        self.assertEqual([(x["do"], x["runner"]) for x in a], [("pause-slot", "hph-ci-3")])
+        self.assertIn("swapping 800 pages/s", a[0]["why"])
+
+    def test_high_load_without_swap_pauses_nothing(self):
+        state = {}
+        for m in (0, 10, 20):
+            a = steward.host_actions([self.box(load5=70, swap=0)], BACKED, RULES, state, self.T(m), SLOTS)
+            self.assertNotIn("pause-slot", [x["do"] for x in a])
+        self.assertEqual(steward.host_pressure(self.box(load5=70, swap=0), RULES)[0], "headroom")
+
+    def test_resume_waits_until_swapping_stops_even_at_high_load(self):
+        state = {"hosts": {"hph-ci": {"paused": ["hph-ci-7"]}}}
+        self.assertEqual(steward.host_actions([self.box(swap=20)], BACKED, RULES, state, self.T(0)), [])
+        a = steward.host_actions([self.box(load5=64, swap=0)], BACKED, RULES, state, self.T(30))
+        self.assertEqual([(x["do"], x["runner"]) for x in a], [("resume-slot", "hph-ci-7")])
+
+    def test_add_slot_still_needs_cpu_headroom(self):
+        rules = steward.load_rules()
+        rules["capacity"]["host"]["max_slots"] = {"hph-ci": 16}
+        busy = [runner("hph-ci-%d" % i, ["self-hosted", "hph-ci"], busy=True) for i in range(1, 5)]
+        pools = [{"labels": ["self-hosted", "hph-ci"], "queued_jobs": 100, "idle": 0}]
+        hot = steward.host_actions([self.box(load5=64, swap=0)], pools, rules, {}, self.T(0), busy)
+        self.assertNotIn("add-slot", [x["do"] for x in hot])
+        calm = steward.host_actions([self.box(load5=16, swap=0)], pools, rules, {}, self.T(0), busy)
+        self.assertIn("add-slot", [x["do"] for x in calm])
+
+    def test_no_swap_reading_falls_back_to_memory(self):
+        h = host("hph-ci", 64, mem_avail=4)  # 97% used, no swap field (a dashboard reading)
+        state = {}
+        steward.host_actions([h], BACKED, RULES, state, self.T(0), SLOTS)
+        a = steward.host_actions([h], BACKED, RULES, state, self.T(10), SLOTS)
+        self.assertEqual([x["do"] for x in a], ["pause-slot"])
+        self.assertEqual(steward.host_pressure(host("hph-ci", 64), RULES)[0], "headroom")
 
 
 class Owners(unittest.TestCase):
@@ -592,7 +650,7 @@ class AddSlot(unittest.TestCase):
         import copy
         import datetime as dt
         self.t = dt.datetime(2026, 11, 20, 20, 0, tzinfo=dt.timezone.utc)
-        self.rules = copy.deepcopy(RULES)
+        self.rules = copy.deepcopy(RULES_LOAD)
         self.rules["capacity"]["host"]["max_slots"] = {"hph-ci": 4}
 
     def slots(self, n, busy=True):
@@ -607,7 +665,7 @@ class AddSlot(unittest.TestCase):
         self.assertEqual(steward.host_actions([host("hph-ci", 16)], BACKED, self.rules, {}, self.t, self.slots(4)), [])
         idle = self.slots(2) + [runner("hph-ci-3", ["self-hosted", "hph-ci"], status="online", busy=False)]
         self.assertEqual(steward.host_actions([host("hph-ci", 16)], BACKED, self.rules, {}, self.t, idle), [])
-        self.assertEqual(steward.host_actions([host("hph-ci", 16)], BACKED, RULES, {}, self.t, self.slots(3)), [])
+        self.assertEqual(steward.host_actions([host("hph-ci", 16)], BACKED, RULES_LOAD, {}, self.t, self.slots(3)), [])
 
     def test_no_add_under_load_and_one_change_per_cooldown(self):
         self.assertNotIn("add-slot", [x["do"] for x in steward.host_actions(

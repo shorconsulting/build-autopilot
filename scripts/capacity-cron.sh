@@ -8,7 +8,8 @@
 #   <Owner>.token   otherwise: a fine-grained GitHub token for that org (mode 600). A person's tokens all share
 #                   that person's 5,000-calls-an-hour limit.
 #   repos           one owner/repo per line (# comments allowed)
-#   apply.env       optional: SLOT_REGEX and RESTART (see capacity_apply.py) for this box's own runners,
+#   apply.env       optional: SLOT_REGEX and RESTART (see capacity_apply.py) for this box's own runners, and STOP
+#                   (the stop command for a paused slot; default: RESTART with --stop when it is restart-runner-slot),
 #                   DRY_RUN=1 to only print what it would do (do one dry pass first),
 #                   SWEEP_EVERY_MIN (default 30; 0 = off): how often to also re-run checks that failed before the
 #                   code ran and cancel hung ones (steward.py sweep + sweep_apply.py, plain code, no AI);
@@ -16,7 +17,9 @@
 #                   sweep when fewer API calls than that are left this hour, since a token's limit is its owner's)
 #                   BOX=hph-ci (this box's name in capacity.host.runners): read this box's own load, memory and
 #                   disk each pass, so the check can start one more slot (add-slot, capped by capacity.host.max_slots)
-#                   when every slot is busy, jobs are backed up and the box has headroom
+#                   when every slot is busy, jobs are backed up and the box has headroom; and stop one idle slot when
+#                   the box is swapping (pause-slot), starting it again once swapping stops (resume-slot). Needs the
+#                   restart helper from this commit or later (it takes --stop).
 # Each org's repos are checked with that org's token; this box's runners are restarted, stale runs cancelled.
 set -euo pipefail
 
@@ -25,6 +28,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 STATE="${CAPACITY_STATE:-/var/lib/build-autopilot}"
 SLOT_REGEX=""
 RESTART=""
+STOP=""
 DRY_RUN=""
 SWEEP_EVERY_MIN=30
 SWEEP_MAX_PRS=40
@@ -33,6 +37,13 @@ BOX=""
 if [ -f "$CONF/apply.env" ]; then
   # shellcheck disable=SC1091
   . "$CONF/apply.env"
+fi
+# The stop command for pause-slot: STOP in apply.env, or, when RESTART is the restart-runner-slot helper (which
+# takes --stop), the same helper with --stop. Any other RESTART and no STOP: slots are never paused.
+if [ -z "$STOP" ]; then
+  case "$RESTART" in
+    *restart-runner-slot\ \{slot\}) STOP="${RESTART% \{slot\}} --stop {slot}" ;;
+  esac
 fi
 mkdir -p -m 700 "$STATE"
 
@@ -61,14 +72,32 @@ fi
 reports=""
 hosts_args=""
 if [ -n "$BOX" ] && [ -r /proc/meminfo ]; then
-  # This box's own reading, in the dashboard's host format (load5, cpus, MemTotal, MemAvailable, disks).
-  python3 - "$BOX" > "$STATE/host.json" <<'PY' && hosts_args="--hosts $STATE/host.json"
-import json, os, shutil, sys
+  # This box's own reading, in the dashboard's host format (load5, cpus, MemTotal, MemAvailable, disks), plus
+  # swap_pages_per_s: pages swapped in + out per second since the last pass (/proc/vmstat), the signal that pauses an
+  # idle slot (capacity.host.pause_on). The first pass has no earlier count, so no swap reading.
+  python3 - "$BOX" "$STATE/vmstat.prev" > "$STATE/host.json" <<'PY' && hosts_args="--hosts $STATE/host.json"
+import json, os, shutil, sys, time
 mem = {l.split(":")[0]: int(l.split()[1]) * 1024 for l in open("/proc/meminfo") if l.split()[1:2]}
 du = shutil.disk_usage("/")
-print(json.dumps([{"host": sys.argv[1], "ok": True, "cpus": os.cpu_count(), "load5": os.getloadavg()[1],
-                   "MemTotal": mem["MemTotal"], "MemAvailable": mem["MemAvailable"],
-                   "disks": [{"mount": "/", "size": du.total, "used": du.used}]}]))
+h = {"host": sys.argv[1], "ok": True, "cpus": os.cpu_count(), "load5": os.getloadavg()[1],
+     "MemTotal": mem["MemTotal"], "MemAvailable": mem["MemAvailable"],
+     "SwapTotal": mem.get("SwapTotal", 0), "SwapFree": mem.get("SwapFree", 0),
+     "disks": [{"mount": "/", "size": du.total, "used": du.used}]}
+try:
+    vm = {l.split()[0]: int(l.split()[1]) for l in open("/proc/vmstat") if l.startswith(("pswpin ", "pswpout "))}
+    now = {"t": time.time(), "pages": vm.get("pswpin", 0) + vm.get("pswpout", 0)}
+    try:
+        prev = json.load(open(sys.argv[2]))
+        dt = now["t"] - prev["t"]
+        if 0 < dt < 3 * 3600 and now["pages"] >= prev["pages"]:
+            h["swap_pages_per_s"] = round((now["pages"] - prev["pages"]) / dt, 1)
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    with open(sys.argv[2], "w") as fh:
+        json.dump(now, fh)
+except OSError:
+    pass
+print(json.dumps([h]))
 PY
 fi
 
@@ -103,6 +132,7 @@ done
 if [ -n "$reports" ] && [ -n "$RESTART" ]; then
   # shellcheck disable=SC2086
   python3 "$HERE/capacity_apply.py" $reports --no-cancel --slot-regex "$SLOT_REGEX" --restart "$RESTART" --host "$BOX" $dry \
+    --stop-cmd "$STOP" \
     || echo "some restarts failed (see above)"
 fi
 
