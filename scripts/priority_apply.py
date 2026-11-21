@@ -237,6 +237,8 @@ def run(repos, state_path, label=LABEL, max_bumps=500, min_rate=1500, settle_s=3
             continue
         if rerun:
             owed.setdefault("%s %d" % (repo, r["id"]), {"t": now(), "q": queued_at(r)})
+            if state_path and not dry:
+                save(state_path, owed)  # each bump is recorded at once: a killed pass still owes its re-run
         print("bumped: %s%s" % (why, ", re-run owed" if rerun else ", superseded: cancelled, not re-run"))
     if bumps and not dry:
         if state_path:
