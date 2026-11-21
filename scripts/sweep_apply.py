@@ -37,7 +37,22 @@ def load_cap(rules_path=None):
         return 3
 
 
-def plan(report, max_attempts=3, max_actions=20):
+def load_hold(paths):
+    """{"<repo lowercase> <run>"} from state files of the capacity pass (admit_apply's parked runs): cancelled on
+    purpose, so never re-run as a machine failure here; the capacity pass admits them in turn."""
+    held = set()
+    for path in paths or []:
+        try:
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict):
+            held |= {k.lower() for k in data if isinstance(k, str)}
+    return held
+
+
+def plan(report, max_attempts=3, max_actions=20, hold=frozenset()):
     """[(kind, argv, why)]: re-runs for machine failures, cancels for hung running checks. Each run once per pass."""
     out, seen = [], set()
     for rep in report.get("repos") or []:
@@ -51,6 +66,10 @@ def plan(report, max_attempts=3, max_actions=20):
                     if not rid or (repo, rid) in seen:
                         continue
                     seen.add((repo, rid))
+                    if ("%s %s" % (repo, rid)).lower() in hold:
+                        print("leave %s#%s run %s (%s): parked by the capacity pass, which admits it in turn"
+                              % (repo, pr["number"], rid, f.get("name")))
+                        continue
                     if attempt > max_attempts:
                         print("leave %s#%s run %s (%s): already on attempt %d, past the %d re-run cap; a lane or "
                               "person looks at it" % (repo, pr["number"], rid, f.get("name"), attempt, max_attempts))
@@ -80,13 +99,16 @@ def main(argv=None):
     ap.add_argument("--max-attempts", type=int, default=None,
                     help="re-run a run only while its attempt is at most this (default lanes.infra_reruns_per_pr)")
     ap.add_argument("--rules", help="build-rules.json (default: the plugin's)")
+    ap.add_argument("--hold", action="append", default=[],
+                    help="a capacity-pass state file (admit-<owner>.json): its runs are never re-run here")
     a = ap.parse_args(argv)
+    hold = load_hold(a.hold)
     cap = a.max_attempts if a.max_attempts is not None else load_cap(a.rules)
     failed = 0
     for path in a.report:
         with open(path, encoding="utf-8") as fh:
             report = json.load(fh)
-        for kind, argv_, why in plan(report, cap, a.max_actions):
+        for kind, argv_, why in plan(report, cap, a.max_actions, hold):
             if a.dry_run:
                 print("would %s: %s" % (kind, why))
                 continue

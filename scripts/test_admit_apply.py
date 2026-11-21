@@ -64,8 +64,19 @@ class Api:
 
 
 class Decide(unittest.TestCase):
-    def item(self, i, kind, q, prs=None, sup=False):
-        return {"id": i, "kind": kind, "q": q, "prs": prs or [i], "superseded": sup}
+    def item(self, i, kind, q, prs=None, sup=False, parked=False, overdue=False):
+        return {"id": i, "kind": kind, "q": q, "prs": prs or [i], "superseded": sup, "parked": parked,
+                "overdue": overdue}
+
+    def test_a_parked_started_run_takes_a_place_ahead_of_a_new_queued_run(self):
+        keep, park, _, _ = aa.decide([self.item(1, "new", 0), self.item(2, "started", 5, parked=True)], 1)
+        self.assertEqual(([r["id"] for r in keep], [r["id"] for r in park]), ([2], [1]))
+
+    def test_overdue_runs_trickle_back_two_at_a_time(self):
+        backlog = [self.item(i, "new", i, parked=True, overdue=True) for i in range(10)]
+        fresh = [self.item(100 + i, "started", 50 + i) for i in range(5)]
+        keep, _, _, _ = aa.decide(backlog + fresh, 4)
+        self.assertEqual([r["id"] for r in keep], [0, 1, 100, 101])
 
     def test_running_then_started_then_new_oldest_first(self):
         runs = [self.item(1, "new", 1), self.item(2, "started", 5), self.item(3, "started", 2),
@@ -155,12 +166,42 @@ class Run(unittest.TestCase):
         self.go(api, max_active=0)
         self.assertEqual(api.posts(), [])
 
-    def test_a_run_parked_too_long_is_admitted_even_without_room(self):
-        Path(self.state).write_text('{"o/a 7": {"t": 0, "q": 1, "kind": "new", "prs": [107]}}')
+    def test_a_run_parked_too_long_goes_ahead_of_started_runs(self):
+        Path(self.state).write_text('{"o/a 7": {"t": 0, "q": 99999999999, "kind": "new", "prs": [107], "wid": 1}}')
         api = Api([run_(1, "2026-11-21T01:00:00Z", started=True), dict(run_(7, "2026-11-21T00:00:00Z"), status="completed")],
-                  {1: RUNNING})
+                  {1: STARTED})
         self.go(api, max_active=1, now=lambda: aa.PARK_FOR_S + 10.0)
-        self.assertIn("repos/o/a/actions/runs/7/rerun", api.posts())
+        self.assertEqual(api.posts(), ["repos/o/a/actions/runs/1/cancel", "repos/o/a/actions/runs/7/rerun"])
+
+    def test_steady_new_arrivals_never_starve_a_parked_started_run(self):
+        runs = [run_(1, "2026-11-21T01:00:00Z", started=True), run_(2, "2026-11-21T02:00:00Z", started=True)]
+        api = Api(runs, {1: STARTED, 2: STARTED})
+        self.go(api, max_active=1)  # 2 is parked
+        api.runs[1]["status"] = "completed"
+        api.runs[50] = run_(50, "2026-11-21T05:00:00Z")  # a fresh push arrives
+        api.calls.clear()
+        self.go(api, max_active=1)
+        self.assertEqual(api.posts(), ["repos/o/a/actions/runs/50/cancel", "repos/o/a/actions/runs/2/rerun-failed-jobs"])
+
+    def test_a_resumed_started_run_parked_again_comes_back_with_rerun_failed_jobs(self):
+        runs = [run_(1, "2026-11-21T01:00:00Z", started=True), run_(2, "2026-11-21T02:00:00Z", started=True)]
+        api = Api(runs, {1: STARTED, 2: STARTED})
+        self.go(api, max_active=1)  # 2 parked
+        api.runs[1]["status"] = "completed"
+        self.go(api, max_active=1)  # 2 resumed: a re-run attempt, so its queue time looks new
+        api.runs[2]["run_attempt"] = 2
+        api.runs[3] = dict(run_(3, "2026-11-21T00:30:00Z", started=True), run_attempt=1)
+        api.jobs[3] = RUNNING  # something running holds the only place, so 2 is parked again
+        api.calls.clear()
+        self.go(api, max_active=1)
+        self.assertEqual(api.posts(), ["repos/o/a/actions/runs/2/cancel"])
+        self.assertEqual(json.loads(Path(self.state).read_text())["o/a 2"]["kind"], "started")
+
+    def test_a_held_run_is_never_touched(self):
+        runs = [run_(1, "2026-11-21T01:00:00Z", started=True), run_(2, "2026-11-21T02:00:00Z", started=True)]
+        api = Api(runs, {1: STARTED, 2: STARTED})
+        aa.run(["o/a"], self.state, max_active=1, api=api, now=lambda: 1000.0, hold={"o/a 2"})
+        self.assertEqual(api.posts(), [])
 
     def test_a_superseded_parked_run_is_forgotten_not_rerun(self):
         Path(self.state).write_text('{"o/a 7": {"t": 900, "q": 1, "kind": "started", "prs": [107]}}')

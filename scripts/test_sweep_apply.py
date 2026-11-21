@@ -137,3 +137,17 @@ class Lite(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HoldParked(unittest.TestCase):
+    def test_a_run_parked_by_the_capacity_pass_is_not_rerun_as_a_machine_failure(self):
+        import tempfile
+        import sweep_apply as sa
+        rep = {"repos": [{"repo": "SConsInc/ranch-rides", "pull_requests": [
+            {"number": 1, "state": "red-infra", "infra_runs": [{"run_id": 7, "attempt": 1, "name": "test"},
+                                                              {"run_id": 8, "attempt": 1, "name": "test"}]}]}]}
+        f = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+        f.write('{"SConsInc/ranch-rides 7": {"t": 1}}')
+        f.close()
+        steps = sa.plan(rep, 3, 20, sa.load_hold([f.name, "/nonexistent.json"]))
+        self.assertEqual([s[1][-1] for s in steps], ["repos/SConsInc/ranch-rides/actions/runs/8/rerun-failed-jobs"])
