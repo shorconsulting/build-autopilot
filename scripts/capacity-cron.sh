@@ -20,6 +20,9 @@
 #                   when every slot is busy, jobs are backed up and the box has headroom; and stop one idle slot when
 #                   the box is swapping (pause-slot), starting it again once swapping stops (resume-slot). Needs the
 #                   restart helper from this commit or later (it takes --stop).
+#                   PRIORITY_LABEL (default ci:priority; empty = off): an open PR with this label goes to the
+#                   front of the line. Every run of that org's repos queued before its unfinished runs is cancelled
+#                   and re-run, so it queues behind them (priority_apply.py; re-runs owed survive in $STATE).
 # Each org's repos are checked with that org's token; this box's runners are restarted, stale runs cancelled.
 set -euo pipefail
 
@@ -34,6 +37,7 @@ SWEEP_EVERY_MIN=30
 SWEEP_MAX_PRS=40
 SWEEP_MIN_RATE=2500
 BOX=""
+PRIORITY_LABEL="ci:priority"
 if [ -f "$CONF/apply.env" ]; then
   # shellcheck disable=SC1091
   . "$CONF/apply.env"
@@ -127,6 +131,12 @@ for owner in $owners; do
     reports="$reports $out"
   else
     echo "$owner: capacity check failed"
+  fi
+  if [ -n "$PRIORITY_LABEL" ]; then
+    # shellcheck disable=SC2086
+    GH_TOKEN="$tok" python3 "$HERE/priority_apply.py" $args --label "$PRIORITY_LABEL" $dry \
+      --state "$STATE/priority-$owner.json" \
+      || echo "$owner: some priority bumps or re-runs failed (see above)"
   fi
 done
 if [ -n "$reports" ] && [ -n "$RESTART" ]; then
