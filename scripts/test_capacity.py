@@ -614,5 +614,22 @@ class AddSlot(unittest.TestCase):
         self.assertEqual(steward.host_actions([host("hph-ci", 16)], BACKED, self.rules, state, later, self.slots(3)), [])
 
 
+
+class GovernorPaused(unittest.TestCase):
+    def test_runners_the_mac_load_governor_paused_are_never_offline_or_restarted(self):
+        import tempfile
+        d = tempfile.mkdtemp()
+        for f in ("davids-mac-mini-dind-sconsinc-4", "davids-mac-mini-dind-sconsinc-4.labels"):
+            open(os.path.join(d, f), "w").close()
+        self.assertEqual(steward.governor_paused(d), ["davids-mac-mini-dind-sconsinc-4"])
+        self.assertEqual(steward.governor_paused(os.path.join(d, "missing")), [])
+        runners = [{"name": "davids-mac-mini-dind-sconsinc-4", "status": "offline", "busy": False,
+                    "labels": [{"name": "shorconsulting-ci"}]},
+                   {"name": "davids-mac-mini-dind-sconsinc-5", "status": "online", "busy": True,
+                    "labels": [{"name": "shorconsulting-ci"}]}]
+        _, f = steward.pool_report(runners, {("shorconsulting-ci",): 50}, 20, {("shorconsulting-ci",): 60}, 10,
+                                   steward.governor_paused(d))
+        self.assertEqual([x for x in f if x.get("runner") == "davids-mac-mini-dind-sconsinc-4"], [])
+
 if __name__ == "__main__":
     unittest.main()

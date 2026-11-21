@@ -939,6 +939,22 @@ def paused_runners(state, now=None):
     return out
 
 
+# The Mac load governor (mac-runner-governor.sh, run by the Mac runner watchdog) stops runner containers while the
+# Mac is overloaded and lists them here, one file per runner name. They are offline on purpose, like the slots
+# above: never "offline", "pool down" or restarted. Only seen when the capacity check runs on that Mac.
+GOVERNOR_PAUSED_DIR = os.environ.get("BA_GOVERNOR_PAUSED_DIR") or os.path.expanduser(
+    "~/.local/state/mac-runner-watchdog/governor/paused")
+
+
+def governor_paused(path=None):
+    """Runner names the Mac load governor has paused, or [] when it isn't installed here."""
+    path = path or GOVERNOR_PAUSED_DIR
+    try:
+        return sorted(f for f in os.listdir(path) if not f.endswith(".labels") and not f.startswith("."))
+    except OSError:
+        return []
+
+
 def cmd_capacity_note(args):
     """Record what the steward did on a box, so the next pass knows which slots are paused on purpose. Waits up to
     as long as the stale-lock window for a running capacity pass, so neither overwrites the other's state."""
@@ -1243,7 +1259,7 @@ def owner_pools(owner, org_runners, aggs, state, rules, now, lean, groups=None):
     cap = rules["capacity"]
     if lean or not any(a["labels"] for a in aggs.values()):
         return None
-    paused = paused_runners(state, now)
+    paused = paused_runners(state, now) + governor_paused()
     pools, merged = [], {}
     for repo, a in sorted(aggs.items()):
         if not a["labels"] or (org_runners is None and not a["runners"]):
