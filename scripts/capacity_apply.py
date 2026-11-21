@@ -14,8 +14,38 @@ import argparse
 import json
 import re
 import shlex
+import os
 import subprocess
 import sys
+import time
+
+# A run this box cancelled in the last REMEMBER_S seconds that a later pass still lists as queued: GitHub accepted
+# the cancel (202) but never acted on it, which it does for runs stuck before a runner was assigned. Asking again
+# changes nothing (HPortHealth/app, 2026-11-20: the same three runs "cancel ok" every 10 minutes for hours), so the
+# second time it is force-cancelled.
+REMEMBER_S = 6 * 3600
+
+
+def load_cancelled(path):
+    """{"<repo> <run>": epoch seconds of our last cancel}, recent ones only. Missing or unreadable: empty."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    cutoff = time.time() - REMEMBER_S
+    return {k: v for k, v in data.items() if isinstance(v, (int, float)) and v >= cutoff} if isinstance(data, dict) else {}
+
+
+def save_cancelled(path, data):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(data, fh)
+    os.replace(tmp, path)
+
+
+def force(cmd):
+    return [c.replace("/cancel", "/force-cancel") if c.endswith("/cancel") else c for c in cmd]
 
 RESTART_ACTIONS = ("restart-runner", "restore-pool")
 
@@ -78,6 +108,8 @@ def main(argv=None):
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--no-cancel", action="store_true", help="restarts only (cancels need that org's token)")
     ap.add_argument("--no-restart", action="store_true", help="cancels only")
+    ap.add_argument("--cancel-state", default="",
+                    help="JSON file remembering this box's recent cancels, so a run that ignored one is force-cancelled")
     a = ap.parse_args(argv)
     steps, seen = [], set()
     for path in a.report:
@@ -86,18 +118,31 @@ def main(argv=None):
         steps += plan(report, a.slot_regex, "" if a.no_restart else a.restart, a.max_cancels, seen,
                       cancel=not a.no_cancel, host=a.host)
     failed = 0
+    cancelled = load_cancelled(a.cancel_state) if a.cancel_state else {}
     for kind, cmd, why in steps:
+        key = cmd[-1].rsplit("/actions/runs/", 1)
+        key = "%s %s" % (key[0][len("repos/"):], key[1].split("/")[0]) if kind == "cancel" and len(key) == 2 else ""
+        repeat = bool(key) and key in cancelled
         if a.dry_run:
-            print("would %s: %s" % (kind, why))
+            print("would %s%s: %s" % (kind, " (forced: an earlier cancel was ignored)" if repeat else "", why))
+            continue
+        if repeat:
+            res = subprocess.run(force(cmd), capture_output=True, text=True, timeout=300)
+            if res.returncode == 0:
+                print("cancel ok (forced: an earlier cancel was ignored): %s" % why)
+            else:
+                print("cancel skipped: %s (still queued after a cancel, and GitHub refuses a force-cancel: %s)"
+                      % (why, (res.stderr or res.stdout).strip()[:120]))
             continue
         res = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        if kind == "cancel" and key and res.returncode == 0:
+            cancelled[key] = time.time()
         ok = res.returncode == 0
         err = "" if ok else (res.stderr or res.stdout).strip()
         if not ok and kind == "cancel" and "HTTP 409" in err:
             # A run GitHub never really queued (old, stuck in requested/waiting) refuses a plain cancel. Force-cancel
             # stops it; if that is refused too, it is GitHub's to clear, not a failure of this pass.
-            forced = subprocess.run([c.replace("/cancel", "/force-cancel") if c.endswith("/cancel") else c
-                                     for c in cmd], capture_output=True, text=True, timeout=300)
+            forced = subprocess.run(force(cmd), capture_output=True, text=True, timeout=300)
             if forced.returncode == 0:
                 print("cancel ok (forced): %s" % why)
             else:
@@ -105,6 +150,11 @@ def main(argv=None):
             continue
         failed += 0 if ok else 1
         print("%s %s: %s%s" % (kind, "ok" if ok else "FAILED", why, "" if ok else " (%s)" % err[:200]))
+    if a.cancel_state and not a.dry_run:
+        try:
+            save_cancelled(a.cancel_state, cancelled)
+        except OSError as e:
+            print("could not save %s: %s" % (a.cancel_state, e))
     return 1 if failed else 0
 
 
