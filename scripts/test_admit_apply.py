@@ -244,6 +244,19 @@ class Run(unittest.TestCase):
         self.assertEqual(len(st), len(cancels))  # every cancel it made is recorded
         self.assertFalse(any("repos/o/b/" in p for _, p in api.calls))  # the second repo waits for the next pass
 
+    def test_a_read_cut_short_by_time_keeps_every_parked_run(self):
+        Path(self.state).write_text('{"o/a 7": {"t": 900, "q": 1, "kind": "started", "prs": [107], "wid": 1}}')
+        runs = [run_(i, "2026-11-21T%02d:00:00Z" % i, started=True) for i in range(1, 6)]
+        api = Api(runs, {i: STARTED for i in range(1, 6)})
+        t = [0.0]
+
+        def slow(method, path):
+            t[0] += 1.0
+            return api(method, path)
+        aa.run(["o/a"], self.state, max_active=1, api=slow, now=lambda: 1000.0, max_seconds=4, clock=lambda: t[0])
+        self.assertIn("o/a 7", json.loads(Path(self.state).read_text()))  # not read this pass, still parked
+        self.assertEqual(api.posts(), [])  # out of time: nothing written on a partial read
+
     def test_an_empty_label_turns_priority_off(self):
         api = Api([run_(1, "2026-11-21T01:00:00Z", started=True)], {1: STARTED}, prio=[101])
         aa.run(["o/a"], self.state, max_active=1, label="", api=api, now=lambda: 1000.0)

@@ -124,11 +124,10 @@ fi
 # never reached SConsInc). Each script also stops on its own time budget and saves its state as it goes.
 for owner in $owners; do
   tok="$(token_for "$owner")"
-  [ -n "$tok" ] || continue
-  args=""
-  for r in $(grep -v '^[[:space:]]*#' "$CONF/repos" | grep "^$owner/"); do
-    args="$args --repo $r"
-  done
+  if [ -z "$tok" ]; then
+    echo "skip $owner: no working $CONF/$owner.app or $owner.token"
+    continue
+  fi
   # This org's repos that admit_apply shapes (it orders ci:priority PRs first itself), and the rest.
   admit_args=""
   bump_args=""
@@ -138,6 +137,26 @@ for owner in $owners; do
       *) bump_args="$bump_args --repo $r" ;;
     esac
   done
+  [ "${ADMIT_MAX:-0}" -gt 0 ] || { bump_args="$admit_args$bump_args"; admit_args=""; }
+  if [ -n "$PRIORITY_LABEL" ]; then
+    # Every pass pays every re-run owed in the state file, whatever its repo (shaped repos included), and bumps
+    # only the repos admit_apply does not shape; with every repo shaped it only pays (--pay-only).
+    [ -n "$bump_args" ] || bump_args="--pay-only"
+    # shellcheck disable=SC2086
+    GH_TOKEN="$tok" python3 "$HERE/priority_apply.py" $bump_args --max-bumps 50 --label "$PRIORITY_LABEL" $dry \
+      --state "$STATE/priority-$owner.json" \
+      || echo "$owner: some priority bumps or re-runs failed (see above)"
+  fi
+  if [ -n "$admit_args" ]; then
+    ff=""
+    [ -z "$ADMIT_FAIL_FAST" ] || ff="--fail-fast"
+    # shellcheck disable=SC2086
+    GH_TOKEN="$tok" python3 "$HERE/admit_apply.py" $admit_args --max-active "$ADMIT_MAX" $ff --max-seconds 240 \
+      --label "$PRIORITY_LABEL" --hold "$STATE/priority-$owner.json" \
+      $dry --state "$STATE/admit-$owner.json" \
+      || echo "$owner: some parks or admits failed (see above)"
+  fi
+done
 
 for owner in $owners; do
   tok="$(token_for "$owner")"
@@ -160,26 +179,6 @@ for owner in $owners; do
     reports="$reports $out"
   else
     echo "$owner: capacity check failed"
-  fi
-done
-  [ "${ADMIT_MAX:-0}" -gt 0 ] || { bump_args="$admit_args$bump_args"; admit_args=""; }
-  if [ -n "$PRIORITY_LABEL" ]; then
-    # Every pass pays every re-run owed in the state file, whatever its repo (shaped repos included), and bumps
-    # only the repos admit_apply does not shape; with every repo shaped it only pays (--pay-only).
-    [ -n "$bump_args" ] || bump_args="--pay-only"
-    # shellcheck disable=SC2086
-    GH_TOKEN="$tok" python3 "$HERE/priority_apply.py" $bump_args --max-bumps 50 --label "$PRIORITY_LABEL" $dry \
-      --state "$STATE/priority-$owner.json" \
-      || echo "$owner: some priority bumps or re-runs failed (see above)"
-  fi
-  if [ -n "$admit_args" ]; then
-    ff=""
-    [ -z "$ADMIT_FAIL_FAST" ] || ff="--fail-fast"
-    # shellcheck disable=SC2086
-    GH_TOKEN="$tok" python3 "$HERE/admit_apply.py" $admit_args --max-active "$ADMIT_MAX" $ff --max-seconds 240 \
-      --label "$PRIORITY_LABEL" --hold "$STATE/priority-$owner.json" \
-      $dry --state "$STATE/admit-$owner.json" \
-      || echo "$owner: some parks or admits failed (see above)"
   fi
 done
 if [ -n "$reports" ] && [ -n "$RESTART" ]; then
