@@ -8,6 +8,8 @@
 #   4. A runner whose last WATCHDOG_FAST_FAILS (3) jobs since it started all failed within WATCHDOG_FAST_FAIL_S (90)
 #      seconds is broken in a way every job hits (checkout, setup, a full disk): restart it, which gives it a clean
 #      work folder. Real test failures take longer than that, so a runner that just picked up red PRs is left alone.
+#   5. The load governor (mac-runner-governor.sh) takes runner slots out of service while the machine is
+#      overloaded and puts them back when it eases. A slot it paused is not started again here.
 # A container is restarted at most WATCHDOG_MAX_PER_HOUR (3) times an hour; past that a running one is left alone and
 # logged, because something is wrong that a restart won't fix, and an exited one is started only once every
 # WATCHDOG_SLOW_RETRY_S (900) seconds. Every action is one line in the log.
@@ -87,6 +89,7 @@ if [ "${1:-}" = "--status" ]; then
     echo "$name $st ${p:-no-runner-process}"
   done
   echo "last pass: $(tail -1 "$LOG" 2>/dev/null)"
+  [ -f "$(dirname "$0")/mac-runner-governor.sh" ] && bash "$(dirname "$0")/mac-runner-governor.sh" --status
   exit 0
 fi
 
@@ -144,6 +147,11 @@ while IFS='|' read -r name st <&3; do
   [ -n "$name" ] || continue
   seen=$((seen + 1))
   miss="$STATE/$name.missing"
+  if [ "${WATCHDOG_GOVERNOR:-1}" != 0 ] && [ -f "$STATE/governor/paused/$name" ]; then
+    rm -f "$miss"  # taken out of service by the load governor on purpose: it starts it again when load eases
+    # (with the governor turned off, nothing would: then a paused runner is started like any other)
+    continue
+  fi
   if [ "$st" != "running" ]; then
     rm -f "$miss"
     # Past the hourly cap, a stopped container is still started once every SLOW_RETRY_S: starting one can't hurt a
@@ -199,5 +207,13 @@ $(containers)
 EOF
 
 [ "$seen" -gt 0 ] || say "no runner containers match '$MATCH'"
+
+# 5. The load governor (mac-runner-governor.sh, beside this script): take runner slots out of service while the
+#    machine is overloaded, put them back when it eases. WATCHDOG_GOVERNOR=0 turns it off.
+GOVERNOR="$(dirname "$0")/mac-runner-governor.sh"
+if [ "${WATCHDOG_GOVERNOR:-1}" != 0 ] && [ -f "$GOVERNOR" ]; then
+  bash "$GOVERNOR" ${DRY:+--dry-run} >/dev/null 2>&1 || say "governor pass FAILED"
+fi
+
 [ -z "$DRY" ] && date +%s > "$STATE/last-pass"
 exit 0

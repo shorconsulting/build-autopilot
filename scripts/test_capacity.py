@@ -11,6 +11,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import steward  # noqa: E402
+import tempfile  # noqa: E402
+
+# Never the real Mac's governor pauses: the suite gives the same results on the Mac mini as anywhere else.
+steward.GOVERNOR_PAUSED_DIR = tempfile.mkdtemp()
 
 RULES = steward.load_rules()
 
@@ -613,6 +617,32 @@ class AddSlot(unittest.TestCase):
         later = self.t + __import__("datetime").timedelta(minutes=5)
         self.assertEqual(steward.host_actions([host("hph-ci", 16)], BACKED, self.rules, state, later, self.slots(3)), [])
 
+
+
+class GovernorPaused(unittest.TestCase):
+    def test_runners_the_mac_load_governor_paused_are_never_offline_or_restarted(self):
+        import tempfile
+        d = tempfile.mkdtemp()
+        for f in ("davids-mac-mini-dind-sconsinc-4", "davids-mac-mini-dind-sconsinc-4.labels"):
+            open(os.path.join(d, f), "w").close()
+        self.assertEqual(steward.governor_paused(d), ["davids-mac-mini-dind-sconsinc-4"])
+        self.assertEqual(steward.governor_paused(os.path.join(d, "missing")), [])
+        runners = [{"name": "davids-mac-mini-dind-sconsinc-4", "status": "offline", "busy": False,
+                    "labels": [{"name": "shorconsulting-ci"}]},
+                   {"name": "davids-mac-mini-dind-sconsinc-5", "status": "online", "busy": True,
+                    "labels": [{"name": "shorconsulting-ci"}]}]
+        _, f = steward.pool_report(runners, {("shorconsulting-ci",): 50}, 20, {("shorconsulting-ci",): 60}, 10,
+                                   steward.governor_paused(d))
+        self.assertEqual([x for x in f if x.get("runner") == "davids-mac-mini-dind-sconsinc-4"], [])
+
+    def test_a_governor_pause_older_than_a_day_is_not_counted(self):
+        import tempfile
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, "davids-mac-mini-dind-sconsinc-4")
+        open(path, "w").close()
+        old = time.time() - (steward.GOVERNOR_PAUSED_MAX_HOURS + 1) * 3600
+        os.utime(path, (old, old))
+        self.assertEqual(steward.governor_paused(d), [])
 
 if __name__ == "__main__":
     unittest.main()

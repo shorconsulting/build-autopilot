@@ -401,6 +401,52 @@ reroutes, so idle runners with other labels stay idle while a pool queues for ho
    handed back and landed, the improvements started, how the health line moved since the day before (open PRs, red
    PRs, main red hours, median hours to merge), and only the items that need a person. Say nothing more when nothing needs one.
 
+### Keeping a Mac's runners inside its load (no agent)
+
+The capacity check's `pause-slot` needs an agent on the person's computer and the throughput dashboard, and moves
+one slot per 20 minutes. On the Mac mini the runners share one Colima VM, and when too many heavy jobs run at once
+every job slows down (21 Nov 2026: typecheck took 76 minutes against about 25 seconds), so fewer runners clear the
+queue sooner. `scripts/mac-runner-governor.sh` does this on the Mac itself, every 2 minutes, as the last step of the
+Mac runner watchdog (`scripts/install-mac-runner-watchdog.sh` installs both as one launchd agent):
+
+- It reads the VM's memory stall (PSI), free memory and load per core, the Mac's memory pressure level, swap growth
+  and load per core, and each runner's running job against the median time that job took on this Mac (learned from
+  the runners' own logs; no estimate until it has seen a job three times).
+- Overloaded two passes in a row (once, when memory is nearly gone, a memory stall reaches 25%, or the Mac is in
+  critical pressure), or a job running three times its usual time (and at least 10 minutes) while other jobs share
+  the box beside memory or swap pressure (job names repeat across repos, so load alone is not enough): it takes ONE runner
+  out of service. An idle one is stopped at once, after one more look right before the stop. With `GOV_GH_ORGS`,
+  when none is idle, the busy one closest to done drains (below). A running job is never stopped, and each runner
+  group keeps at least `GOV_MIN_SLOTS` (2).
+- Calm three passes in a row, or steady five in a row (no red, no memory or swap pressure, load may be high: busy
+  but coping, as under a backlog): it puts ONE back (cancels a drain, or starts the runner paused most recently).
+  A drain is called off after `GOV_MAX_DRAIN_S` (2 hours).
+- One change per `GOV_COOLDOWN_S` (6 minutes). Paused runners are listed in
+  `~/.local/state/mac-runner-watchdog/governor/paused/`; while the governor is on the watchdog doesn't restart them,
+  and a capacity check run on that Mac leaves them out of its offline and pool checks for up to a day (an older
+  pause is reported and restarted like any offline runner). The governor itself starts any runner paused longer
+  than `GOV_MAX_PAUSE_S` (a day) whatever the readings say. Installing with `WATCHDOG_GOVERNOR=0` starts them all.
+  Settings are taken from the installer's environment each time, so give them again on every re-run.
+- Draining needs `GOV_GH_ORGS` (e.g. `sconsinc:SConsInc`) and a `gh` login that can administer the org's runners:
+  the runner's custom labels come off at GitHub so it is given no new job, it is stopped once its job ends and
+  GitHub says it is not busy, and its labels go back when it returns. Without it, only idle runners are stopped
+  (under a backlog a runner takes its next job within a second of the last, so stopping it "between jobs" could
+  kill a job just handed to it). An idle runner is looked at again right before it is stopped; a job handed to it
+  in the fraction of a second between that look and the stop would still be cut off, which is unlikely when the
+  runner was idle (no matching job was waiting).
+
+```
+bash scripts/install-mac-runner-watchdog.sh                               # install or update (governor on)
+GOV_GH_ORGS='sconsinc:SConsInc' bash scripts/install-mac-runner-watchdog.sh  # settings are written into the agent
+~/.local/bin/mac-runner-watchdog.sh --status    # runners, the last load reading, paused, draining, usual job times
+~/.local/bin/mac-runner-governor.sh --dry-run   # what it would do now
+~/.local/bin/mac-runner-governor.sh --resume-all
+WATCHDOG_GOVERNOR=0 bash scripts/install-mac-runner-watchdog.sh           # watchdog only
+```
+
+Thresholds are at the top of the script (`GOV_*`), and every action is a line in
+`~/Library/Logs/mac-runner-watchdog.log`.
+
 ### Running the capacity check on a runner box (no agent)
 
 On an always-on box (the Hetzner hph-ci server), `scripts/capacity-cron.sh` runs one pass: `steward.py capacity` per
