@@ -95,13 +95,17 @@ def remaining(api):
 
 class Budget:
     """Write requests left this pass. GitHub's secondary limits allow far fewer writes than the hourly quota (about
-    80 a minute), so a big backlog is parked over several passes; a rate-limit refusal stops all writes."""
+    80 a minute), so a big backlog is parked over several passes; a rate-limit refusal stops all writes. A deadline
+    (epoch seconds) ends the pass's work early, so the box's timer never kills it mid-way."""
 
-    def __init__(self, n):
-        self.left, self.stopped = n, False
+    def __init__(self, n, deadline=None, clock=time.time):
+        self.left, self.stopped, self.deadline, self.clock = n, False, deadline, clock
+
+    def late(self):
+        return self.deadline is not None and self.clock() > self.deadline
 
     def ok(self):
-        return not self.stopped and self.left > 0
+        return not self.stopped and self.left > 0 and not self.late()
 
     def spend(self, err=""):
         self.left -= 1
@@ -111,16 +115,19 @@ class Budget:
 
 
 def run(repos, state_path, max_active=8, min_jobs=3, label=pa.LABEL, min_rate=1500, dry=False, api=pa.gh,
-        now=time.time, hold=None, overdue_cap=2, max_writes=50, fail_fast=False):
+        now=time.time, hold=None, overdue_cap=2, max_writes=50, fail_fast=False, max_seconds=None, clock=time.time):
     """hold: {"<repo> <run>"} owned by another script this pass (priority_apply's owed re-runs): never touched.
     max_writes: cancels plus re-runs per pass, all repos together. fail_fast: cancel the rest of a run with a failed
     job (off: such a run is left alone, since a continue-on-error or if: failure() job can still let it pass)."""
     parked = pa.load(state_path) if state_path else {}
     parked = {k: v for k, v in parked.items() if now() - v.get("t", 0) <= FORGET_S}
     hold = hold or set()
-    budget = Budget(max_writes)
+    budget = Budget(max_writes, clock() + max_seconds if max_seconds else None, clock)
     failed_calls = 0
     for repo in repos:
+        if budget.late():
+            print("%s: skipped, out of time this pass (the next pass starts here)" % repo)
+            continue
         left = remaining(api)
         may_park = left is None or left >= min_rate
         prio_prs = set()
@@ -133,6 +140,8 @@ def run(repos, state_path, max_active=8, min_jobs=3, label=pa.LABEL, min_rate=15
                 prio_prs.add(i["number"])
         runs, sizes = [], {}  # sizes: workflow id -> job count (a merge bot's 1-job run is never shaped)
         for _, r in pa.queued_for(api, repo):
+            if budget.late():
+                break  # decide on what was read; the rest is read next pass
             if r.get("event") not in PR_EVENTS or not r.get("pull_requests"):
                 continue
             key = "%s %d" % (repo, r["id"])
@@ -254,12 +263,14 @@ def run(repos, state_path, max_active=8, min_jobs=3, label=pa.LABEL, min_rate=15
                 if not dry:
                     parked["%s %d" % (repo, r["id"])] = {"t": now(), "q": r["q"], "kind": r["kind"], "prs": r["prs"],
                                                          "wid": r["wid"], "name": r["name"]}
+                    if state_path:
+                        pa.save(state_path, parked)  # each park is recorded at once: a killed pass loses none
         print("%s: %d in progress, %d places, %d kept, %d newly parked, %d admitted, %d waiting parked, "
               "%d failed-fast, %d superseded%s" % (
                   repo, busy, max(max_active - busy, 0), len(keep), n_parked, admitted,
                   sum(1 for k in parked if k.split(" ")[0] == repo), len(failed), len(stale),
                   ("" if may_park else "; not parking, %s API calls left" % left)
-                  + ("" if budget.ok() else "; write budget for this pass used up, the rest wait for the next")))
+                  + ("" if budget.ok() else "; write or time budget for this pass used up, the rest wait for the next")))
         if state_path and not dry:
             pa.save(state_path, parked)  # after each repo, so a killed pass still remembers what it parked
     return 1 if failed_calls else 0
@@ -290,6 +301,7 @@ def main(argv=None):
     ap.add_argument("--label", default=pa.LABEL)
     ap.add_argument("--min-rate", type=int, default=1500)
     ap.add_argument("--max-writes", type=int, default=50, help="cancels plus re-runs per pass, all repos together")
+    ap.add_argument("--max-seconds", type=int, default=0, help="stop reading and writing after this long (0: no limit)")
     ap.add_argument("--fail-fast", action="store_true",
                     help="cancel the rest of a run with a failed job (only for repos with no continue-on-error jobs)")
     ap.add_argument("--hold", action="append", default=[],
@@ -302,7 +314,7 @@ def main(argv=None):
     for path in a.hold:
         hold |= set(pa.load(path))
     return run(a.repo, a.state, a.max_active, a.min_jobs, a.label, a.min_rate, a.dry_run, hold=hold,
-               max_writes=a.max_writes, fail_fast=a.fail_fast)
+               max_writes=a.max_writes, fail_fast=a.fail_fast, max_seconds=a.max_seconds or None)
 
 
 if __name__ == "__main__":
