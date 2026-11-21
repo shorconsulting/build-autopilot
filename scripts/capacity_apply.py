@@ -53,7 +53,7 @@ RESTART_ACTIONS = ("restart-runner", "restore-pool")
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
-def plan(report, slot_regex, restart_template, max_cancels=100, seen=None, cancel=True, host=""):
+def plan(report, slot_regex, restart_template, max_cancels=100, seen=None, cancel=True, host="", stop_template=""):
     """[(kind, argv, why)] for this box: cancels for every repo's cancel-stale, restarts for this box's slots.
     `seen`: slots already planned this pass (shared across reports, so a slot restarts at most once per pass).
     Slots are one numbered service per box: on hph-ci, hph-ci-10 and hph-ci-light-10 are both hph-runner@10."""
@@ -88,13 +88,15 @@ def plan(report, slot_regex, restart_template, max_cancels=100, seen=None, cance
                 out.append(("restart", argv, "%s (%s): %s" % (name, owner.get("owner"), act.get("why", ""))))
     for act in report.get("host_actions") or []:
         if (act.get("do") in ("pause-slot", "resume-slot") and not act.get("needs_person") and host
-                and act.get("host") == host and rx and restart_template):
+                and act.get("host") == host and rx):
+            # A pause runs only with an explicit stop command (--stop-cmd), never one guessed from the restart one.
+            tmpl = stop_template if act["do"] == "pause-slot" else restart_template
             m = rx.search(act.get("runner") or "")
-            if not m or m.group(1) in seen:
+            # One change per box per pass, whichever org's report asks (the 20-minute cooldown is per org's state).
+            if not tmpl or not m or m.group(1) in seen or "host-change" in seen:
                 continue
             slot = m.group(1)
-            seen.add(slot)
-            tmpl = restart_template.replace("{slot}", "--stop {slot}") if act["do"] == "pause-slot" else restart_template
+            seen.update({slot, "host-change"})
             note = [sys.executable, os.path.join(HERE, "steward.py"), "capacity-note", "--host", host,
                     "--paused" if act["do"] == "pause-slot" else "--resumed", act["runner"]]
             if report.get("state"):
@@ -104,13 +106,13 @@ def plan(report, slot_regex, restart_template, max_cancels=100, seen=None, cance
             continue
         if act.get("do") != "add-slot" or act.get("needs_person") or not host or act.get("host") != host:
             continue
-        if not rx or not restart_template or "add-slot" in seen:
+        if not rx or not restart_template or "add-slot" in seen or "host-change" in seen:
             continue
         used = {int(m.group(1)) for m in (rx.search(n or "") for n in act.get("slots") or []) if m}
         slot = next(i for i in range(1, len(used) + 2) if i not in used)
         if len(used) >= int(act.get("max") or 0) or str(slot) in seen:
             continue
-        seen.update({"add-slot", str(slot)})
+        seen.update({"add-slot", "host-change", str(slot)})
         out.append(("add-slot", shlex.split(restart_template.format(slot=slot)),
                     "%s slot %d: %s" % (host, slot, act.get("why", ""))))
     return out
@@ -123,6 +125,8 @@ def main(argv=None):
     ap.add_argument("--restart", default="", help="command template to restart a slot, with {slot}")
     ap.add_argument("--max-cancels", type=int, default=100)
     ap.add_argument("--host", default="", help="this box's name in capacity.host.runners, for add-slot")
+    ap.add_argument("--stop-cmd", default="",
+                    help="command template to stop a slot, with {slot}, for pause-slot (none: pauses are not done)")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--no-cancel", action="store_true", help="restarts only (cancels need that org's token)")
     ap.add_argument("--no-restart", action="store_true", help="cancels only")
@@ -134,7 +138,7 @@ def main(argv=None):
         with open(path, encoding="utf-8") as fh:
             report = json.load(fh)
         steps += plan(report, a.slot_regex, "" if a.no_restart else a.restart, a.max_cancels, seen,
-                      cancel=not a.no_cancel, host=a.host)
+                      cancel=not a.no_cancel, host=a.host, stop_template="" if a.no_restart else a.stop_cmd)
     failed = 0
     cancelled = load_cancelled(a.cancel_state) if a.cancel_state else {}
     for step in steps:

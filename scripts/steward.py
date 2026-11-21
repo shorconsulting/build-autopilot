@@ -861,7 +861,9 @@ def host_actions(hosts, pools, rules, state, now, runners=None):
                                 "again, then record it with capacity-note --resumed"
                                 % (h["host"], _pressure_text(m), st["paused"][-1])})
             st["changed"] = stamp
-        elif level == "headroom" and backed_up and not st["paused"] and not cooling:
+        elif (level == "headroom" and backed_up and not st["paused"] and not cooling
+              and m["load_per_core"] <= t["headroom_load_per_core"]):
+            # Growing a box always needs CPU headroom, even when load no longer pauses or blocks a resume.
             add = add_slot(h["host"], runners, rules, wanted)
             if add:
                 acts.append(dict({"do": "add-slot", "needs_person": False, "host": h["host"], "metrics": m,

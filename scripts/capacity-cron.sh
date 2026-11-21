@@ -8,7 +8,8 @@
 #   <Owner>.token   otherwise: a fine-grained GitHub token for that org (mode 600). A person's tokens all share
 #                   that person's 5,000-calls-an-hour limit.
 #   repos           one owner/repo per line (# comments allowed)
-#   apply.env       optional: SLOT_REGEX and RESTART (see capacity_apply.py) for this box's own runners,
+#   apply.env       optional: SLOT_REGEX and RESTART (see capacity_apply.py) for this box's own runners, and STOP
+#                   (the stop command for a paused slot; default: RESTART with --stop when it is restart-runner-slot),
 #                   DRY_RUN=1 to only print what it would do (do one dry pass first),
 #                   SWEEP_EVERY_MIN (default 30; 0 = off): how often to also re-run checks that failed before the
 #                   code ran and cancel hung ones (steward.py sweep + sweep_apply.py, plain code, no AI);
@@ -27,6 +28,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 STATE="${CAPACITY_STATE:-/var/lib/build-autopilot}"
 SLOT_REGEX=""
 RESTART=""
+STOP=""
 DRY_RUN=""
 SWEEP_EVERY_MIN=30
 SWEEP_MAX_PRS=40
@@ -35,6 +37,13 @@ BOX=""
 if [ -f "$CONF/apply.env" ]; then
   # shellcheck disable=SC1091
   . "$CONF/apply.env"
+fi
+# The stop command for pause-slot: STOP in apply.env, or, when RESTART is the restart-runner-slot helper (which
+# takes --stop), the same helper with --stop. Any other RESTART and no STOP: slots are never paused.
+if [ -z "$STOP" ]; then
+  case "$RESTART" in
+    *restart-runner-slot\ \{slot\}) STOP="${RESTART% \{slot\}} --stop {slot}" ;;
+  esac
 fi
 mkdir -p -m 700 "$STATE"
 
@@ -123,6 +132,7 @@ done
 if [ -n "$reports" ] && [ -n "$RESTART" ]; then
   # shellcheck disable=SC2086
   python3 "$HERE/capacity_apply.py" $reports --no-cancel --slot-regex "$SLOT_REGEX" --restart "$RESTART" --host "$BOX" $dry \
+    --stop-cmd "$STOP" \
     || echo "some restarts failed (see above)"
 fi
 

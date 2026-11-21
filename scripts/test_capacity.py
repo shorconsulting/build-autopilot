@@ -442,6 +442,16 @@ class Swap(unittest.TestCase):
         a = steward.host_actions([self.box(load5=64, swap=0)], BACKED, RULES, state, self.T(30))
         self.assertEqual([(x["do"], x["runner"]) for x in a], [("resume-slot", "hph-ci-7")])
 
+    def test_add_slot_still_needs_cpu_headroom(self):
+        rules = steward.load_rules()
+        rules["capacity"]["host"]["max_slots"] = {"hph-ci": 16}
+        busy = [runner("hph-ci-%d" % i, ["self-hosted", "hph-ci"], busy=True) for i in range(1, 5)]
+        pools = [{"labels": ["self-hosted", "hph-ci"], "queued_jobs": 100, "idle": 0}]
+        hot = steward.host_actions([self.box(load5=64, swap=0)], pools, rules, {}, self.T(0), busy)
+        self.assertNotIn("add-slot", [x["do"] for x in hot])
+        calm = steward.host_actions([self.box(load5=16, swap=0)], pools, rules, {}, self.T(0), busy)
+        self.assertIn("add-slot", [x["do"] for x in calm])
+
     def test_no_swap_reading_falls_back_to_memory(self):
         h = host("hph-ci", 64, mem_avail=4)  # 97% used, no swap field (a dashboard reading)
         state = {}
