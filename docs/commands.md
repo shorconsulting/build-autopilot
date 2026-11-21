@@ -431,7 +431,9 @@ Mac runner watchdog (`scripts/install-mac-runner-watchdog.sh` installs both as o
   the runner's custom labels come off at GitHub so it is given no new job, it is stopped once its job ends and
   GitHub says it is not busy, and its labels go back when it returns. Without it, only idle runners are stopped
   (under a backlog a runner takes its next job within a second of the last, so stopping it "between jobs" could
-  kill a job just handed to it). An idle runner is looked at again right before it is stopped; a job handed to it
+  kill a job just handed to it). Only custom labels come off, so a job asking for nothing but default labels
+  (`self-hosted`, `linux`) can still reach a draining runner; the stop waits for it, and a drain that never ends
+  is called off at `GOV_MAX_DRAIN_S`. An idle runner is looked at again right before it is stopped; a job handed to it
   in the fraction of a second between that look and the stop would still be cut off, which is unlikely when the
   runner was idle (no matching job was waiting).
 
