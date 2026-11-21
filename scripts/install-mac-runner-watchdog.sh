@@ -29,7 +29,7 @@ fi
 # Settings for the agent: the supported GOV_* and WATCHDOG_* settings set when this was run (never the test ones).
 ENVXML=""
 for v in $(env | grep -oE '^(GOV_[A-Z_]+|WATCHDOG_(GOVERNOR|MATCH|COLIMA_PROFILE|MAX_PER_HOUR|FAST_FAILS|FAST_FAIL_S))=' \
-             | tr -d '=' | sort -u); do
+             | tr -d '=' | grep -v '^GOV_NOW_SOD$' | sort -u); do  # GOV_NOW_SOD: tests only
   val="$(printenv "$v" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g')"
   ENVXML="$ENVXML    <key>$v</key><string>$val</string>
 "

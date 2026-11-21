@@ -11,6 +11,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import steward  # noqa: E402
+import tempfile  # noqa: E402
+
+# Never the real Mac's governor pauses: the suite gives the same results on the Mac mini as anywhere else.
+steward.GOVERNOR_PAUSED_DIR = tempfile.mkdtemp()
 
 RULES = steward.load_rules()
 

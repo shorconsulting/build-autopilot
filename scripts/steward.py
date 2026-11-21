@@ -961,7 +961,7 @@ def governor_paused(path=None, now=None):
     except OSError:
         return []
     for f in names:
-        if f.endswith((".labels", ".id")) or f.startswith("."):
+        if f.endswith((".labels", ".id", ".org")) or f.startswith("."):
             continue
         try:
             if now - os.path.getmtime(os.path.join(path, f)) < GOVERNOR_PAUSED_MAX_HOURS * 3600:

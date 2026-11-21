@@ -156,11 +156,11 @@ class Governor(unittest.TestCase):
 
     def paused(self):
         d = os.path.join(self.state, "governor", "paused")
-        return sorted(f.replace(R, "") for f in os.listdir(d) if not f.endswith((".labels", ".id"))) if os.path.isdir(d) else []
+        return sorted(f.replace(R, "") for f in os.listdir(d) if not f.endswith((".labels", ".id", ".org"))) if os.path.isdir(d) else []
 
     def draining(self):
         d = os.path.join(self.state, "governor", "draining")
-        return sorted(f.replace(R, "") for f in os.listdir(d) if not f.endswith((".labels", ".id"))) if os.path.isdir(d) else []
+        return sorted(f.replace(R, "") for f in os.listdir(d) if not f.endswith((".labels", ".id", ".org"))) if os.path.isdir(d) else []
 
     def four_busy_one_idle(self):
         self.runners({"1": ("running", BUSY, jobs(running="build", at=0)),
@@ -472,6 +472,40 @@ class Governor(unittest.TestCase):
         self.assertEqual(self.calls("start"), ["1"])
         self.assertIn("gh api -X POST orgs/SConsInc/actions/runners/42/labels -f labels[]=shorconsulting-ci",
                       self.gh_calls())
+
+    def test_labels_go_back_even_when_github_orgs_is_dropped_later(self):
+        # A re-install without GOV_GH_ORGS, then resume-all: the labels still go back, to the saved org.
+        self.env["GOV_GH_ORGS"] = "sconsinc:SConsInc"
+        self.runners({"1": ("running", BUSY, jobs(running="build", at=0)),
+                      "2": ("running", BUSY, jobs(running="build", at=600)),
+                      "3": ("running", BUSY, jobs(running="lint", at=1200))})
+        self.vm(vm(avail_pct=2))
+        self.go()
+        self.assertEqual(self.draining(), ["1"])
+        del self.env["GOV_GH_ORGS"]
+        self.go("--resume-all")
+        self.assertIn("gh api -X POST orgs/SConsInc/actions/runners/42/labels -f labels[]=shorconsulting-ci",
+                      self.gh_calls())
+        self.assertEqual(os.listdir(os.path.join(self.state, "governor", "draining")), [])
+
+    def test_labels_github_refuses_to_take_back_are_kept_and_tried_again(self):
+        self.env["GOV_GH_ORGS"] = "sconsinc:SConsInc"
+        self.runners({"1": ("running", BUSY, jobs(running="build", at=0)),
+                      "2": ("running", BUSY, jobs(running="build", at=600)),
+                      "3": ("running", BUSY, jobs(running="lint", at=1200))})
+        self.vm(vm(avail_pct=2))
+        self.go()
+        refuse = os.path.join(self.bin, "gh")
+        with open(refuse) as fh:
+            body = fh.read()
+        with open(refuse, "w") as fh:
+            fh.write(body.replace('echo "gh $*" >> "$WORLD/calls"',
+                                  'echo "gh $*" >> "$WORLD/calls"\ncase "$*" in *"-X POST"*) exit 1 ;; esac'))
+        self.go("--resume-all")
+        d = os.path.join(self.state, "governor", "draining")
+        self.assertIn(R + "1.labels", os.listdir(d))
+        with open(os.path.join(self.w, "log")) as fh:
+            self.assertIn("COULD NOT put its labels back", fh.read())
 
     def test_without_github_orgs_github_is_never_called(self):
         self.four_busy_one_idle()

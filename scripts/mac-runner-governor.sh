@@ -259,6 +259,7 @@ unlabel() {
   [ -n "$labels" ] || { say "$name: could not read its labels at GitHub ($org); not drained"; return 1; }
   if gh api -X DELETE "orgs/$org/actions/runners/$id/labels" >/dev/null 2>&1; then
     printf '%s\n' "$labels" > "$G/draining/$name.labels"
+    echo "$org" > "$G/draining/$name.org"  # put back to this org whatever GOV_GH_ORGS says later
     echo "$id" > "$G/draining/$name.id"
     say "$name: labels taken off at GitHub ($(echo $labels)), so it takes no new job"
     return 0
@@ -271,27 +272,31 @@ unlabel() {
 github_idle() {
   local name="$1" org id
   [ -f "$G/draining/$name.id" ] || return 0
-  org="$(org_of "$name")"
+  org="$(cat "$G/draining/$name.org" 2>/dev/null || org_of "$name")"
   id="$(cat "$G/draining/$name.id")"
   [ "$(gh api "orgs/$org/actions/runners/$id" --jq .busy 2>/dev/null)" = "false" ]
 }
 
-# Put back labels unlabel() took off. Kept for the next try if GitHub refuses.
+# Put back labels unlabel() took off, to the org saved beside them (GOV_GH_ORGS may have changed or been dropped
+# since). The saved labels are only removed once GitHub has them back; otherwise they are kept and tried again
+# every pass, and said loudly, because a runner without its labels is online but never given a job.
 relabel() {
-  local name="$1" f org id args="" l
+  local name="$1" f d org id args l
   for f in "$G/draining/$name.labels" "$G/paused/$name.labels"; do
     [ -f "$f" ] || continue
-    org="$(org_of "$name")"
-    [ -n "$org" ] || { rm -f "$f"; continue; }
+    d="$(dirname "$f")"
+    org="$(cat "$d/$name.org" 2>/dev/null || org_of "$name")"
     [ -n "$DRY" ] && { say "would put $name's labels back at GitHub"; return 0; }
-    id="$(runner_id "$org" "$name")"
+    args=""
     for l in $(cat "$f"); do args="$args -f labels[]=$l"; done
+    id=""
+    [ -n "$org" ] && id="$(runner_id "$org" "$name")"
     # shellcheck disable=SC2086
     if [ -n "$id" ] && gh api -X POST "orgs/$org/actions/runners/$id/labels" $args >/dev/null 2>&1; then
       say "$name: labels put back at GitHub ($(echo $(cat "$f")))"
-      rm -f "$f"
+      rm -f "$f" "$d/$name.org"
     else
-      say "$name: could not put its labels back at GitHub yet; trying again next pass"
+      say "$name: COULD NOT put its labels back at GitHub (${org:-org unknown}: $(echo $(cat "$f"))); it takes no jobs until they are back; trying again next pass"
       return 1
     fi
   done
@@ -315,6 +320,7 @@ stop_paused() { # stop an idle runner and record it as paused by the governor
   if docker stop "$name" >/dev/null 2>&1; then
     now > "$G/paused/$name"
     [ -f "$G/draining/$name.labels" ] && mv "$G/draining/$name.labels" "$G/paused/$name.labels"
+    [ -f "$G/draining/$name.org" ] && mv "$G/draining/$name.org" "$G/paused/$name.org"
     rm -f "$G/draining/$name" "$G/draining/$name.id"
     say "$name: stopped ($why)"
   else
@@ -366,7 +372,7 @@ watch_drains() {
     left=0
     for f in "$G/draining/"*; do
       [ -f "$f" ] || continue
-      case "$f" in *.labels|*.id) continue ;; esac
+      case "$f" in *.labels|*.id|*.org) continue ;; esac
       name="$(basename "$f")"
       left=1
       if idle_now "$name"; then
@@ -378,8 +384,8 @@ watch_drains() {
   done
 }
 
-paused_list() { for f in "$G/paused/"*; do [ -f "$f" ] && case "$f" in *.labels|*.id) ;; *) basename "$f" ;; esac; done; }
-draining_list() { for f in "$G/draining/"*; do [ -f "$f" ] && case "$f" in *.labels|*.id) ;; *) basename "$f" ;; esac; done; }
+paused_list() { for f in "$G/paused/"*; do [ -f "$f" ] && case "$f" in *.labels|*.id|*.org) ;; *) basename "$f" ;; esac; done; }
+draining_list() { for f in "$G/draining/"*; do [ -f "$f" ] && case "$f" in *.labels|*.id|*.org) ;; *) basename "$f" ;; esac; done; }
 
 # --- modes ----------------------------------------------------------------------------------------------------
 
