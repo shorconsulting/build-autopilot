@@ -23,6 +23,10 @@
 #                   PRIORITY_LABEL (default ci:priority; empty = off): an open PR with this label goes to the
 #                   front of the line. Every run of that org's repos queued before its unfinished runs is cancelled
 #                   and re-run, so it queues behind them (priority_apply.py; re-runs owed survive in $STATE).
+#                   ADMIT_MAX (default 12; 0 = off): at most this many multi-job PR runs per repo are active at once,
+#                   started ones first, so PRs finish one after another instead of every PR getting one job and
+#                   waiting a day for the next. The rest are parked (cancelled, nothing lost) and admitted as places
+#                   free; a run with a failed job has its queued jobs cancelled (admit_apply.py).
 # Each org's repos are checked with that org's token; this box's runners are restarted, stale runs cancelled.
 set -euo pipefail
 
@@ -38,6 +42,7 @@ SWEEP_MAX_PRS=40
 SWEEP_MIN_RATE=2500
 BOX=""
 PRIORITY_LABEL="ci:priority"
+ADMIT_MAX=12
 if [ -f "$CONF/apply.env" ]; then
   # shellcheck disable=SC1091
   . "$CONF/apply.env"
@@ -137,6 +142,12 @@ for owner in $owners; do
     GH_TOKEN="$tok" python3 "$HERE/priority_apply.py" $args --label "$PRIORITY_LABEL" $dry \
       --state "$STATE/priority-$owner.json" \
       || echo "$owner: some priority bumps or re-runs failed (see above)"
+  fi
+  if [ "${ADMIT_MAX:-0}" -gt 0 ]; then
+    # shellcheck disable=SC2086
+    GH_TOKEN="$tok" python3 "$HERE/admit_apply.py" $args --max-active "$ADMIT_MAX" --label "${PRIORITY_LABEL:-ci:priority}" \
+      $dry --state "$STATE/admit-$owner.json" \
+      || echo "$owner: some parks or admits failed (see above)"
   fi
 done
 if [ -n "$reports" ] && [ -n "$RESTART" ]; then
