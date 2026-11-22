@@ -105,6 +105,32 @@ class SelfUpdate(unittest.TestCase):
         self.assertIn("not behind origin/main", out)
         self.assertEqual(self.head(), mine)
 
+    def test_a_main_that_does_not_parse_is_rolled_back(self):
+        origin = self.d / "origin"
+        cron = origin / "scripts" / "capacity-cron.sh"
+        cron.write_text(cron.read_text() + "\nif then\n")
+        self.git(origin, "commit", "-q", "-am", "broken")
+        before = self.head()
+        out = self.pass_()
+        self.assertIn("does not parse", out)
+        self.assertEqual(self.head(), before)
+
+    def test_a_local_edit_or_unreachable_origin_keeps_the_old_code(self):
+        cron = self.box / "scripts" / "capacity-cron.sh"
+        cron.write_text(cron.read_text().replace("set -euo pipefail\n", "set -euo pipefail\necho LOCAL-EDIT\n", 1))
+        out = self.pass_()
+        self.assertIn("could not check out", out)
+        self.assertIn("LOCAL-EDIT", out)
+        self.git(self.box, "checkout", "-q", "--", ".")
+        self.git(self.box, "remote", "set-url", "origin", str(self.d / "nowhere"))
+        self.assertIn("could not fetch", self.pass_())
+
+    def test_a_dry_run_never_updates(self):
+        before = self.head()
+        (self.d / "conf" / "apply.env").write_text("DRY_RUN=1\n")
+        self.pass_()
+        self.assertEqual(self.head(), before)
+
 
 if __name__ == "__main__":
     unittest.main()

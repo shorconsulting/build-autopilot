@@ -54,10 +54,11 @@ if [ -f "$CONF/apply.env" ]; then
 fi
 # Self-update: each pass first moves this checkout forward to origin/main, so a merged fix goes live on the next
 # pass with no one logging in to deploy it. Forward only (a local commit or edit is never overwritten: the pass then
-# runs what is here and says so), once per pass (the re-run after an update skips it), and off with AUTO_UPDATE=0.
+# runs what is here and says so), once per pass (the re-run after an update skips it), never on a DRY_RUN pass, and
+# off with AUTO_UPDATE=0. A new script that does not parse is not run: the checkout goes back to the last good one.
 AUTO_UPDATE="${AUTO_UPDATE:-1}"
 ROOT="$(cd "$HERE/.." && pwd)"
-if [ "$AUTO_UPDATE" = 1 ] && [ -z "${CAPACITY_UPDATED:-}" ] && git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+if [ "$AUTO_UPDATE" = 1 ] && [ -z "${CAPACITY_UPDATED:-}" ] && [ -z "${DRY_RUN:-}" ] && git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1; then
   before="$(git -C "$ROOT" rev-parse HEAD)"
   if ! git -C "$ROOT" fetch -q origin main 2>&1; then
     echo "self-update: could not fetch origin main; running $before"
@@ -65,8 +66,13 @@ if [ "$AUTO_UPDATE" = 1 ] && [ -z "${CAPACITY_UPDATED:-}" ] && git -C "$ROOT" re
     echo "self-update: $before is not behind origin/main (a local commit?); running it as it is"
   elif [ "$(git -C "$ROOT" rev-parse FETCH_HEAD)" != "$before" ]; then
     if git -C "$ROOT" checkout -q --detach FETCH_HEAD 2>&1; then
-      echo "self-update: $before -> $(git -C "$ROOT" rev-parse HEAD)"
-      CAPACITY_UPDATED=1 exec bash "$HERE/capacity-cron.sh" "$@"
+      if bash -n "$HERE/capacity-cron.sh"; then
+        echo "self-update: $before -> $(git -C "$ROOT" rev-parse HEAD)"
+        CAPACITY_UPDATED=1 exec bash "$HERE/capacity-cron.sh" "$@"
+      fi
+      # A broken script on main must not strand the box on it: go back and keep running the last good one.
+      echo "self-update: FAILED, $(git -C "$ROOT" rev-parse HEAD) does not parse; staying on $before"
+      git -C "$ROOT" checkout -q --detach "$before"
     fi
     echo "self-update: could not check out origin/main (a local edit, or no write access to $ROOT); running $before"
   fi
