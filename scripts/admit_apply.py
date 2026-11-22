@@ -44,22 +44,26 @@ def looks_started(run):
     return pa.ts(run["updated_at"]) - pa.queued_at(run) > STARTED_AFTER_S
 
 
-def classify(jobs, fail_fast=False):
-    """'stalled' | 'failed' | 'running' | 'started' | 'new' for one run's latest jobs.
-    stalled: a job was cancelled (or timed out) while the run is still open, as GitHub does to a job queued for 24
-    hours. The run can never pass as it is, so its other jobs only waste runners: it is parked at once and comes
-    back later with rerun-failed-jobs, which keeps what passed. With fail_fast, a failed job beats a running one
-    (the run is lost, so its running jobs are freed too)."""
+MAX_STALL_ATTEMPTS = 3  # a run still stalled on its third attempt is left alone as failed, never re-run again
+
+
+def classify(jobs, fail_fast=False, attempt=1):
+    """'failed' | 'stalled' | 'running' | 'started' | 'new' for one run's latest jobs.
+    failed: a job failed or hit its own timeout-minutes (timed_out). A matrix's fail-fast cancels the siblings of a
+    failed job, so a failure always wins over cancelled jobs; with fail_fast it also wins over a running job (the
+    run is lost, so its running jobs are freed), and without it a running job keeps the run as it was.
+    stalled: a job was cancelled while the run is still open and nothing failed, as GitHub does to a job queued for
+    24 hours. The run cannot pass as it is, so its other jobs only waste runners: it is parked at once and comes back
+    with rerun-failed-jobs, which keeps what passed. From attempt MAX_STALL_ATTEMPTS on it counts as failed, so a
+    run whose jobs keep being cancelled is never re-run in a loop."""
     st = [(j.get("status"), j.get("conclusion")) for j in jobs]
-    if any(c in ("cancelled", "timed_out") for _, c in st):
-        return "stalled"
-    failed = any(c == "failure" for _, c in st)
-    if fail_fast and failed:
-        return "failed"
-    if any(s == "in_progress" for s, _ in st):
+    running = any(s == "in_progress" for s, _ in st)
+    if any(c in ("failure", "timed_out") for _, c in st):
+        return "running" if running and not fail_fast else "failed"
+    if any(c == "cancelled" for _, c in st):
+        return "stalled" if attempt < MAX_STALL_ATTEMPTS else "failed"
+    if running:
         return "running"
-    if failed:
-        return "failed"
     if any(s == "completed" for s, _ in st):
         return "started"
     return "new"
@@ -169,7 +173,7 @@ def run(repos, state_path, max_active=8, min_jobs=3, label=pa.LABEL, min_rate=15
                     continue
                 jobs = (data or {}).get("jobs") or []
                 sizes[wid] = max(sizes.get(wid, 0), len(jobs))
-                item["kind"] = classify(jobs, fail_fast)
+                item["kind"] = classify(jobs, fail_fast, int(r.get("run_attempt") or 1))
             runs.append(item)
         for wid in {r["wid"] for r in runs} - set(sizes):
             # No started run of this workflow to size it by: read one of its runs (a run not started may list only

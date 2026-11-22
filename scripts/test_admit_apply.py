@@ -24,7 +24,7 @@ NEW = jobs(("queued", None), ("queued", None), ("queued", None))
 STARTED = jobs(("completed", "success"), ("queued", None), ("queued", None))
 RUNNING = jobs(("completed", "success"), ("in_progress", None), ("queued", None))
 FAILED = jobs(("completed", "failure"), ("queued", None), ("queued", None))
-TIMED_OUT = jobs(("completed", "success"), ("completed", "cancelled"), ("queued", None))  # GitHub's 24 h limit
+TIMED_OUT = jobs(("completed", "success"), ("completed", "cancelled"), ("queued", None))  # queued 24 h: cancelled
 DEAD_RUNNING = jobs(("completed", "cancelled"), ("in_progress", None), ("queued", None))
 FAILED_RUNNING = jobs(("completed", "failure"), ("in_progress", None), ("queued", None))
 
@@ -152,6 +152,28 @@ class Run(unittest.TestCase):
         self.go(api, max_active=5, fail_fast=True)
         self.assertEqual(api.posts(), ["repos/o/a/actions/runs/1/cancel"])
         self.assertNotIn("o/a 1", json.loads(Path(self.state).read_text()))  # failed: not parked for re-run
+
+    def test_a_real_failure_with_cancelled_matrix_siblings_is_never_parked_for_rerun(self):
+        dead = jobs(("completed", "failure"), ("completed", "cancelled"), ("queued", None))
+        hung = jobs(("completed", "timed_out"), ("completed", "success"), ("queued", None))
+        for js in (dead, hung):
+            self.assertEqual(aa.classify(js), "failed")
+            api = Api([run_(1, "2026-11-21T01:00:00Z", started=True)], {1: js})
+            Path(self.state).write_text("{}")
+            self.go(api, max_active=5)
+            self.assertEqual(api.posts(), [])  # fail fast off: left alone
+            self.go(api, max_active=5, fail_fast=True)
+            self.assertEqual(api.posts(), ["repos/o/a/actions/runs/1/cancel"])
+            self.assertEqual(json.loads(Path(self.state).read_text()), {})  # never queued to re-run
+
+    def test_a_run_that_keeps_stalling_stops_being_re_run(self):
+        self.assertEqual(aa.classify(TIMED_OUT, attempt=2), "stalled")
+        self.assertEqual(aa.classify(TIMED_OUT, attempt=aa.MAX_STALL_ATTEMPTS), "failed")
+        r = dict(run_(1, "2026-11-21T01:00:00Z", started=True), run_attempt=aa.MAX_STALL_ATTEMPTS)
+        api = Api([r], {1: TIMED_OUT})
+        self.go(api, max_active=5)
+        self.assertEqual(api.posts(), [])
+        self.assertEqual(json.loads(Path(self.state).read_text()), {})
 
     def test_a_second_pass_with_nothing_new_changes_nothing(self):
         runs = [run_(1, "2026-11-21T01:00:00Z", started=True), run_(2, "2026-11-21T02:00:00Z")]
