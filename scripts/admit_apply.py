@@ -44,13 +44,26 @@ def looks_started(run):
     return pa.ts(run["updated_at"]) - pa.queued_at(run) > STARTED_AFTER_S
 
 
-def classify(jobs):
-    """'running' | 'failed' | 'started' | 'new' for one run's latest jobs."""
+MAX_STALL_ATTEMPTS = 3  # a run still stalled on its third attempt is left alone as failed, never re-run again
+
+
+def classify(jobs, fail_fast=False, attempt=1):
+    """'failed' | 'stalled' | 'running' | 'started' | 'new' for one run's latest jobs.
+    failed: a job failed or hit its own timeout-minutes (timed_out). A matrix's fail-fast cancels the siblings of a
+    failed job, so a failure always wins over cancelled jobs; with fail_fast it also wins over a running job (the
+    run is lost, so its running jobs are freed), and without it a running job keeps the run as it was.
+    stalled: a job was cancelled while the run is still open and nothing failed, as GitHub does to a job queued for
+    24 hours. The run cannot pass as it is, so its other jobs only waste runners: it is parked at once and comes back
+    with rerun-failed-jobs, which keeps what passed. From attempt MAX_STALL_ATTEMPTS on it counts as failed, so a
+    run whose jobs keep being cancelled is never re-run in a loop."""
     st = [(j.get("status"), j.get("conclusion")) for j in jobs]
-    if any(s == "in_progress" for s, _ in st):
+    running = any(s == "in_progress" for s, _ in st)
+    if any(c in ("failure", "timed_out") for _, c in st):
+        return "running" if running and not fail_fast else "failed"
+    if any(c == "cancelled" for _, c in st):
+        return "stalled" if attempt < MAX_STALL_ATTEMPTS else "failed"
+    if running:
         return "running"
-    if any(c == "failure" for _, c in st):
-        return "failed"
     if any(s == "completed" for s, _ in st):
         return "started"
     return "new"
@@ -66,10 +79,11 @@ def decide(runs, places, prio_prs=(), overdue_cap=2):
     stale = [r for r in runs if r["superseded"]]
     live = [r for r in runs if not r["superseded"]]
     failed = [r for r in live if r["kind"] == "failed" and not r.get("parked")]
-    rest = [r for r in live if r["kind"] != "failed" or r.get("parked")]
+    stalled = [r for r in live if r["kind"] == "stalled" and not r.get("parked")]
+    rest = [r for r in live if r["kind"] not in ("failed", "stalled") or r.get("parked")]
     prio = set(prio_prs)
     boosted = {r["id"] for r in sorted((r for r in rest if r.get("overdue")), key=lambda r: (r["q"], r["id"]))[:overdue_cap]}
-    order = {"started": 3, "new": 4, "failed": 4}
+    order = {"started": 3, "stalled": 3, "new": 4, "failed": 4}
 
     def rank(r):
         if r["kind"] == "running":
@@ -82,7 +96,7 @@ def decide(runs, places, prio_prs=(), overdue_cap=2):
             first = order[r["kind"]]
         return (first, r["q"], r["id"])
     rest.sort(key=rank)
-    keep, park = [], []
+    keep, park = [], sorted(stalled, key=lambda r: (r["q"], r["id"]))  # dead as they stand: parked first
     for r in rest:
         (keep if r["kind"] == "running" or len(keep) < places else park).append(r)
     return keep, park, failed, stale
@@ -159,7 +173,7 @@ def run(repos, state_path, max_active=8, min_jobs=3, label=pa.LABEL, min_rate=15
                     continue
                 jobs = (data or {}).get("jobs") or []
                 sizes[wid] = max(sizes.get(wid, 0), len(jobs))
-                item["kind"] = classify(jobs)
+                item["kind"] = classify(jobs, fail_fast, int(r.get("run_attempt") or 1))
             runs.append(item)
         for wid in {r["wid"] for r in runs} - set(sizes):
             # No started run of this workflow to size it by: read one of its runs (a run not started may list only
@@ -258,10 +272,14 @@ def run(repos, state_path, max_active=8, min_jobs=3, label=pa.LABEL, min_rate=15
                 continue  # a parked one is still waiting its turn
             if not budget.ok():
                 break
-            if act(api, dry, repo, r, "cancel", "parked: %d runs ahead are active" % max_active, budget) == 0:
+            why = ("parked: a job was cancelled while it waited (GitHub's 24-hour limit), so it cannot pass as it is"
+                   if r["kind"] == "stalled" else "parked: %d runs ahead are active" % max_active)
+            if act(api, dry, repo, r, "cancel", why, budget) == 0:
                 n_parked += 1
                 if not dry:
-                    parked["%s %d" % (repo, r["id"])] = {"t": now(), "q": r["q"], "kind": r["kind"], "prs": r["prs"],
+                    parked["%s %d" % (repo, r["id"])] = {"t": now(), "q": r["q"],
+                                                         "kind": "started" if r["kind"] == "stalled" else r["kind"],
+                                                         "prs": r["prs"],
                                                          "wid": r["wid"], "name": r["name"]}
                     if state_path:
                         pa.save(state_path, parked)  # each park is recorded at once: a killed pass loses none
