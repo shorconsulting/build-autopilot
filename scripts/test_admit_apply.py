@@ -54,7 +54,7 @@ class Api:
         rid = int(path.split("/actions/runs/")[1].split("/")[0].split("?")[0])
         if path.endswith("/jobs") or "/jobs?" in path:
             return True, {"jobs": self.jobs.get(rid, NEW)}, ""
-        if method == "POST" and path.endswith("/cancel"):
+        if method == "POST" and (path.endswith("/cancel") or path.endswith("/force-cancel")):
             self.runs[rid].update(status="completed", conclusion="cancelled")
             return True, None, ""
         if method == "POST" and ("/rerun" in path):
@@ -150,7 +150,7 @@ class Run(unittest.TestCase):
         self.go(api, max_active=5)
         self.assertEqual(api.posts(), [])  # off: a continue-on-error job may still let it pass
         self.go(api, max_active=5, fail_fast=True)
-        self.assertEqual(api.posts(), ["repos/o/a/actions/runs/1/cancel"])
+        self.assertEqual(api.posts(), ["repos/o/a/actions/runs/1/force-cancel"])
         self.assertNotIn("o/a 1", json.loads(Path(self.state).read_text()))  # failed: not parked for re-run
 
     def test_a_real_failure_with_cancelled_matrix_siblings_is_never_parked_for_rerun(self):
@@ -163,7 +163,7 @@ class Run(unittest.TestCase):
             self.go(api, max_active=5)
             self.assertEqual(api.posts(), [])  # fail fast off: left alone
             self.go(api, max_active=5, fail_fast=True)
-            self.assertEqual(api.posts(), ["repos/o/a/actions/runs/1/cancel"])
+            self.assertEqual(api.posts(), ["repos/o/a/actions/runs/1/force-cancel"])
             self.assertEqual(json.loads(Path(self.state).read_text()), {})  # never queued to re-run
 
     def test_a_run_that_keeps_stalling_stops_being_re_run(self):
@@ -174,6 +174,19 @@ class Run(unittest.TestCase):
         self.go(api, max_active=5)
         self.assertEqual(api.posts(), [])
         self.assertEqual(json.loads(Path(self.state).read_text()), {})
+
+    def test_a_parked_run_kept_open_by_an_always_job_is_force_cancelled_then_admitted(self):
+        Path(self.state).write_text('{"o/a 7": {"t": 0, "q": 1, "kind": "started", "prs": [107], "wid": 1}}')
+        open_run = dict(run_(7, "2026-11-21T00:00:00Z"), status="queued")  # a roll-up job still waits
+        api = Api([open_run], {})
+        api.runs[7]["status"] = "in_progress"  # not in the queued list, not completed: the cancel did not close it
+        self.go(api, max_active=5, now=lambda: 10.0)  # too soon: wait for the plain cancel
+        self.assertEqual(api.posts(), [])
+        self.go(api, max_active=5, now=lambda: aa.FORCE_AFTER_S + 10.0)
+        self.assertEqual(api.posts(), ["repos/o/a/actions/runs/7/force-cancel"])
+        api.calls.clear()
+        self.go(api, max_active=5, now=lambda: aa.FORCE_AFTER_S + 20.0)
+        self.assertEqual(api.posts(), ["repos/o/a/actions/runs/7/rerun-failed-jobs"])
 
     def test_a_second_pass_with_nothing_new_changes_nothing(self):
         runs = [run_(1, "2026-11-21T01:00:00Z", started=True), run_(2, "2026-11-21T02:00:00Z")]
@@ -186,7 +199,7 @@ class Run(unittest.TestCase):
     def test_fail_fast_cancels_a_run_with_a_failed_job_and_never_reruns_it(self):
         api = Api([run_(1, "2026-11-21T01:00:00Z", started=True)], {1: FAILED})
         self.go(api, max_active=5, fail_fast=True)
-        self.assertEqual(api.posts(), ["repos/o/a/actions/runs/1/cancel"])
+        self.assertEqual(api.posts(), ["repos/o/a/actions/runs/1/force-cancel"])
         self.assertEqual(json.loads(Path(self.state).read_text()), {})
 
     def test_a_light_workflow_is_never_shaped(self):
