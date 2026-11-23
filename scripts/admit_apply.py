@@ -34,7 +34,6 @@ import time
 import priority_apply as pa
 
 PARK_FOR_S = 12 * 3600
-FORCE_AFTER_S = 300  # a parked run still open this long after its cancel is force-cancelled
 FORGET_S = 3 * 86400  # a parked run older than this is dropped: its PR has long moved on or closed
 RATE_LIMITED = ("HTTP 429", "rate limit")  # a 403 counts only when its message names the rate limit
 PR_EVENTS = pa.PR_EVENTS
@@ -233,13 +232,6 @@ def run(repos, state_path, max_active=8, min_jobs=3, label=pa.LABEL, min_rate=15
                 print("admit waits: %s run %d (%s)" % (repo, r["id"], err))
                 continue
             if (cur or {}).get("status") != "completed":
-                # Parked but still open: an `if: always()` job outlived the cancel. Force it closed (once the plain
-                # cancel has had FORCE_AFTER_S to land), so the run can be admitted when its turn comes.
-                if now() - parked[key].get("t", 0) > FORCE_AFTER_S and not dry:
-                    okf, _, errf = api("POST", "repos/%s/actions/runs/%d/force-cancel" % (repo, r["id"]))
-                    budget.spend("" if okf else errf)
-                    print("force-cancel %s: %s run %d (parked, still open after its cancel)%s" % (
-                        "ok" if okf else "FAILED", repo, r["id"], "" if okf else " (%s)" % errf))
                 continue  # the cancel has not landed yet
             if (cur or {}).get("conclusion") != "cancelled":
                 # It ran again some other way and finished (or GitHub never applied our cancel): nothing to admit.
@@ -282,7 +274,10 @@ def run(repos, state_path, max_active=8, min_jobs=3, label=pa.LABEL, min_rate=15
                 break
             why = ("parked: a job was cancelled while it waited (GitHub's 24-hour limit), so it cannot pass as it is"
                    if r["kind"] == "stalled" else "parked: %d runs ahead are active" % max_active)
-            if act(api, dry, repo, r, "cancel", why, budget) == 0:
+            # A stalled run already has a cancelled job: either GitHub's 24-hour limit or an earlier park whose plain
+            # cancel an `if: always()` job outlived (the run then shows up queued again). Force it closed so it can
+            # be admitted later; a run someone re-ran by hand is a fresh attempt with no cancelled job, never this.
+            if act(api, dry, repo, r, "cancel", why, budget, force=r["kind"] == "stalled") == 0:
                 n_parked += 1
                 if not dry:
                     parked["%s %d" % (repo, r["id"])] = {"t": now(), "q": r["q"],
@@ -303,7 +298,7 @@ def run(repos, state_path, max_active=8, min_jobs=3, label=pa.LABEL, min_rate=15
 
 
 def act(api, dry, repo, r, what, why, budget=None, force=False):
-    """Cancel one run. force: force-cancel at once. A plain cancel leaves a job with `if: always()` (a roll-up such as
+    """Cancel one run (only repos listed for admission, ADMIT_REPOS, ever get here). force: force-cancel at once. A plain cancel leaves a job with `if: always()` (a roll-up such as
     `test`, which needs every shard) queued, so the run stays open and that job still waits for a runner; a dead run
     gains nothing from it."""
     line = "%s run %d (%s, PR %s): %s" % (repo, r["id"], r.get("name", ""), ",".join("#%d" % n for n in r["prs"]), why)

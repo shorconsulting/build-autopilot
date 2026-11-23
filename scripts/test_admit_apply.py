@@ -133,7 +133,7 @@ class Run(unittest.TestCase):
         runs = [run_(1, "2026-11-21T01:00:00Z", started=True), run_(2, "2026-11-21T02:00:00Z", started=True)]
         api = Api(runs, {1: TIMED_OUT, 2: STARTED})
         self.go(api, max_active=5)
-        self.assertEqual(api.posts(), ["repos/o/a/actions/runs/1/cancel"])
+        self.assertEqual(api.posts(), ["repos/o/a/actions/runs/1/force-cancel"])
         self.assertEqual(json.loads(Path(self.state).read_text())["o/a 1"]["kind"], "started")
         # It comes back with rerun-failed-jobs, which keeps the job that passed.
         api.calls.clear()
@@ -143,7 +143,7 @@ class Run(unittest.TestCase):
     def test_a_dead_run_still_running_a_job_is_stopped_too(self):
         api = Api([run_(1, "2026-11-21T01:00:00Z", started=True)], {1: DEAD_RUNNING})
         self.go(api, max_active=5)
-        self.assertEqual(api.posts(), ["repos/o/a/actions/runs/1/cancel"])
+        self.assertEqual(api.posts(), ["repos/o/a/actions/runs/1/force-cancel"])
 
     def test_fail_fast_frees_the_running_jobs_of_a_failed_run(self):
         api = Api([run_(1, "2026-11-21T01:00:00Z", started=True)], {1: FAILED_RUNNING})
@@ -175,18 +175,30 @@ class Run(unittest.TestCase):
         self.assertEqual(api.posts(), [])
         self.assertEqual(json.loads(Path(self.state).read_text()), {})
 
-    def test_a_parked_run_kept_open_by_an_always_job_is_force_cancelled_then_admitted(self):
-        Path(self.state).write_text('{"o/a 7": {"t": 0, "q": 1, "kind": "started", "prs": [107], "wid": 1}}')
-        open_run = dict(run_(7, "2026-11-21T00:00:00Z"), status="queued")  # a roll-up job still waits
-        api = Api([open_run], {})
-        api.runs[7]["status"] = "in_progress"  # not in the queued list, not completed: the cancel did not close it
-        self.go(api, max_active=5, now=lambda: 10.0)  # too soon: wait for the plain cancel
-        self.assertEqual(api.posts(), [])
-        self.go(api, max_active=5, now=lambda: aa.FORCE_AFTER_S + 10.0)
-        self.assertEqual(api.posts(), ["repos/o/a/actions/runs/7/force-cancel"])
+    def test_a_park_an_always_job_outlived_is_force_cancelled_on_the_next_pass(self):
+        runs = [run_(1, "2026-11-21T01:00:00Z", started=True), run_(2, "2026-11-21T02:00:00Z", started=True)]
+        api = Api(runs, {1: RUNNING, 2: STARTED})
+        self.go(api, max_active=1)
+        self.assertEqual(api.posts(), ["repos/o/a/actions/runs/2/cancel"])
+        # The roll-up job survived the cancel: the run is queued again, its shards cancelled.
+        api.runs[2].update(status="queued", conclusion=None)
+        api.jobs[2] = TIMED_OUT
         api.calls.clear()
-        self.go(api, max_active=5, now=lambda: aa.FORCE_AFTER_S + 20.0)
-        self.assertEqual(api.posts(), ["repos/o/a/actions/runs/7/rerun-failed-jobs"])
+        self.go(api, max_active=1)
+        self.assertEqual(api.posts(), ["repos/o/a/actions/runs/2/force-cancel"])
+        self.assertIn("o/a 2", json.loads(Path(self.state).read_text()))
+
+    def test_a_parked_run_re_run_by_hand_is_never_force_cancelled(self):
+        Path(self.state).write_text('{"o/a 7": {"t": 0, "q": 1, "kind": "started", "prs": [107], "wid": 1}}')
+        r = dict(run_(7, "2026-11-21T00:00:00Z", started=True), run_attempt=2)
+        api = Api([r], {7: RUNNING})  # a fresh attempt: no cancelled job
+        self.go(api, max_active=5, now=lambda: 1000.0)
+        self.assertFalse([p for p in api.posts() if "force-cancel" in p])
+
+    def test_out_of_writes_no_force_cancel_is_sent(self):
+        api = Api([run_(1, "2026-11-21T01:00:00Z", started=True)], {1: TIMED_OUT})
+        self.go(api, max_active=5, max_writes=0)
+        self.assertEqual(api.posts(), [])
 
     def test_a_second_pass_with_nothing_new_changes_nothing(self):
         runs = [run_(1, "2026-11-21T01:00:00Z", started=True), run_(2, "2026-11-21T02:00:00Z")]
