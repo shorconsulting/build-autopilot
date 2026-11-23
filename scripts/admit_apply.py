@@ -34,6 +34,7 @@ import time
 import priority_apply as pa
 
 PARK_FOR_S = 12 * 3600
+FORCE_AFTER_S = 300  # a parked run still open this long after its cancel is force-cancelled
 FORGET_S = 3 * 86400  # a parked run older than this is dropped: its PR has long moved on or closed
 RATE_LIMITED = ("HTTP 429", "rate limit")  # a 403 counts only when its message names the rate limit
 PR_EVENTS = pa.PR_EVENTS
@@ -232,6 +233,13 @@ def run(repos, state_path, max_active=8, min_jobs=3, label=pa.LABEL, min_rate=15
                 print("admit waits: %s run %d (%s)" % (repo, r["id"], err))
                 continue
             if (cur or {}).get("status") != "completed":
+                # Parked but still open: an `if: always()` job outlived the cancel. Force it closed (once the plain
+                # cancel has had FORCE_AFTER_S to land), so the run can be admitted when its turn comes.
+                if now() - parked[key].get("t", 0) > FORCE_AFTER_S and not dry:
+                    okf, _, errf = api("POST", "repos/%s/actions/runs/%d/force-cancel" % (repo, r["id"]))
+                    budget.spend("" if okf else errf)
+                    print("force-cancel %s: %s run %d (parked, still open after its cancel)%s" % (
+                        "ok" if okf else "FAILED", repo, r["id"], "" if okf else " (%s)" % errf))
                 continue  # the cancel has not landed yet
             if (cur or {}).get("conclusion") != "cancelled":
                 # It ran again some other way and finished (or GitHub never applied our cancel): nothing to admit.
@@ -262,9 +270,9 @@ def run(repos, state_path, max_active=8, min_jobs=3, label=pa.LABEL, min_rate=15
                     print("forgotten: %s run %d (GitHub refuses to re-run it)" % (repo, r["id"]))
         for r in failed:
             if budget.ok():
-                failed_calls += act(api, dry, repo, r, "cancel", "fail fast: a job already failed", budget)
+                failed_calls += act(api, dry, repo, r, "cancel", "fail fast: a job already failed", budget, force=True)
         for r in stale:
-            if budget.ok() and act(api, dry, repo, r, "cancel", "superseded: its PR has a newer head", budget) == 0:
+            if budget.ok() and act(api, dry, repo, r, "cancel", "superseded: its PR has a newer head", budget, force=True) == 0:
                 parked.pop("%s %d" % (repo, r["id"]), None)
         n_parked = 0
         for r in park:
@@ -294,15 +302,20 @@ def run(repos, state_path, max_active=8, min_jobs=3, label=pa.LABEL, min_rate=15
     return 1 if failed_calls else 0
 
 
-def act(api, dry, repo, r, what, why, budget=None):
+def act(api, dry, repo, r, what, why, budget=None, force=False):
+    """Cancel one run. force: force-cancel at once. A plain cancel leaves a job with `if: always()` (a roll-up such as
+    `test`, which needs every shard) queued, so the run stays open and that job still waits for a runner; a dead run
+    gains nothing from it."""
     line = "%s run %d (%s, PR %s): %s" % (repo, r["id"], r.get("name", ""), ",".join("#%d" % n for n in r["prs"]), why)
     if dry:
-        print("would %s: %s" % (what, line))
+        print("would %s: %s" % ("force-" + what if force else what, line))
         return 0
-    ok, _, err = api("POST", "repos/%s/actions/runs/%d/cancel" % (repo, r["id"]))
-    if budget:
-        budget.spend("" if ok else err)
-    if not ok and "409" in err and (budget is None or budget.ok()):
+    ok, err = False, ""
+    if not force:
+        ok, _, err = api("POST", "repos/%s/actions/runs/%d/cancel" % (repo, r["id"]))
+        if budget:
+            budget.spend("" if ok else err)
+    if force or (not ok and "409" in err and (budget is None or budget.ok())):
         ok, _, err = api("POST", "repos/%s/actions/runs/%d/force-cancel" % (repo, r["id"]))
         if budget:
             budget.spend("" if ok else err)
