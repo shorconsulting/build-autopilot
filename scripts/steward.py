@@ -236,13 +236,21 @@ class Sweeper:
 
     def main_state(self, repo, branch):
         """The default branch is red when the latest push run of any workflow on it failed. Check runs on main's
-        commit are not used: review and retry bots attach their own results there."""
+        commit are not used: review and retry bots attach their own results there.
+
+        Only workflows that still exist and are enabled count. A workflow file that was deleted, disabled or never
+        parsed (GitHub records a nameless "startup_failure" run for a broken file, then marks the workflow deleted)
+        never runs again, so its last failure would otherwise keep main red forever."""
         runs = (api("repos/%s/actions/runs?branch=%s&event=push&status=completed&per_page=100" % (repo, branch))
                 or {}).get("workflow_runs", [])
+        workflows = (api("repos/%s/actions/workflows?per_page=100" % repo) or {}).get("workflows") or []
+        active = {w.get("id") for w in workflows if w.get("state") == "active"}
         latest, history = {}, {}
         for run in runs:  # newest first
             if run.get("conclusion") in ("cancelled", "skipped"):
                 continue
+            if active and run.get("workflow_id") is not None and run["workflow_id"] not in active:
+                continue  # its workflow is gone or switched off: it cannot go green again
             latest.setdefault(run.get("name"), run)
             history.setdefault(run.get("name"), []).append(run)
         failed = sorted(n for n, r in latest.items() if r.get("conclusion") in FAILED)
