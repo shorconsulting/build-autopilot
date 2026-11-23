@@ -38,8 +38,9 @@ def pr(n, sha, base="main", head=None, draft=False, created="2026-11-10T00:00:00
 class FakeGitHub:
     """Answers the REST paths the steward reads, from dictionaries."""
 
-    def __init__(self, pulls, checks, jobs=None, mergeable=None, main_runs=(), wip=(), runs=()):
+    def __init__(self, pulls, checks, jobs=None, mergeable=None, main_runs=(), wip=(), runs=(), workflows=()):
         self.pulls, self.checks, self.jobs = pulls, checks, jobs or {}
+        self.workflows = list(workflows)
         self.mergeable, self.main_runs, self.wip, self.runs = mergeable or {}, list(main_runs), list(wip), list(runs)
         self.calls, self.closed, self.attempts = [], [], {}
 
@@ -59,6 +60,8 @@ class FakeGitHub:
             return {"check_runs": self.checks.get(base.split("/")[-2], [])}
         if base.startswith("repos/%s/actions/jobs/" % REPO):
             return self.jobs.get(int(base.rsplit("/", 1)[1]), {})
+        if base == "repos/%s/actions/workflows" % REPO:
+            return {"workflows": self.workflows}
         if base == "repos/%s/actions/runs" % REPO:
             if "event=push" in path:
                 return {"workflow_runs": self.main_runs}
@@ -133,6 +136,26 @@ class Sweep(unittest.TestCase):
         self.assertEqual(rep["main"]["red_hours"], 6.0)
         self.assertEqual(acts[0]["do"], "fix-main")
         self.assertTrue(acts[0]["needs_person"])  # over main_red_hours
+
+    def test_a_deleted_workflows_last_failure_does_not_keep_main_red(self):
+        # A broken workflow file leaves one nameless startup_failure run, then GitHub marks the workflow deleted.
+        main_runs = [{"name": "CI", "workflow_id": 1, "conclusion": "success", "created_at": "2026-11-15T18:00:00Z"},
+                     {"name": "", "workflow_id": 9, "conclusion": "startup_failure",
+                      "created_at": "2026-11-10T10:00:00Z"},
+                     {"name": "Old", "workflow_id": 8, "conclusion": "failure", "created_at": "2026-11-09T10:00:00Z"},
+                     {"name": "CI", "workflow_id": 1, "conclusion": "failure", "created_at": "2026-11-09T09:00:00Z"}]
+        workflows = [{"id": 1, "name": "CI", "state": "active"}, {"id": 8, "name": "Old", "state": "disabled_manually"}]
+        rep, acts = self.sweep(FakeGitHub(pulls=[], checks={}, main_runs=main_runs, workflows=workflows))
+        self.assertEqual(rep["main"]["state"], "green")
+        self.assertEqual(rep["main"]["failed"], [])
+        self.assertIsNone(rep["main"]["red_hours"])
+        self.assertNotIn("fix-main", [a["do"] for a in acts])
+
+    def test_an_active_workflow_still_turns_main_red(self):
+        main_runs = [{"name": "CI", "workflow_id": 1, "conclusion": "failure", "created_at": "2026-11-15T18:00:00Z"}]
+        workflows = [{"id": 1, "name": "CI", "state": "active"}]
+        rep, _ = self.sweep(FakeGitHub(pulls=[], checks={}, main_runs=main_runs, workflows=workflows))
+        self.assertEqual(rep["main"]["failed"], ["CI"])
 
     def test_health_line_counts_flaky_jobs_and_merges(self):
         runs = [({"id": 5, "name": "CI", "run_attempt": 2, "conclusion": "success"}, [job(50, "hph-ci-1")])]
