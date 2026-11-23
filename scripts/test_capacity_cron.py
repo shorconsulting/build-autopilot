@@ -51,5 +51,86 @@ class CronOrder(unittest.TestCase):
         self.assertFalse([c for c in calls if c[1:] != ["tokA"]])
 
 
+class SelfUpdate(unittest.TestCase):
+    """The pass moves its checkout forward to origin/main, then runs the new code."""
+
+    def git(self, cwd, *a):
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *a], cwd=cwd, check=True,
+                       capture_output=True)
+
+    def setUp(self):
+        self.d = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.d)
+        origin, self.box = self.d / "origin", self.d / "box"
+        (origin / "scripts").mkdir(parents=True)
+        shutil.copy(HERE / "capacity-cron.sh", origin / "scripts" / "capacity-cron.sh")
+        self.git(origin, "init", "-q", "-b", "main")
+        self.git(origin, "add", ".")
+        self.git(origin, "commit", "-q", "-m", "one")
+        self.git(self.d, "clone", "-q", str(origin), str(self.box))
+        # origin moves on: the new version marks that it ran.
+        cron = origin / "scripts" / "capacity-cron.sh"
+        cron.write_text(cron.read_text().replace("set -euo pipefail\n", "set -euo pipefail\necho NEW-CODE-RAN\n", 1))
+        self.git(origin, "commit", "-q", "-am", "two")
+        self.new = subprocess.run(["git", "rev-parse", "HEAD"], cwd=origin, capture_output=True, text=True).stdout.strip()
+        conf = self.d / "conf"
+        conf.mkdir()
+        (conf / "repos").write_text("")
+        self.env = dict(os.environ, CAPACITY_CONF=str(conf), CAPACITY_STATE=str(self.d / "state"))
+
+    def pass_(self, **env):
+        return subprocess.run(["bash", str(self.box / "scripts" / "capacity-cron.sh")], env=dict(self.env, **env),
+                              capture_output=True, text=True, check=True).stdout
+
+    def head(self):
+        return subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.box, capture_output=True, text=True).stdout.strip()
+
+    def test_a_pass_updates_to_main_and_runs_the_new_code(self):
+        out = self.pass_()
+        self.assertIn("self-update:", out)
+        self.assertIn("NEW-CODE-RAN", out)
+        self.assertEqual(self.head(), self.new)
+        self.assertNotIn("self-update:", self.pass_())  # up to date: nothing to say
+
+    def test_off_with_auto_update_0(self):
+        (self.d / "conf" / "apply.env").write_text("AUTO_UPDATE=0\n")
+        out = self.pass_()
+        self.assertNotIn("NEW-CODE-RAN", out)
+        self.assertNotEqual(self.head(), self.new)
+
+    def test_a_local_commit_is_never_overwritten(self):
+        self.git(self.box, "commit", "-q", "--allow-empty", "-m", "local")
+        mine = self.head()
+        out = self.pass_()
+        self.assertIn("not behind origin/main", out)
+        self.assertEqual(self.head(), mine)
+
+    def test_a_main_that_does_not_parse_is_rolled_back(self):
+        origin = self.d / "origin"
+        cron = origin / "scripts" / "capacity-cron.sh"
+        cron.write_text(cron.read_text() + "\nif then\n")
+        self.git(origin, "commit", "-q", "-am", "broken")
+        before = self.head()
+        out = self.pass_()
+        self.assertIn("does not parse", out)
+        self.assertEqual(self.head(), before)
+
+    def test_a_local_edit_or_unreachable_origin_keeps_the_old_code(self):
+        cron = self.box / "scripts" / "capacity-cron.sh"
+        cron.write_text(cron.read_text().replace("set -euo pipefail\n", "set -euo pipefail\necho LOCAL-EDIT\n", 1))
+        out = self.pass_()
+        self.assertIn("could not check out", out)
+        self.assertIn("LOCAL-EDIT", out)
+        self.git(self.box, "checkout", "-q", "--", ".")
+        self.git(self.box, "remote", "set-url", "origin", str(self.d / "nowhere"))
+        self.assertIn("could not fetch", self.pass_())
+
+    def test_a_dry_run_never_updates(self):
+        before = self.head()
+        (self.d / "conf" / "apply.env").write_text("DRY_RUN=1\n")
+        self.pass_()
+        self.assertEqual(self.head(), before)
+
+
 if __name__ == "__main__":
     unittest.main()

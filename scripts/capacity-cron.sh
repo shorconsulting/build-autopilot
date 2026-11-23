@@ -8,7 +8,8 @@
 #   <Owner>.token   otherwise: a fine-grained GitHub token for that org (mode 600). A person's tokens all share
 #                   that person's 5,000-calls-an-hour limit.
 #   repos           one owner/repo per line (# comments allowed)
-#   apply.env       optional: SLOT_REGEX and RESTART (see capacity_apply.py) for this box's own runners, and STOP
+#   apply.env       optional: AUTO_UPDATE=0 (each pass updates its own checkout from origin/main unless this is set),
+#                   SLOT_REGEX and RESTART (see capacity_apply.py) for this box's own runners, and STOP
 #                   (the stop command for a paused slot; default: RESTART with --stop when it is restart-runner-slot),
 #                   DRY_RUN=1 to only print what it would do (do one dry pass first),
 #                   SWEEP_EVERY_MIN (default 30; 0 = off): how often to also re-run checks that failed before the
@@ -50,6 +51,31 @@ ADMIT_FAIL_FAST=""
 if [ -f "$CONF/apply.env" ]; then
   # shellcheck disable=SC1091
   . "$CONF/apply.env"
+fi
+# Self-update: each pass first moves this checkout forward to origin/main, so a merged fix goes live on the next
+# pass with no one logging in to deploy it. Forward only (a local commit or edit is never overwritten: the pass then
+# runs what is here and says so), once per pass (the re-run after an update skips it), never on a DRY_RUN pass, and
+# off with AUTO_UPDATE=0. A new script that does not parse is not run: the checkout goes back to the last good one.
+AUTO_UPDATE="${AUTO_UPDATE:-1}"
+ROOT="$(cd "$HERE/.." && pwd)"
+if [ "$AUTO_UPDATE" = 1 ] && [ -z "${CAPACITY_UPDATED:-}" ] && [ -z "${DRY_RUN:-}" ] && git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+  before="$(git -C "$ROOT" rev-parse HEAD)"
+  if ! git -C "$ROOT" fetch -q origin main 2>&1; then
+    echo "self-update: could not fetch origin main; running $before"
+  elif ! git -C "$ROOT" merge-base --is-ancestor HEAD FETCH_HEAD; then
+    echo "self-update: $before is not behind origin/main (a local commit?); running it as it is"
+  elif [ "$(git -C "$ROOT" rev-parse FETCH_HEAD)" != "$before" ]; then
+    if git -C "$ROOT" checkout -q --detach FETCH_HEAD 2>&1; then
+      if bash -n "$HERE/capacity-cron.sh"; then
+        echo "self-update: $before -> $(git -C "$ROOT" rev-parse HEAD)"
+        CAPACITY_UPDATED=1 exec bash "$HERE/capacity-cron.sh" "$@"
+      fi
+      # A broken script on main must not strand the box on it: go back and keep running the last good one.
+      echo "self-update: FAILED, $(git -C "$ROOT" rev-parse HEAD) does not parse; staying on $before"
+      git -C "$ROOT" checkout -q --detach "$before"
+    fi
+    echo "self-update: could not check out origin/main (a local edit, or no write access to $ROOT); running $before"
+  fi
 fi
 # The stop command for pause-slot: STOP in apply.env, or, when RESTART is the restart-runner-slot helper (which
 # takes --stop), the same helper with --stop. Any other RESTART and no STOP: slots are never paused.
