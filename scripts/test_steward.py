@@ -124,7 +124,8 @@ class Sweep(unittest.TestCase):
         rep, acts = self.sweep(FakeGitHub(pulls=[], checks={}, runs=bad))
         self.assertEqual(rep["runners"], [])
         self.assertNotIn("fix-runner", [a["do"] for a in acts])
-        for name in ("Run actions/checkout@v4", "Run actions/setup-node@v4", "Run git fetch --depth 1 origin main",
+        for name in ("Run actions/checkout@v4", "Run actions/setup-node@v4", "Run actions/cache/restore@v4", "Run pnpm/action-setup@v4",
+                     "Run docker/setup-buildx-action@v3", "Run git fetch --depth 1 origin main",
                      "Checkout", "Set up job", "Download artifact"):
             self.assertTrue(steward.infra_step(name), name)
         for name in (step, "Run npm test", "Run npm run typecheck", "Run ./scripts/fetch-fixtures-and-test.sh", ""):

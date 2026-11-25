@@ -46,7 +46,7 @@ INFRA_STEP = re.compile(r"checkout|set up job|setup|set-up|download|cache|runner
 # An unnamed script step is called "Run <first line of the script>", and that line is often a comment about the
 # machine ("# Self-hosted since #2654: six Linux runner containers ..."), so the words above say nothing about it.
 # Such a step is the machine's only when it runs an action that prepares the job or a plain git fetch or clone.
-INFRA_RUN_STEP = re.compile(r"^Run (actions/(checkout|cache|download-artifact|setup-[\w-]+)@|git (fetch|clone)\b)", re.I)
+INFRA_RUN_STEP = re.compile(r"^Run (actions/(checkout|cache(/\w+)?|download-artifact)@|[\w.-]+/(setup-[\w-]+|[\w-]+-setup|action-setup|setup)@|git (fetch|clone)\b)", re.I)
 
 
 def infra_step(step):
