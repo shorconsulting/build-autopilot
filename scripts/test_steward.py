@@ -116,6 +116,20 @@ class Sweep(unittest.TestCase):
         self.assertEqual(acts[0]["do"], "fix-runner")
         self.assertFalse(acts[0]["needs_person"])  # the steward repairs runners itself
 
+    def test_a_script_step_whose_comment_names_the_runner_is_the_code(self):
+        # SConsInc/ranch-rides, 25 Nov 2026: the test step is unnamed, so GitHub calls it "Run <its first line>", a
+        # comment about the runners. Its real test failures were read as machine failures: re-runs, broken runners.
+        step = "Run # Self-hosted since #2654: six Linux runner containers share the Mac Mini's 12 CPUs, and"
+        bad = [({"id": 100 + i, "name": "CI"}, [job(200 + i, "dind-1", "failure", step=step)]) for i in range(3)]
+        rep, acts = self.sweep(FakeGitHub(pulls=[], checks={}, runs=bad))
+        self.assertEqual(rep["runners"], [])
+        self.assertNotIn("fix-runner", [a["do"] for a in acts])
+        for name in ("Run actions/checkout@v4", "Run actions/setup-node@v4", "Run git fetch --depth 1 origin main",
+                     "Checkout", "Set up job", "Download artifact"):
+            self.assertTrue(steward.infra_step(name), name)
+        for name in (step, "Run npm test", "Run npm run typecheck", "Run ./scripts/fetch-fixtures-and-test.sh", ""):
+            self.assertFalse(steward.infra_step(name), name)
+
     def test_a_runner_that_also_passes_is_not_broken(self):
         runs = [({"id": 1, "name": "CI"}, [job(1, "mini-1", "failure", step="Checkout"), job(2, "mini-1"),
                                            job(3, "mini-1", "failure", step="Checkout"),

@@ -43,6 +43,19 @@ RULES_PATH = os.path.join(os.path.dirname(HERE), "rules", "build-rules.json")
 FAILED = ("failure", "timed_out", "startup_failure", "action_required")
 # A job that failed in one of these steps never ran the code under test: the machine, not the change, is at fault.
 INFRA_STEP = re.compile(r"checkout|set up job|setup|set-up|download|cache|runner|clone|fetch", re.I)
+# An unnamed script step is called "Run <first line of the script>", and that line is often a comment about the
+# machine ("# Self-hosted since #2654: six Linux runner containers ..."), so the words above say nothing about it.
+# Such a step is the machine's only when it runs an action that prepares the job or a plain git fetch or clone.
+INFRA_RUN_STEP = re.compile(r"^Run (actions/(checkout|cache|download-artifact|setup-[\w-]+)@|git (fetch|clone)\b)", re.I)
+
+
+def infra_step(step):
+    """True when a failed step's name says it never got to the code under test (checkout, setup, a download)."""
+    if not step:
+        return False
+    if step.startswith("Run "):
+        return bool(INFRA_RUN_STEP.search(step))
+    return bool(INFRA_STEP.search(step))
 
 
 class GhError(RuntimeError):
@@ -140,7 +153,7 @@ class Sweeper:
             return False
         job = self.job(repo, jid)
         step = self.failed_step(job)
-        return bool(step) and bool(INFRA_STEP.search(step))
+        return infra_step(step)
 
     def checks(self, repo, sha, classify=True):
         runs = (api("repos/%s/commits/%s/check-runs?per_page=100" % (repo, sha)) or {}).get("check_runs", [])
@@ -226,7 +239,7 @@ class Sweeper:
             tally = per.setdefault(name, {"infra_failures": 0, "successes": 0, "last_seen": None})
             if job.get("conclusion") == "success":
                 tally["successes"] += 1
-            elif job.get("conclusion") in FAILED and INFRA_STEP.search(self.failed_step(job)):
+            elif job.get("conclusion") in FAILED and infra_step(self.failed_step(job)):
                 tally["infra_failures"] += 1
                 tally["sample_step"] = self.failed_step(job)
             tally["last_seen"] = max(filter(None, [tally["last_seen"], job.get("completed_at")]), default=None)
